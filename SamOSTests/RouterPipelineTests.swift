@@ -328,6 +328,40 @@ final class RouterPipelineTests: XCTestCase {
         KeychainStore.delete(forKey: testKey, service: testService)
     }
 
+    // MARK: - K0) Tool step with say produces both say AND tool result in appendedChat
+
+    @MainActor
+    func testToolStepWithSayProducesBothMessages() async {
+        // get_time plan with say — should produce 2 assistant messages:
+        // 1) "Let me check." (step say)
+        // 2) "It's X:XX AM/PM." (tool structured spoken)
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTimePlanJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("what time is it in London", history: [])
+
+        let assistantMessages = result.appendedChat.filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 2,
+                       "Should have 2 assistant messages: say + tool result, got: \(assistantMessages.map(\.text))")
+        XCTAssertEqual(assistantMessages[0].text, "Let me check.",
+                       "First message should be the step say")
+        XCTAssertTrue(assistantMessages[1].text.contains("It's"),
+                      "Second message should be the time result, got: \(assistantMessages[1].text)")
+        XCTAssertEqual(result.spokenLines.count, 2,
+                       "Should have 2 spoken lines")
+    }
+
     // MARK: - K) Malformed show_text JSON salvaged as show_text tool
 
     @MainActor

@@ -12,8 +12,18 @@ final class TTSService {
 
     private var player: AVAudioPlayer?
     private var speakTask: Task<Void, Never>?
+    private var speechQueue: [(text: String, mode: SpeechMode)] = []
 
     private init() {}
+
+    /// Enqueues multiple lines for sequential playback.
+    /// Cancels any in-progress speech first, then plays each line in order.
+    func enqueue(_ lines: [String], mode: SpeechMode = .answer) {
+        guard !lines.isEmpty else { return }
+        stopSpeaking()
+        speechQueue = lines.map { (text: $0, mode: mode) }
+        drainQueue()
+    }
 
     /// Speaks the given text using ElevenLabs TTS.
     /// - Parameters:
@@ -70,8 +80,9 @@ final class TTSService {
         }
     }
 
-    /// Immediately stops any current speech playback.
+    /// Immediately stops any current speech playback and clears the queue.
     func stopSpeaking() {
+        speechQueue.removeAll()
         speakTask?.cancel()
         speakTask = nil
         player?.stop()
@@ -108,8 +119,8 @@ final class TTSService {
             audioPlayer.delegate = PlaybackDelegate.shared
             PlaybackDelegate.shared.onFinish = { [weak self] in
                 Task { @MainActor in
-                    self?.isSpeaking = false
                     self?.cleanupTempFile()
+                    self?.drainQueue()
                 }
             }
             audioPlayer.prepareToPlay()
@@ -119,6 +130,7 @@ final class TTSService {
         } catch {
             print("[TTSService] Failed to play audio: \(error)")
             cleanupTempFile()
+            drainQueue()
         }
     }
 
@@ -127,6 +139,16 @@ final class TTSService {
             try? FileManager.default.removeItem(at: url)
             tempFileURL = nil
         }
+    }
+
+    /// Speaks the next item in the queue, or marks speech as finished.
+    private func drainQueue() {
+        guard !speechQueue.isEmpty else {
+            isSpeaking = false
+            return
+        }
+        let next = speechQueue.removeFirst()
+        speak(next.text, mode: next.mode, interrupt: false)
     }
 }
 

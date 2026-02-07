@@ -301,9 +301,7 @@ final class AppState: ObservableObject {
         outputItems.append(contentsOf: result.appendedOutputs)
         pendingSlot = orchestrator.pendingSlot
 
-        for line in result.spokenLines {
-            TTSService.shared.speak(line)
-        }
+        TTSService.shared.enqueue(result.spokenLines)
 
         if result.triggerFollowUpCapture && isListeningEnabled {
             awaitingUserReply = true
