@@ -162,9 +162,13 @@ final class PlanExecutor {
                         }
                         return result // Stop further steps
                     } else if let structured = parseStructuredPayload(output.payload) {
-                        let spoken = say ?? structured.spoken
-                        result.chatMessages.append(ChatMessage(role: .assistant, text: spoken))
-                        result.spokenLines.append(spoken)
+                        if let say = say {
+                            result.chatMessages.append(ChatMessage(role: .assistant, text: say))
+                            result.spokenLines.append(say)
+                        }
+                        // Always speak the tool result so the user hears the answer
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
+                        result.spokenLines.append(structured.spoken)
                         result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
                     } else {
                         if let say = say {

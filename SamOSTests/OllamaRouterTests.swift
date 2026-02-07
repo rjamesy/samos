@@ -956,8 +956,8 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
         return (executor, mock)
     }
 
-    /// When a tool step has `say`, PlanExecutor should speak that — not the tool's structured spoken.
-    func testStepSayTakesPriorityOverStructuredSpoken() async {
+    /// When a tool step has `say`, Sam speaks say first, then the tool result.
+    func testStepSaySpokenFirstThenToolResult() async {
         let (executor, _) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "get_time", args: ["place": .string("Sydney")], say: "Let me check the time in Sydney.")
@@ -965,16 +965,20 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
         let result = await executor.execute(plan, originalInput: "what time is it in sydney")
 
         // MockToolsRuntime returns {"spoken":"mock result","formatted":"mock"}
-        // The step say should win over "mock result"
-        XCTAssertEqual(result.spokenLines.first, "Let me check the time in Sydney.",
-                       "Step say should be spoken, not the structured payload's spoken")
-        XCTAssertEqual(result.chatMessages.first?.text, "Let me check the time in Sydney.",
-                       "Chat message should use step say")
+        // Should speak say first, then the tool's spoken result
+        XCTAssertEqual(result.spokenLines.count, 2, "Should have 2 spoken lines: say + tool result")
+        XCTAssertEqual(result.spokenLines[0], "Let me check the time in Sydney.",
+                       "First spoken line should be the step say")
+        XCTAssertEqual(result.spokenLines[1], "mock result",
+                       "Second spoken line should be the tool's structured spoken")
+        XCTAssertEqual(result.chatMessages.count, 2)
+        XCTAssertEqual(result.chatMessages[0].text, "Let me check the time in Sydney.")
+        XCTAssertEqual(result.chatMessages[1].text, "mock result")
         XCTAssertEqual(result.outputItems.first?.kind, .markdown,
                        "Structured formatted should still go to output canvas")
     }
 
-    /// When a tool step has no `say`, PlanExecutor should fall back to structured spoken.
+    /// When a tool step has no `say`, Sam speaks only the tool result.
     func testStructuredSpokenUsedWhenNoStepSay() async {
         let (executor, _) = makeExecutor()
         let plan = Plan(steps: [
@@ -982,6 +986,7 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
         ])
         let result = await executor.execute(plan, originalInput: "time in london")
 
+        XCTAssertEqual(result.spokenLines.count, 1, "Should have 1 spoken line: tool result only")
         XCTAssertEqual(result.spokenLines.first, "mock result",
                        "Without step say, structured spoken should be used")
         XCTAssertEqual(result.chatMessages.first?.text, "mock result")
