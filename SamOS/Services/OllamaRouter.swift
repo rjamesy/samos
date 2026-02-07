@@ -763,6 +763,11 @@ final class OllamaRouter {
         - For general conversation, greetings, opinions, jokes, factual questions → use TALK.
         - NEVER call start_skillforge unless the user explicitly asked to learn or you are confirming learn_confirm/batch_confirm. Time, weather, and general knowledge questions are NOT learning requests.
 
+        ## TOOL PAYLOAD LIMITS
+        - For show_text, keep args.markdown under ~1200 characters.
+        - Prefer concise content (ingredients + short steps). Offer "Want the longer version?" instead of huge text.
+        - ALWAYS return complete, valid JSON with closed quotes and braces. Never cut off mid-string.
+
         ## CANVAS CONTENT POLICY
         - If user asks for a recipe, instructions, how-to, list, or structured content → MUST use TOOL show_text with markdown in args.
         - If user asks for a picture, photo, or image → MUST use TOOL show_image with direct image URL in args.

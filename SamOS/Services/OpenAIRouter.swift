@@ -74,7 +74,7 @@ struct RealOpenAITransport: OpenAITransport {
             "model": model,
             "messages": messages,
             "temperature": 0.4,
-            "max_tokens": 192,
+            "max_tokens": 768,
             "response_format": Self.responseFormat
         ]
 
@@ -326,6 +326,11 @@ final class OpenAIRouter {
         ## PLAN Policy
         - Use PLAN for any tool usage or when info is missing (ask step).
         - PLAN steps must be objects: {"step":"talk|tool|ask|delegate",...}
+
+        ## Tool Payload Limits
+        - For show_text, keep args.markdown under ~1200 characters.
+        - Prefer concise content (ingredients + short steps). Offer "Want the longer version?" instead of huge text.
+        - ALWAYS return complete, valid JSON with closed quotes and braces. Never cut off mid-string.
 
         ## Critical Rules
         - Output ONLY one valid JSON object with a required "action" field.
