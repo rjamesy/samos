@@ -517,6 +517,15 @@ final class OllamaRouter {
             dict["args"] = args
         }
 
+        // Case 4: CAPABILITY_GAP missing required fields — inject defaults
+        if actionRaw == "capability_gap" {
+            if dict["goal"] == nil { dict["goal"] = "unknown" }
+            if dict["missing"] == nil { dict["missing"] = "unknown" }
+            if dict["say"] == nil {
+                dict["say"] = "I'm not sure how to help with that yet — can you try rephrasing?"
+            }
+        }
+
         return dict
     }
 

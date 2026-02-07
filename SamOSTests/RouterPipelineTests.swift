@@ -499,4 +499,37 @@ final class RouterPipelineTests: XCTestCase {
             XCTFail("Should not throw — should be salvaged: \(error)")
         }
     }
+
+    // MARK: - O) CAPABILITY_GAP without fields becomes TALK
+
+    @MainActor
+    func testCapabilityGapWithoutMessageBecomesTalk() async {
+        let bareGap = """
+        {"action":"CAPABILITY_GAP"}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(bareGap)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("do something impossible", history: [])
+
+        let assistantMessages = result.appendedChat.filter { $0.role == .assistant }
+        XCTAssertFalse(assistantMessages.isEmpty, "Should have an assistant message")
+
+        let text = assistantMessages.first?.text ?? ""
+        XCTAssertFalse(text.contains("trouble"), "Should NOT be the generic 'trouble processing' error")
+        XCTAssertFalse(text.contains("{"), "Should NOT contain raw JSON")
+        XCTAssertTrue(text.contains("not sure") || text.contains("rephras"),
+                      "Should contain the default capability gap message, got: \(text)")
+    }
 }
