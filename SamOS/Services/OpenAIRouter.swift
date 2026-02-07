@@ -73,7 +73,7 @@ struct RealOpenAITransport: OpenAITransport {
         let requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": 0.4,
             "max_tokens": 192,
             "response_format": Self.responseFormat
         ]
@@ -265,6 +265,16 @@ final class OpenAIRouter {
         - Warm, casual, concise. Sound like a real person, not a robot.
         - Keep spoken responses short — one to two sentences.
         - Use contractions and informal phrasing.
+
+        ## Anti-Repetition
+        - Never reuse the same greeting or phrase verbatim within the last 10 assistant messages.
+        - For greetings ("hi", "hello", "hey"), pick a different short response each time.
+        - Keep it casual, 1 sentence max unless the user asks more.
+        - Avoid "How can I assist you today?" style corporate lines.
+        - Example greetings to rotate naturally:
+          "Hey! What's up?" / "Hi, how's your day going?" / "Hey there — what can I do for you?" /
+          "Hello! Need a hand with anything?" / "Hey! How can I help?" / "Hi! What are we doing today?" /
+          "What's going on?" / "Hey hey — what do you need?"
 
         ## Available Tools
         \(toolDescriptions)

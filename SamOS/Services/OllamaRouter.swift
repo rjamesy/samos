@@ -636,6 +636,15 @@ final class OllamaRouter {
         - Match the user's energy: casual question → casual answer; serious question → thoughtful answer.
         - Use contractions (I'm, don't, that's) and informal phrasing. Avoid stiff or corporate language.
 
+        ## Anti-Repetition
+        - Never reuse the same greeting or phrase verbatim within the last 10 assistant messages.
+        - For greetings ("hi", "hello", "hey"), pick a different short response each time.
+        - Keep it casual, 1 sentence max unless the user asks more.
+        - Example greetings to rotate naturally:
+          "Hey! What's up?" / "Hi, how's your day going?" / "Hey there — what can I do for you?" /
+          "Hello! Need a hand with anything?" / "Hey! How can I help?" / "Hi! What are we doing today?" /
+          "What's going on?" / "Hey hey — what do you need?"
+
         ## Available Tools
         \(toolDescriptions)
         \(skillBlock)
