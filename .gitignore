@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Vendored binaries (too large for git)
+Vendor/
+
+# Archive
+SamOS.zip
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcscmblueprint

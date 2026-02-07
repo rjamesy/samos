@@ -1,0 +1,814 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		21A54DC032EA5D65B23371B3 /* SamOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C940048EF2AE6339FE371742 /* SamOSApp.swift */; };
+		9663987A0946F4CF44F079AC /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CE3C2C5D8841CA8F3E4CCA4 /* ChatMessage.swift */; };
+		F90569FF63928B21B354F40B /* OutputItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43D1DDDFDCC8CAFA58DFC51B /* OutputItem.swift */; };
+		E2595C1AC05EFD410C94B874 /* Action.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E973015A0A86B8F48B01F4 /* Action.swift */; };
+		C9253E5E6B69386990F4CD26 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FBCF656B0C1D7DF5C21FDEA /* AppState.swift */; };
+		FDA8CE0F4300887B0F9B4944 /* MockRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FC138EDD9EAAABC3B51985C /* MockRouter.swift */; };
+		6B4B8001C817C969EE8F4459 /* ToolRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69A25B06B46BE70C708BE396 /* ToolRegistry.swift */; };
+		92BC0A34AD23F17D5F9B4179 /* ToolsRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB3B246CD1012A617740FF07 /* ToolsRuntime.swift */; };
+		199FC899BE6E9922D45723A8 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8591F5CCD55ED3757992E6D /* MainView.swift */; };
+		9C24C06BDC273D9596ED3802 /* ChatPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB1BCEE0B1E9CA2036DAE69D /* ChatPaneView.swift */; };
+		ABB58215C2CD3EF3B6911E99 /* OutputCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */; };
+		075BFC936FBAAC823E44DE99 /* StatusStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */; };
+		403890EFEA26F4B9A4438DB5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6309BED275DC3241D9EA7065 /* SettingsView.swift */; };
+		8FDD9BAA8816BB89724C844E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */; };
+		A1B2C3D4E5F60001AABB0001 /* M2Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */; };
+		A1B2C3D4E5F60001AABB0002 /* MicrophonePermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1002 /* MicrophonePermission.swift */; };
+		A1B2C3D4E5F60001AABB0003 /* AudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1003 /* AudioCaptureService.swift */; };
+		A1B2C3D4E5F60001AABB0004 /* STTService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1004 /* STTService.swift */; };
+		A1B2C3D4E5F60001AABB0005 /* WakeWordService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1005 /* WakeWordService.swift */; };
+		A1B2C3D4E5F60001AABB0006 /* VoicePipelineCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1006 /* VoicePipelineCoordinator.swift */; };
+		A1B2C3D4E5F60001AABB3001 /* libpv_porcupine.dylib in Embed Libraries */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB2001 /* libpv_porcupine.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		A1B2C3D4E5F60001AABB3002 /* porcupine_params.pv in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB2002 /* porcupine_params.pv */; };
+		A1B2C3D4E5F60001AABB0007 /* OllamaRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1007 /* OllamaRouter.swift */; };
+		A1B2C3D4E5F60001AABB3003 /* Hey-Sam_en_mac_v4_0_0.ppn in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB2003 /* Hey-Sam_en_mac_v4_0_0.ppn */; };
+		A1B2C3D4E5F60001AABB3004 /* ggml-base.en.bin in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB2004 /* ggml-base.en.bin */; };
+		CC0001000000000000B00001 /* ActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0001000000000000F00002 /* ActionTests.swift */; };
+		CC0001000000000000B00002 /* OllamaRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0001000000000000F00003 /* OllamaRouterTests.swift */; };
+		CC0001000000000000B00003 /* MockRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0001000000000000F00004 /* MockRouterTests.swift */; };
+		CC0001000000000000B00004 /* ImageParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0001000000000000F00005 /* ImageParsingTests.swift */; };
+		B1A2C3D4E5F60001CCDD2001 /* MemoryRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60001CCDD1001 /* MemoryRow.swift */; };
+		B1A2C3D4E5F60001CCDD2002 /* MemoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60001CCDD1002 /* MemoryStore.swift */; };
+		B1A2C3D4E5F60001CCDD2003 /* MemoryTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60001CCDD1003 /* MemoryTools.swift */; };
+		B1A2C3D4E5F60001CCDD2004 /* MemoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A2C3D4E5F60001CCDD1004 /* MemoryTests.swift */; };
+		D1E2F3A4B5C60001EEFF2001 /* SoundCuePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */; };
+		D1E2F3A4B5C60001EEFF2002 /* capture_beep.wav in Resources */ = {isa = PBXBuildFile; fileRef = D1E2F3A4B5C60001EEFF1002 /* capture_beep.wav */; };
+		D1E2F3A4B5C60001EEFF2003 /* SoundCueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F3A4B5C60001EEFF1003 /* SoundCueTests.swift */; };
+		E2F3A4B5C6D70001FF002001 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D70001FF001001 /* KeychainStore.swift */; };
+		E2F3A4B5C6D70001FF002002 /* ElevenLabsSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D70001FF001002 /* ElevenLabsSettings.swift */; };
+		E2F3A4B5C6D70001FF002003 /* ElevenLabsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D70001FF001003 /* ElevenLabsClient.swift */; };
+		E2F3A4B5C6D70001FF002004 /* TTSService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D70001FF001004 /* TTSService.swift */; };
+		E2F3A4B5C6D70001FF002005 /* TTSTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F3A4B5C6D70001FF001005 /* TTSTests.swift */; };
+		F3A4B5C6D7E80001AA002001 /* SkillSpec.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001001 /* SkillSpec.swift */; };
+		F3A4B5C6D7E80001AA002002 /* SkillForgeJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001002 /* SkillForgeJob.swift */; };
+		F3A4B5C6D7E80001AA002003 /* SkillStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001003 /* SkillStore.swift */; };
+		F3A4B5C6D7E80001AA002004 /* TaskScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001004 /* TaskScheduler.swift */; };
+		F3A4B5C6D7E80001AA002005 /* SkillEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001005 /* SkillEngine.swift */; };
+		F3A4B5C6D7E80001AA002006 /* OpenAISettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001006 /* OpenAISettings.swift */; };
+		F3A4B5C6D7E80001AA002007 /* OpenAIRefinerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001007 /* OpenAIRefinerClient.swift */; };
+		F3A4B5C6D7E80001AA002008 /* ClaudeCodeRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001008 /* ClaudeCodeRunner.swift */; };
+		F3A4B5C6D7E80001AA002009 /* SkillForge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001009 /* SkillForge.swift */; };
+		F3A4B5C6D7E80001AA002010 /* SchedulerTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001010 /* SchedulerTools.swift */; };
+		F3A4B5C6D7E80001AA003001 /* alarm_v1.json in Resources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001011 /* alarm_v1.json */; };
+		F3A4B5C6D7E80001AA002012 /* SkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001012 /* SkillTests.swift */; };
+		F3A4B5C6D7E80001AA002013 /* SchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001013 /* SchedulerTests.swift */; };
+		F3A4B5C6D7E80001AA000037 /* TimezoneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000036 /* TimezoneTests.swift */; };
+		F3A4B5C6D7E80001AA000039 /* SchedulerToolExtTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000038 /* SchedulerToolExtTests.swift */; };
+		F3A4B5C6D7E80001AA002017 /* TimeHandlingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001017 /* TimeHandlingTests.swift */; };
+		F3A4B5C6D7E80001AA002018 /* ActionValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA001018 /* ActionValidator.swift */; };
+		F3A4B5C6D7E80001AA000002 /* AlarmSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000001 /* AlarmSession.swift */; };
+		F3A4B5C6D7E80001AA000004 /* AlarmSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000003 /* AlarmSessionTests.swift */; };
+		F3A4B5C6D7E80001AA000011 /* Plan.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000010 /* Plan.swift */; };
+		F3A4B5C6D7E80001AA000013 /* PendingSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000012 /* PendingSlot.swift */; };
+		F3A4B5C6D7E80001AA000031 /* PlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000030 /* PlanTests.swift */; };
+		F3A4B5C6D7E80001AA000033 /* PendingSlotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000032 /* PendingSlotTests.swift */; };
+		F3A4B5C6D7E80001AA000021 /* TurnOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */; };
+		F3A4B5C6D7E80001AA000023 /* TimezoneMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */; };
+		F3A4B5C6D7E80001AA000035 /* TurnOrchestratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000034 /* TurnOrchestratorTests.swift */; };
+		F3A4B5C6D7E80001AA000041 /* PlanExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */; };
+		F3A4B5C6D7E80001AA000051 /* ForgeQueueJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000050 /* ForgeQueueJob.swift */; };
+		F3A4B5C6D7E80001AA000053 /* SkillForgeQueueService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */; };
+		F3A4B5C6D7E80001AA000055 /* SkillForgeTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000054 /* SkillForgeTools.swift */; };
+		F3A4B5C6D7E80001AA000057 /* SkillForgeQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000056 /* SkillForgeQueueTests.swift */; };
+		F3A4B5C6D7E80001AA000061 /* StabilisationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000060 /* StabilisationTests.swift */; };
+		F3A4B5C6D7E80001AA000063 /* OllamaRouterReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000062 /* OllamaRouterReliabilityTests.swift */; };
+		F3A4B5C6D7E80001AA000065 /* KeychainStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */; };
+		F3A4B5C6D7E80001AA000067 /* OpenAIRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */; };
+		F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CC000100000000000000A004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 60E6B17515688873EC18ED7D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C20BCE5F9AFC990ACA9CD654;
+			remoteInfo = SamOS;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		B5BF97E811612402AFEFD91F /* SamOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SamOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C940048EF2AE6339FE371742 /* SamOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamOSApp.swift; sourceTree = "<group>"; };
+		5CE3C2C5D8841CA8F3E4CCA4 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
+		43D1DDDFDCC8CAFA58DFC51B /* OutputItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputItem.swift; sourceTree = "<group>"; };
+		04E973015A0A86B8F48B01F4 /* Action.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Action.swift; sourceTree = "<group>"; };
+		2FBCF656B0C1D7DF5C21FDEA /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		4FC138EDD9EAAABC3B51985C /* MockRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockRouter.swift; sourceTree = "<group>"; };
+		69A25B06B46BE70C708BE396 /* ToolRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolRegistry.swift; sourceTree = "<group>"; };
+		BB3B246CD1012A617740FF07 /* ToolsRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsRuntime.swift; sourceTree = "<group>"; };
+		D8591F5CCD55ED3757992E6D /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
+		FB1BCEE0B1E9CA2036DAE69D /* ChatPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPaneView.swift; sourceTree = "<group>"; };
+		50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputCanvasView.swift; sourceTree = "<group>"; };
+		5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusStripView.swift; sourceTree = "<group>"; };
+		6309BED275DC3241D9EA7065 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		08B846B80FCF554DBFBC1F2E /* SamOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SamOS.entitlements; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = M2Settings.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1002 /* MicrophonePermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophonePermission.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1003 /* AudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureService.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1004 /* STTService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STTService.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1005 /* WakeWordService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeWordService.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1006 /* VoicePipelineCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePipelineCoordinator.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB2001 /* libpv_porcupine.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libpv_porcupine.dylib; path = Vendor/Porcupine/lib/libpv_porcupine.dylib; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB2002 /* porcupine_params.pv */ = {isa = PBXFileReference; lastKnownFileType = file; name = porcupine_params.pv; path = Vendor/Porcupine/lib/porcupine_params.pv; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB1007 /* OllamaRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRouter.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB2003 /* Hey-Sam_en_mac_v4_0_0.ppn */ = {isa = PBXFileReference; lastKnownFileType = file; name = "Hey-Sam_en_mac_v4_0_0.ppn"; path = "Vendor/Porcupine/resources/Hey-Sam_en_mac_v4_0_0.ppn"; sourceTree = "<group>"; };
+		A1B2C3D4E5F60001AABB2004 /* ggml-base.en.bin */ = {isa = PBXFileReference; lastKnownFileType = file; name = "ggml-base.en.bin"; path = "Vendor/whisper/ggml-base.en.bin"; sourceTree = "<group>"; };
+		CC0001000000000000F00001 /* SamOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SamOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0001000000000000F00002 /* ActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionTests.swift; sourceTree = "<group>"; };
+		CC0001000000000000F00003 /* OllamaRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRouterTests.swift; sourceTree = "<group>"; };
+		CC0001000000000000F00004 /* MockRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockRouterTests.swift; sourceTree = "<group>"; };
+		CC0001000000000000F00005 /* ImageParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageParsingTests.swift; sourceTree = "<group>"; };
+		B1A2C3D4E5F60001CCDD1001 /* MemoryRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryRow.swift; sourceTree = "<group>"; };
+		B1A2C3D4E5F60001CCDD1002 /* MemoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryStore.swift; sourceTree = "<group>"; };
+		B1A2C3D4E5F60001CCDD1003 /* MemoryTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryTools.swift; sourceTree = "<group>"; };
+		B1A2C3D4E5F60001CCDD1004 /* MemoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryTests.swift; sourceTree = "<group>"; };
+		D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundCuePlayer.swift; sourceTree = "<group>"; };
+		D1E2F3A4B5C60001EEFF1002 /* capture_beep.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = capture_beep.wav; sourceTree = "<group>"; };
+		D1E2F3A4B5C60001EEFF1003 /* SoundCueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundCueTests.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D70001FF001001 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D70001FF001002 /* ElevenLabsSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsSettings.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D70001FF001003 /* ElevenLabsClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsClient.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D70001FF001004 /* TTSService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTSService.swift; sourceTree = "<group>"; };
+		E2F3A4B5C6D70001FF001005 /* TTSTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTSTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001001 /* SkillSpec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillSpec.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001002 /* SkillForgeJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillForgeJob.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001003 /* SkillStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillStore.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001004 /* TaskScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskScheduler.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001005 /* SkillEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillEngine.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001006 /* OpenAISettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAISettings.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001007 /* OpenAIRefinerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRefinerClient.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001008 /* ClaudeCodeRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCodeRunner.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001009 /* SkillForge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillForge.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001010 /* SchedulerTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerTools.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001011 /* alarm_v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = alarm_v1.json; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001012 /* SkillTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001013 /* SchedulerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000036 /* TimezoneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimezoneTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000038 /* SchedulerToolExtTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerToolExtTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001017 /* TimeHandlingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeHandlingTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA001018 /* ActionValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionValidator.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000001 /* AlarmSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmSession.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000003 /* AlarmSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmSessionTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000010 /* Plan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plan.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000012 /* PendingSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingSlot.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000030 /* PlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000032 /* PendingSlotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingSlotTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrchestrator.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimezoneMapping.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000034 /* TurnOrchestratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrchestratorTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanExecutor.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000050 /* ForgeQueueJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForgeQueueJob.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillForgeQueueService.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000054 /* SkillForgeTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillForgeTools.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000056 /* SkillForgeQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillForgeQueueTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000060 /* StabilisationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilisationTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000062 /* OllamaRouterReliabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaRouterReliabilityTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStoreTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRouter.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterPipelineTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1B2C3D4E5F60001AABB4001 /* Embed Libraries */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A1B2C3D4E5F60001AABB3001 /* libpv_porcupine.dylib in Embed Libraries */,
+			);
+			name = "Embed Libraries";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		220585D7D31586400074F667 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC000100000000000000A003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D82C7241755DBC69A2E29637 = {
+			isa = PBXGroup;
+			children = (
+				D44D8DC2F1758A1ADC7400B0 /* SamOS */,
+				CC000100000000000000A001 /* SamOSTests */,
+				24B75801D726007265448EF0 /* Products */,
+				A1B2C3D4E5F60001AABB2001 /* libpv_porcupine.dylib */,
+				A1B2C3D4E5F60001AABB2002 /* porcupine_params.pv */,
+				A1B2C3D4E5F60001AABB2003 /* Hey-Sam_en_mac_v4_0_0.ppn */,
+				A1B2C3D4E5F60001AABB2004 /* ggml-base.en.bin */,
+			);
+			sourceTree = "<group>";
+		};
+		24B75801D726007265448EF0 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B5BF97E811612402AFEFD91F /* SamOS.app */,
+				CC0001000000000000F00001 /* SamOSTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D44D8DC2F1758A1ADC7400B0 /* SamOS */ = {
+			isa = PBXGroup;
+			children = (
+				C940048EF2AE6339FE371742 /* SamOSApp.swift */,
+				157DC95D9E1AABF8F305E922 /* Models */,
+				E0BE75350FC0A9D98E54750E /* Services */,
+				07F9AB5EC54B6D1E17DA1ADE /* Tools */,
+				B805BDA6772854EF14D6A1A2 /* Views */,
+				BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */,
+				D1E2F3A4B5C60001EEFF1002 /* capture_beep.wav */,
+				F3A4B5C6D7E80001AA001011 /* alarm_v1.json */,
+				08B846B80FCF554DBFBC1F2E /* SamOS.entitlements */,
+			);
+			path = SamOS;
+			sourceTree = "<group>";
+		};
+		157DC95D9E1AABF8F305E922 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				5CE3C2C5D8841CA8F3E4CCA4 /* ChatMessage.swift */,
+				43D1DDDFDCC8CAFA58DFC51B /* OutputItem.swift */,
+				04E973015A0A86B8F48B01F4 /* Action.swift */,
+				B1A2C3D4E5F60001CCDD1001 /* MemoryRow.swift */,
+				F3A4B5C6D7E80001AA001001 /* SkillSpec.swift */,
+				F3A4B5C6D7E80001AA001002 /* SkillForgeJob.swift */,
+				F3A4B5C6D7E80001AA000010 /* Plan.swift */,
+				F3A4B5C6D7E80001AA000012 /* PendingSlot.swift */,
+				F3A4B5C6D7E80001AA000050 /* ForgeQueueJob.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		E0BE75350FC0A9D98E54750E /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				2FBCF656B0C1D7DF5C21FDEA /* AppState.swift */,
+				4FC138EDD9EAAABC3B51985C /* MockRouter.swift */,
+				A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */,
+				A1B2C3D4E5F60001AABB1002 /* MicrophonePermission.swift */,
+				A1B2C3D4E5F60001AABB1003 /* AudioCaptureService.swift */,
+				A1B2C3D4E5F60001AABB1004 /* STTService.swift */,
+				A1B2C3D4E5F60001AABB1005 /* WakeWordService.swift */,
+				A1B2C3D4E5F60001AABB1006 /* VoicePipelineCoordinator.swift */,
+				A1B2C3D4E5F60001AABB1007 /* OllamaRouter.swift */,
+				B1A2C3D4E5F60001CCDD1002 /* MemoryStore.swift */,
+				D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */,
+				E2F3A4B5C6D70001FF001001 /* KeychainStore.swift */,
+				E2F3A4B5C6D70001FF001002 /* ElevenLabsSettings.swift */,
+				E2F3A4B5C6D70001FF001003 /* ElevenLabsClient.swift */,
+				E2F3A4B5C6D70001FF001004 /* TTSService.swift */,
+				F3A4B5C6D7E80001AA001003 /* SkillStore.swift */,
+				F3A4B5C6D7E80001AA001004 /* TaskScheduler.swift */,
+				F3A4B5C6D7E80001AA001005 /* SkillEngine.swift */,
+				F3A4B5C6D7E80001AA001006 /* OpenAISettings.swift */,
+				F3A4B5C6D7E80001AA001007 /* OpenAIRefinerClient.swift */,
+				F3A4B5C6D7E80001AA001008 /* ClaudeCodeRunner.swift */,
+				F3A4B5C6D7E80001AA001009 /* SkillForge.swift */,
+				F3A4B5C6D7E80001AA001018 /* ActionValidator.swift */,
+				F3A4B5C6D7E80001AA000001 /* AlarmSession.swift */,
+				F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */,
+				F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */,
+				F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */,
+				F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */,
+				F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		07F9AB5EC54B6D1E17DA1ADE /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				69A25B06B46BE70C708BE396 /* ToolRegistry.swift */,
+				BB3B246CD1012A617740FF07 /* ToolsRuntime.swift */,
+				B1A2C3D4E5F60001CCDD1003 /* MemoryTools.swift */,
+				F3A4B5C6D7E80001AA001010 /* SchedulerTools.swift */,
+				F3A4B5C6D7E80001AA000054 /* SkillForgeTools.swift */,
+			);
+			path = Tools;
+			sourceTree = "<group>";
+		};
+		B805BDA6772854EF14D6A1A2 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				D8591F5CCD55ED3757992E6D /* MainView.swift */,
+				FB1BCEE0B1E9CA2036DAE69D /* ChatPaneView.swift */,
+				50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */,
+				5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */,
+				6309BED275DC3241D9EA7065 /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		CC000100000000000000A001 /* SamOSTests */ = {
+			isa = PBXGroup;
+			children = (
+				CC0001000000000000F00002 /* ActionTests.swift */,
+				CC0001000000000000F00003 /* OllamaRouterTests.swift */,
+				CC0001000000000000F00004 /* MockRouterTests.swift */,
+				CC0001000000000000F00005 /* ImageParsingTests.swift */,
+				B1A2C3D4E5F60001CCDD1004 /* MemoryTests.swift */,
+				D1E2F3A4B5C60001EEFF1003 /* SoundCueTests.swift */,
+				E2F3A4B5C6D70001FF001005 /* TTSTests.swift */,
+				F3A4B5C6D7E80001AA001012 /* SkillTests.swift */,
+				F3A4B5C6D7E80001AA001013 /* SchedulerTests.swift */,
+				F3A4B5C6D7E80001AA000036 /* TimezoneTests.swift */,
+				F3A4B5C6D7E80001AA000038 /* SchedulerToolExtTests.swift */,
+				F3A4B5C6D7E80001AA001017 /* TimeHandlingTests.swift */,
+				F3A4B5C6D7E80001AA000003 /* AlarmSessionTests.swift */,
+				F3A4B5C6D7E80001AA000030 /* PlanTests.swift */,
+				F3A4B5C6D7E80001AA000032 /* PendingSlotTests.swift */,
+				F3A4B5C6D7E80001AA000034 /* TurnOrchestratorTests.swift */,
+				F3A4B5C6D7E80001AA000056 /* SkillForgeQueueTests.swift */,
+				F3A4B5C6D7E80001AA000060 /* StabilisationTests.swift */,
+				F3A4B5C6D7E80001AA000062 /* OllamaRouterReliabilityTests.swift */,
+				F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */,
+				F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */,
+			);
+			path = SamOSTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C20BCE5F9AFC990ACA9CD654 /* SamOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F8A562167F50E1CF0DBA6394 /* Build configuration list for PBXNativeTarget "SamOS" */;
+			buildPhases = (
+				1D0F0FDA86F81C3AACB84248 /* Sources */,
+				220585D7D31586400074F667 /* Frameworks */,
+				5B52712166EA32BE9B651918 /* Resources */,
+				A1B2C3D4E5F60001AABB4001 /* Embed Libraries */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SamOS;
+			productName = SamOS;
+			productReference = B5BF97E811612402AFEFD91F /* SamOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CC000100000000000000A006 /* SamOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC000100000000000000A009 /* Build configuration list for PBXNativeTarget "SamOSTests" */;
+			buildPhases = (
+				CC000100000000000000A002 /* Sources */,
+				CC000100000000000000A003 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC000100000000000000A005 /* PBXTargetDependency */,
+			);
+			name = SamOSTests;
+			productName = SamOSTests;
+			productReference = CC0001000000000000F00001 /* SamOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		60E6B17515688873EC18ED7D /* Project object */ = {
+			isa = PBXProject;
+			buildConfigurationList = A2F01897AA2EB897B6E9EFA8 /* Build configuration list for PBXProject "SamOS" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D82C7241755DBC69A2E29637;
+			productRefGroup = 24B75801D726007265448EF0 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C20BCE5F9AFC990ACA9CD654 /* SamOS */,
+				CC000100000000000000A006 /* SamOSTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5B52712166EA32BE9B651918 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8FDD9BAA8816BB89724C844E /* Assets.xcassets in Resources */,
+				A1B2C3D4E5F60001AABB3002 /* porcupine_params.pv in Resources */,
+				A1B2C3D4E5F60001AABB3003 /* Hey-Sam_en_mac_v4_0_0.ppn in Resources */,
+				A1B2C3D4E5F60001AABB3004 /* ggml-base.en.bin in Resources */,
+				D1E2F3A4B5C60001EEFF2002 /* capture_beep.wav in Resources */,
+				F3A4B5C6D7E80001AA003001 /* alarm_v1.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1D0F0FDA86F81C3AACB84248 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				21A54DC032EA5D65B23371B3 /* SamOSApp.swift in Sources */,
+				9663987A0946F4CF44F079AC /* ChatMessage.swift in Sources */,
+				F90569FF63928B21B354F40B /* OutputItem.swift in Sources */,
+				E2595C1AC05EFD410C94B874 /* Action.swift in Sources */,
+				C9253E5E6B69386990F4CD26 /* AppState.swift in Sources */,
+				FDA8CE0F4300887B0F9B4944 /* MockRouter.swift in Sources */,
+				6B4B8001C817C969EE8F4459 /* ToolRegistry.swift in Sources */,
+				92BC0A34AD23F17D5F9B4179 /* ToolsRuntime.swift in Sources */,
+				199FC899BE6E9922D45723A8 /* MainView.swift in Sources */,
+				9C24C06BDC273D9596ED3802 /* ChatPaneView.swift in Sources */,
+				ABB58215C2CD3EF3B6911E99 /* OutputCanvasView.swift in Sources */,
+				075BFC936FBAAC823E44DE99 /* StatusStripView.swift in Sources */,
+				403890EFEA26F4B9A4438DB5 /* SettingsView.swift in Sources */,
+				A1B2C3D4E5F60001AABB0001 /* M2Settings.swift in Sources */,
+				A1B2C3D4E5F60001AABB0002 /* MicrophonePermission.swift in Sources */,
+				A1B2C3D4E5F60001AABB0003 /* AudioCaptureService.swift in Sources */,
+				A1B2C3D4E5F60001AABB0004 /* STTService.swift in Sources */,
+				A1B2C3D4E5F60001AABB0005 /* WakeWordService.swift in Sources */,
+				A1B2C3D4E5F60001AABB0006 /* VoicePipelineCoordinator.swift in Sources */,
+				A1B2C3D4E5F60001AABB0007 /* OllamaRouter.swift in Sources */,
+				B1A2C3D4E5F60001CCDD2001 /* MemoryRow.swift in Sources */,
+				B1A2C3D4E5F60001CCDD2002 /* MemoryStore.swift in Sources */,
+				B1A2C3D4E5F60001CCDD2003 /* MemoryTools.swift in Sources */,
+				D1E2F3A4B5C60001EEFF2001 /* SoundCuePlayer.swift in Sources */,
+				E2F3A4B5C6D70001FF002001 /* KeychainStore.swift in Sources */,
+				E2F3A4B5C6D70001FF002002 /* ElevenLabsSettings.swift in Sources */,
+				E2F3A4B5C6D70001FF002003 /* ElevenLabsClient.swift in Sources */,
+				E2F3A4B5C6D70001FF002004 /* TTSService.swift in Sources */,
+				F3A4B5C6D7E80001AA002001 /* SkillSpec.swift in Sources */,
+				F3A4B5C6D7E80001AA002002 /* SkillForgeJob.swift in Sources */,
+				F3A4B5C6D7E80001AA002003 /* SkillStore.swift in Sources */,
+				F3A4B5C6D7E80001AA002004 /* TaskScheduler.swift in Sources */,
+				F3A4B5C6D7E80001AA002005 /* SkillEngine.swift in Sources */,
+				F3A4B5C6D7E80001AA002006 /* OpenAISettings.swift in Sources */,
+				F3A4B5C6D7E80001AA002007 /* OpenAIRefinerClient.swift in Sources */,
+				F3A4B5C6D7E80001AA002008 /* ClaudeCodeRunner.swift in Sources */,
+				F3A4B5C6D7E80001AA002009 /* SkillForge.swift in Sources */,
+				F3A4B5C6D7E80001AA002010 /* SchedulerTools.swift in Sources */,
+				F3A4B5C6D7E80001AA002018 /* ActionValidator.swift in Sources */,
+				F3A4B5C6D7E80001AA000002 /* AlarmSession.swift in Sources */,
+				F3A4B5C6D7E80001AA000041 /* PlanExecutor.swift in Sources */,
+				F3A4B5C6D7E80001AA000011 /* Plan.swift in Sources */,
+				F3A4B5C6D7E80001AA000013 /* PendingSlot.swift in Sources */,
+				F3A4B5C6D7E80001AA000021 /* TurnOrchestrator.swift in Sources */,
+				F3A4B5C6D7E80001AA000023 /* TimezoneMapping.swift in Sources */,
+				F3A4B5C6D7E80001AA000051 /* ForgeQueueJob.swift in Sources */,
+				F3A4B5C6D7E80001AA000053 /* SkillForgeQueueService.swift in Sources */,
+				F3A4B5C6D7E80001AA000055 /* SkillForgeTools.swift in Sources */,
+				F3A4B5C6D7E80001AA000067 /* OpenAIRouter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC000100000000000000A002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC0001000000000000B00001 /* ActionTests.swift in Sources */,
+				CC0001000000000000B00002 /* OllamaRouterTests.swift in Sources */,
+				CC0001000000000000B00003 /* MockRouterTests.swift in Sources */,
+				CC0001000000000000B00004 /* ImageParsingTests.swift in Sources */,
+				B1A2C3D4E5F60001CCDD2004 /* MemoryTests.swift in Sources */,
+				D1E2F3A4B5C60001EEFF2003 /* SoundCueTests.swift in Sources */,
+				E2F3A4B5C6D70001FF002005 /* TTSTests.swift in Sources */,
+				F3A4B5C6D7E80001AA002012 /* SkillTests.swift in Sources */,
+				F3A4B5C6D7E80001AA002013 /* SchedulerTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000037 /* TimezoneTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000039 /* SchedulerToolExtTests.swift in Sources */,
+				F3A4B5C6D7E80001AA002017 /* TimeHandlingTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000004 /* AlarmSessionTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000031 /* PlanTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000033 /* PendingSlotTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000035 /* TurnOrchestratorTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000057 /* SkillForgeQueueTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000061 /* StabilisationTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000063 /* OllamaRouterReliabilityTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000065 /* KeychainStoreTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CC000100000000000000A005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C20BCE5F9AFC990ACA9CD654 /* SamOS */;
+			targetProxy = CC000100000000000000A004 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1EFFACBB5336E68A5DA66B74 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		5F27906C273B0784AC8214B8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		6207285F534C555CE6339752 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SamOS/SamOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/lib",
+					"$(PROJECT_DIR)/Vendor/whisper/lib",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lpv_porcupine",
+					"-lwhisper",
+					"-lggml",
+					"-lggml-base",
+					"-lggml-cpu",
+					"-lc++",
+					"-framework Accelerate",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.samos.SamOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/include",
+					"$(PROJECT_DIR)/Vendor/whisper/include",
+				);
+				SWIFT_VERSION = 5.0;
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+			};
+			name = Debug;
+		};
+		71105FB52DD5E3F5D9C45CAF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SamOS/SamOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/lib",
+					"$(PROJECT_DIR)/Vendor/whisper/lib",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lpv_porcupine",
+					"-lwhisper",
+					"-lggml",
+					"-lggml-base",
+					"-lggml-cpu",
+					"-lc++",
+					"-framework Accelerate",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.samos.SamOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/include",
+					"$(PROJECT_DIR)/Vendor/whisper/include",
+				);
+				SWIFT_VERSION = 5.0;
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+			};
+			name = Release;
+		};
+		CC000100000000000000A007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.samos.SamOSTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/include",
+					"$(PROJECT_DIR)/Vendor/whisper/include",
+				);
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SamOS.app/Contents/MacOS/SamOS";
+			};
+			name = Debug;
+		};
+		CC000100000000000000A008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.samos.SamOSTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Porcupine/include",
+					"$(PROJECT_DIR)/Vendor/whisper/include",
+				);
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SamOS.app/Contents/MacOS/SamOS";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A2F01897AA2EB897B6E9EFA8 /* Build configuration list for PBXProject "SamOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1EFFACBB5336E68A5DA66B74 /* Debug */,
+				5F27906C273B0784AC8214B8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F8A562167F50E1CF0DBA6394 /* Build configuration list for PBXNativeTarget "SamOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6207285F534C555CE6339752 /* Debug */,
+				71105FB52DD5E3F5D9C45CAF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC000100000000000000A009 /* Build configuration list for PBXNativeTarget "SamOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC000100000000000000A007 /* Debug */,
+				CC000100000000000000A008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = 60E6B17515688873EC18ED7D /* Project object */;
+}

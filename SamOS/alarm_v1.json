@@ -1,0 +1,47 @@
+{
+    "id": "alarm_v1",
+    "name": "Alarm",
+    "version": 1,
+    "triggerPhrases": [
+        "wake me up",
+        "set an alarm",
+        "alarm for",
+        "remind me at",
+        "wake me at"
+    ],
+    "slots": [
+        {
+            "name": "datetime",
+            "type": "date",
+            "required": true,
+            "prompt": "What time should I set the alarm for?"
+        },
+        {
+            "name": "label",
+            "type": "string",
+            "required": false,
+            "prompt": null
+        }
+    ],
+    "steps": [
+        {
+            "action": "schedule_task",
+            "args": {
+                "run_at": "{{datetime}}",
+                "label": "{{label}}",
+                "skill_id": "alarm_v1"
+            }
+        },
+        {
+            "action": "talk",
+            "args": {
+                "say": "Alarm set for {{datetime_display}}."
+            }
+        }
+    ],
+    "onTrigger": {
+        "say": null,
+        "sound": "Funk",
+        "showCard": true
+    }
+}
