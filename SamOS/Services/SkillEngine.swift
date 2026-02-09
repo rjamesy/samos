@@ -46,14 +46,16 @@ final class SkillEngine {
             state = .idle
         }
 
-        let lower = input.lowercased()
+        let normalizedInput = Self.normalizeTriggerText(input)
         let skills = SkillStore.shared.loadInstalled()
 
         // Find the best matching skill (prefer longest trigger match)
         var bestMatch: (skill: SkillSpec, trigger: String)?
         for skill in skills {
             for trigger in skill.triggerPhrases {
-                if lower.contains(trigger.lowercased()) {
+                let normalizedTrigger = Self.normalizeTriggerText(trigger)
+                guard !normalizedTrigger.isEmpty else { continue }
+                if normalizedInput.contains(normalizedTrigger) {
                     if bestMatch == nil || trigger.count > bestMatch!.trigger.count {
                         bestMatch = (skill, trigger)
                     }
@@ -84,6 +86,15 @@ final class SkillEngine {
         }
 
         return (match.skill, slots)
+    }
+
+    private static func normalizeTriggerText(_ text: String) -> String {
+        return text
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Returns a prompt message if the engine is awaiting a slot fill.

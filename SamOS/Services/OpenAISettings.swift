@@ -32,25 +32,22 @@ enum OpenAISettings {
             return _cachedApiKey ?? ""
         }
         set {
-            if newValue.isEmpty {
-                #if DEBUG
+            let normalized = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.isEmpty {
                 DevSecretsStore.shared.delete("dev.openai.apiKey")
-                #else
                 if KeychainStore.useKeychain {
                     KeychainStore.delete(forKey: keychainAccount, service: keychainService)
                 }
-                #endif
                 _cachedApiKey = ""
                 defaults.removeObject(forKey: Key.keySavedAt)
             } else {
                 #if DEBUG
-                DevSecretsStore.shared.set("dev.openai.apiKey", newValue)
-                #else
-                if KeychainStore.useKeychain {
-                    KeychainStore.set(newValue, forKey: keychainAccount, service: keychainService)
-                }
+                DevSecretsStore.shared.set("dev.openai.apiKey", normalized)
                 #endif
-                _cachedApiKey = newValue
+                if KeychainStore.useKeychain {
+                    _ = KeychainStore.set(normalized, forKey: keychainAccount, service: keychainService)
+                }
+                _cachedApiKey = normalized
                 defaults.set(Date(), forKey: Key.keySavedAt)
             }
             _cacheLoaded = true
@@ -62,31 +59,34 @@ enum OpenAISettings {
         defaults.object(forKey: Key.keySavedAt) as? Date
     }
 
-    /// Reads the API key once. DEBUG → DevSecretsStore (UserDefaults), RELEASE → Keychain.
-    /// Falls back to `OPENAI_API_KEY` env var if the primary store is empty.
+    /// Reads the API key once.
+    /// DEBUG prefers DevSecretsStore, then falls back to Keychain.
+    /// RELEASE uses Keychain.
+    /// Both fall back to `OPENAI_API_KEY` env var when no persisted key exists.
     private static func loadApiKeyCache() {
         defer { _cacheLoaded = true }
 
         #if DEBUG
-        if let key = DevSecretsStore.shared.get("dev.openai.apiKey") {
+        if let key = DevSecretsStore.shared.get("dev.openai.apiKey"),
+           !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             _cachedApiKey = key
             return
         }
-        _cachedApiKey = envFallback
-        #else
-        guard KeychainStore.useKeychain else {
-            _cachedApiKey = envFallback
-            return
-        }
-
-        if let key = KeychainStore.get(forKey: keychainAccount, service: keychainService), !key.isEmpty {
-            _cachedApiKey = key
-            return
-        }
-
-        // No key found — try env var fallback
-        _cachedApiKey = envFallback
         #endif
+
+        if KeychainStore.useKeychain,
+           let key = KeychainStore.get(forKey: keychainAccount, service: keychainService),
+           !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _cachedApiKey = key
+
+            #if DEBUG
+            // Keep both stores aligned in debug builds to avoid "missing key" across runs.
+            DevSecretsStore.shared.set("dev.openai.apiKey", key)
+            #endif
+            return
+        }
+
+        _cachedApiKey = envFallback
     }
 
     /// In DEBUG builds, returns the `OPENAI_API_KEY` env var if set. Empty string otherwise.

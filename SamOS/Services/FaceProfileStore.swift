@@ -3,7 +3,8 @@ import CryptoKit
 import Security
 
 /// Encrypted persistence for local face profile feature-print payloads.
-/// The encryption key is stored in Keychain; the ciphertext is stored in Application Support.
+/// RELEASE: encryption key in Keychain, ciphertext in Application Support.
+/// DEBUG: encryption key in app-local dev storage (avoids recurring Keychain prompts).
 final class FaceProfileStore {
     struct Snapshot {
         let names: [String: String]
@@ -20,6 +21,7 @@ final class FaceProfileStore {
 
     private static let keychainService = "com.samos.faceprofiles"
     private static let keychainAccount = "encryptionKeyV1"
+    private static let debugKeyStorageKey = "dev.faceprofiles.encryptionKeyV1"
     private static let payloadVersion = 1
 
     private let fileURL: URL
@@ -73,23 +75,41 @@ final class FaceProfileStore {
     }
 
     private static func loadOrCreateKey() -> SymmetricKey? {
+        #if DEBUG
+        if let devStored = DevSecretsStore.shared.get(debugKeyStorageKey),
+           let data = Data(base64Encoded: devStored),
+           data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+
+        guard let generated = generateKeyData() else { return nil }
+        let b64 = generated.base64EncodedString()
+        DevSecretsStore.shared.set(debugKeyStorageKey, b64)
+        return SymmetricKey(data: generated)
+        #else
         if let existing = KeychainStore.get(forKey: keychainAccount, service: keychainService),
            let data = Data(base64Encoded: existing),
            data.count == 32 {
             return SymmetricKey(data: data)
         }
 
-        var data = Data(count: 32)
-        let status = data.withUnsafeMutableBytes { bytes -> Int32 in
-            guard let baseAddress = bytes.baseAddress else { return errSecParam }
-            return SecRandomCopyBytes(kSecRandomDefault, 32, baseAddress)
-        }
-        guard status == errSecSuccess else { return nil }
+        guard let data = generateKeyData() else { return nil }
 
         let b64 = data.base64EncodedString()
         guard KeychainStore.set(b64, forKey: keychainAccount, service: keychainService) else {
             return nil
         }
         return SymmetricKey(data: data)
+        #endif
+    }
+
+    private static func generateKeyData() -> Data? {
+        var data = Data(count: 32)
+        let status = data.withUnsafeMutableBytes { bytes -> Int32 in
+            guard let baseAddress = bytes.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, 32, baseAddress)
+        }
+        guard status == errSecSuccess else { return nil }
+        return data
     }
 }

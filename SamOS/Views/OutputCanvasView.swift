@@ -1,6 +1,26 @@
 import SwiftUI
 import AppKit
 
+private enum OutputCanvasAutoScroll {
+    /// Returns the first changed/new item id so the canvas can scroll to the start of new content.
+    static func targetItemID(old: [OutputItem], new: [OutputItem]) -> UUID? {
+        guard !new.isEmpty else { return nil }
+
+        let overlap = min(old.count, new.count)
+        if overlap > 0 {
+            for idx in 0..<overlap where old[idx] != new[idx] {
+                return new[idx].id
+            }
+        }
+
+        if new.count > old.count {
+            return new[overlap].id
+        }
+
+        return nil
+    }
+}
+
 struct OutputCanvasView: View {
     @EnvironmentObject var appState: AppState
 
@@ -37,13 +57,26 @@ struct OutputCanvasView: View {
                 }
                 Spacer()
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(appState.outputItems) { item in
-                            OutputItemView(item: item)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(appState.outputItems) { item in
+                                OutputItemView(item: item)
+                                    .id(item.id)
+                            }
+                        }
+                        .padding(12)
+                    }
+                    .onChange(of: appState.outputItems) { oldItems, newItems in
+                        guard let targetID = OutputCanvasAutoScroll.targetItemID(old: oldItems, new: newItems) else {
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(targetID, anchor: .top)
+                            }
                         }
                     }
-                    .padding(12)
                 }
             }
         }
@@ -562,6 +595,7 @@ struct ImageOutputView: View {
     let payload: String
     private let decodedPayload: ImagePayload?
     @StateObject private var loader = ImageLoader()
+    @State private var didRequestLoad = false
 
     init(payload: String) {
         self.payload = payload
@@ -573,30 +607,27 @@ struct ImageOutputView: View {
             if let decoded = decodedPayload {
                 let candidateUrls = decoded.resolvedUrls.compactMap { URL(string: $0) }
                 if !candidateUrls.isEmpty {
-                    Group {
-                        if let nsImage = loader.image {
-                            Image(nsImage: nsImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(maxWidth: .infinity)
-                                .cornerRadius(8)
-                        } else if loader.isLoading {
-                            ProgressView()
-                                .frame(maxWidth: .infinity, minHeight: 200)
-                        } else if let error = loader.error {
-                            VStack(spacing: 4) {
-                                Image(systemName: "photo.badge.exclamationmark")
-                                    .font(.title)
-                                Text("Failed to load image")
-                                    .font(.caption)
-                                Text(error)
-                                    .font(.caption2)
-                            }
-                            .foregroundColor(.secondary)
-                            .frame(maxWidth: .infinity, minHeight: 100)
+                    if let nsImage = loader.image {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity)
+                            .cornerRadius(8)
+                    } else if let error = loader.error {
+                        VStack(spacing: 4) {
+                            Image(systemName: "photo.badge.exclamationmark")
+                                .font(.title)
+                            Text("Failed to load image")
+                                .font(.caption)
+                            Text(error)
+                                .font(.caption2)
                         }
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 100)
+                    } else {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, minHeight: 200)
                     }
-                    .onAppear { loader.load(from: candidateUrls) }
                 } else {
                     Text("No valid image URLs")
                         .foregroundColor(.secondary)
@@ -615,6 +646,14 @@ struct ImageOutputView: View {
         .padding(8)
         .background(Color(nsColor: .textBackgroundColor))
         .cornerRadius(8)
+        .onAppear {
+            guard !didRequestLoad,
+                  let decoded = decodedPayload else { return }
+            let candidateUrls = decoded.resolvedUrls.compactMap { URL(string: $0) }
+            guard !candidateUrls.isEmpty else { return }
+            didRequestLoad = true
+            loader.load(from: candidateUrls)
+        }
     }
 
     func decodePayload() -> ImagePayload? {

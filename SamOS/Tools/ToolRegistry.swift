@@ -17,6 +17,7 @@ final class ToolRegistry {
 
     private init() {
         register(ShowTextTool())
+        register(FindImageTool())
         register(ShowImageTool())
         register(DescribeCameraViewTool())
         register(CameraObjectFinderTool())
@@ -64,7 +65,11 @@ struct ShowTextTool: Tool {
     let description = "Renders markdown text on the Output Canvas"
 
     func execute(args: [String: String]) -> OutputItem {
-        let markdown = args["markdown"] ?? "_No content provided._"
+        // Accept common aliases from model-generated specs.
+        let markdown = args["markdown"]
+            ?? args["text"]
+            ?? args["content"]
+            ?? "_No content provided._"
         return OutputItem(kind: .markdown, payload: markdown)
     }
 }
@@ -78,14 +83,24 @@ struct ShowImageTool: Tool {
     func execute(args: [String: String]) -> OutputItem {
         let alt = args["alt"] ?? "Image"
 
-        // Collect candidate URLs: prefer 'urls' (pipe-separated), fall back to 'url'
+        // Collect candidate URLs: prefer list variants, then single-url variants.
         var candidates: [String] = []
-        if let urlsList = args["urls"], !urlsList.isEmpty {
-            candidates = urlsList.components(separatedBy: "|")
+        let urlListKeys = ["urls", "imageUrls", "image_urls"]
+        for key in urlListKeys {
+            guard let urlsList = args[key], !urlsList.isEmpty else { continue }
+            let parsed = urlsList
+                .components(separatedBy: "|")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
+            for url in parsed where !candidates.contains(url) {
+                candidates.append(url)
+            }
         }
-        if let singleUrl = args["url"], !singleUrl.isEmpty {
+
+        let singleURLKeys = ["url", "imageUrl", "image_url"]
+        for key in singleURLKeys {
+            guard let singleUrl = args[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !singleUrl.isEmpty else { continue }
             if !candidates.contains(singleUrl) {
                 candidates.insert(singleUrl, at: 0)
             }
@@ -130,6 +145,169 @@ struct ShowImageTool: Tool {
             return "URL does not point to an image file (.\(pathExtension)). Expected .jpg, .png, .gif, or .webp."
         }
         return nil
+    }
+}
+
+struct FindImageTool: Tool {
+    let name = "find_image"
+    let description = "Find relevant image URLs for a query using Google Images (imghp/search) and display them on the Output Canvas. Use when the user asks to find/show/search for an image. Args: 'query' (preferred); also accepts 'q', 'search', 'search_term', 'term', or 'topic'."
+
+    private static let searchResultPatterns: [NSRegularExpression] = [
+        // Common Google image result JSON fields.
+        (try? NSRegularExpression(pattern: #""ou":"(https?://[^"]+)""#, options: [.caseInsensitive]))!,
+        (try? NSRegularExpression(pattern: #""imgurl":"(https?://[^"]+)""#, options: [.caseInsensitive]))!,
+        // Google thumbnail hosts often use query-only URLs without file extensions.
+        (try? NSRegularExpression(pattern: #"https://encrypted-tbn0\.gstatic\.com/images\?[^"'\s<]+"#, options: [.caseInsensitive]))!,
+        // Direct image links with common file extensions.
+        (try? NSRegularExpression(pattern: #"https?://[^"'\s<]+\.(?:jpg|jpeg|png|gif|webp|avif)(?:\?[^"'\s<]*)?"#, options: [.caseInsensitive]))!
+    ]
+
+    func execute(args: [String: String]) -> OutputItem {
+        let query = resolvedQuery(from: args)
+        guard !query.isEmpty else {
+            return cameraPromptPayload(
+                slot: "query",
+                spoken: "What image should I find?",
+                formatted: "Provide an image query, for example `frog`, `golden retriever`, or `Sydney Opera House`."
+            )
+        }
+
+        let tags = tokenizedQuery(query)
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let slug = tags.isEmpty ? "image" : tags.joined(separator: "-")
+        var urls = fetchGoogleImageURLs(encodedQuery: encodedQuery)
+
+        // No-key visual fallbacks only when Google extraction fails.
+        if urls.isEmpty {
+            urls = [
+                "https://loremflickr.com/1600/900/\(slug)",
+                "https://picsum.photos/seed/\(slug)/1600/900.jpg",
+                "https://placehold.co/1600x900.jpg?text=\(encodedQuery)"
+            ]
+        }
+
+        let payload: [String: Any] = [
+            "urls": urls,
+            "alt": query
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return OutputItem(kind: .markdown, payload: "**Image Error:** Failed to prepare image URLs.")
+        }
+
+        return OutputItem(kind: .image, payload: json)
+    }
+
+    private func resolvedQuery(from args: [String: String]) -> String {
+        let candidates = [
+            args["query"],
+            args["q"],
+            args["search"],
+            args["search_term"],
+            args["searchTerm"],
+            args["term"],
+            args["topic"],
+            args["text"],
+            args["input"]
+        ]
+
+        for value in candidates {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    private func tokenizedQuery(_ query: String) -> [String] {
+        query.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .prefix(8)
+            .map { String($0) }
+    }
+
+    private func fetchGoogleImageURLs(encodedQuery: String, maxCount: Int = 6) -> [String] {
+        let searchURLs = [
+            "https://images.google.com/search?tbm=isch&hl=en&q=\(encodedQuery)",
+            "https://www.google.com/search?tbm=isch&hl=en&q=\(encodedQuery)"
+        ]
+
+        for searchURL in searchURLs {
+            guard let url = URL(string: searchURL) else { continue }
+            guard let html = requestSearchHTML(url: url) else { continue }
+            let extracted = Self.extractGoogleImageURLs(fromHTML: html, limit: maxCount)
+            if !extracted.isEmpty { return extracted }
+        }
+
+        return []
+    }
+
+    private func requestSearchHTML(url: URL) -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("https://www.google.com/imghp", forHTTPHeaderField: "Referer")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var html: String?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data else { return }
+            html = String(data: data, encoding: .utf8)
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 10)
+        guard let html, !html.isEmpty else { return nil }
+        return html
+    }
+
+    static func extractGoogleImageURLs(fromHTML html: String, limit: Int = 6) -> [String] {
+        let decoded = html
+            .replacingOccurrences(of: "\\/", with: "/")
+            .replacingOccurrences(of: "\\u003d", with: "=")
+            .replacingOccurrences(of: "\\u0026", with: "&")
+            .replacingOccurrences(of: "\\u0025", with: "%")
+
+        var urls: [String] = []
+        let source = decoded as NSString
+        let fullRange = NSRange(location: 0, length: source.length)
+
+        for regex in searchResultPatterns {
+            let matches = regex.matches(in: decoded, options: [], range: fullRange)
+            for match in matches {
+                let candidateRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
+                guard candidateRange.location != NSNotFound else { continue }
+                let rawCandidate = source.substring(with: candidateRange)
+                guard let cleaned = cleanedImageURL(rawCandidate) else { continue }
+                if !urls.contains(cleaned) {
+                    urls.append(cleaned)
+                    if urls.count >= max(1, limit) { return urls }
+                }
+            }
+        }
+
+        return urls
+    }
+
+    private static func cleanedImageURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") else { return nil }
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        // Skip HTML/search pages; keep direct images and known thumbnail hosts.
+        if url.host?.contains("google.com") == true, url.path.contains("/search") {
+            return nil
+        }
+        return trimmed
     }
 }
 

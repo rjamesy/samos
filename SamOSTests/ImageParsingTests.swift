@@ -154,6 +154,14 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertEqual(decoded?.alt, "A frog")
     }
 
+    func testExecuteWithImageUrlAlias() {
+        let tool = ShowImageTool()
+        let output = tool.execute(args: ["imageUrl": "https://example.com/frog.jpg", "alt": "A frog"])
+        XCTAssertEqual(output.kind, .image)
+        let decoded = try? JSONDecoder().decode(ImagePayload.self, from: output.payload.data(using: .utf8)!)
+        XCTAssertEqual(decoded?.resolvedUrls.first, "https://example.com/frog.jpg")
+    }
+
     func testExecuteWithPipeSeparatedUrls() {
         let tool = ShowImageTool()
         let output = tool.execute(args: [
@@ -217,6 +225,36 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertEqual(decoded?.alt, "A frog (Rana esculenta)")
     }
 
+    // MARK: - FindImageTool Google URL Extraction
+
+    func testFindImageExtractGoogleURLsFromHTML() {
+        let html = """
+        <html><body>
+        "ou":"https:\\/\\/images.example.com\\/frog.jpg"
+        "imgurl":"https:\\/\\/cdn.example.org\\/green-frog.png"
+        https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQfrog123
+        </body></html>
+        """
+
+        let urls = FindImageTool.extractGoogleImageURLs(fromHTML: html, limit: 6)
+        XCTAssertTrue(urls.contains("https://images.example.com/frog.jpg"))
+        XCTAssertTrue(urls.contains("https://cdn.example.org/green-frog.png"))
+        XCTAssertTrue(urls.contains("https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQfrog123"))
+    }
+
+    func testFindImageExtractGoogleURLsSkipsSearchPages() {
+        let html = """
+        <html><body>
+        "imgurl":"https:\\/\\/www.google.com\\/search?tbm=isch&q=frog"
+        "ou":"https:\\/\\/example.com\\/frog.webp"
+        </body></html>
+        """
+
+        let urls = FindImageTool.extractGoogleImageURLs(fromHTML: html, limit: 6)
+        XCTAssertFalse(urls.contains(where: { $0.contains("/search?tbm=isch") }))
+        XCTAssertTrue(urls.contains("https://example.com/frog.webp"))
+    }
+
     // MARK: - ToolRegistry
 
     func testToolRegistryContainsShowImage() {
@@ -228,6 +266,20 @@ final class ImageParsingTests: XCTestCase {
     func testToolRegistryContainsShowText() {
         let tool = ToolRegistry.shared.get("show_text")
         XCTAssertNotNil(tool, "ToolRegistry must contain show_text with exact name")
+    }
+
+    func testToolRegistryContainsFindImage() {
+        let tool = ToolRegistry.shared.get("find_image")
+        XCTAssertNotNil(tool, "ToolRegistry must contain find_image with exact name")
+    }
+
+    func testShowTextAcceptsTextAlias() {
+        guard let tool = ToolRegistry.shared.get("show_text") else {
+            return XCTFail("show_text tool missing")
+        }
+        let output = tool.execute(args: ["text": "# Alias Works"])
+        XCTAssertEqual(output.kind, .markdown)
+        XCTAssertEqual(output.payload, "# Alias Works")
     }
 
     // MARK: - Pipeline: Tool Execution Appends OutputItem
@@ -251,6 +303,36 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertNotNil(output)
         XCTAssertEqual(output?.kind, .markdown)
         XCTAssertEqual(output?.payload, "# Recipe\nStep 1: Preheat oven.")
+    }
+
+    func testFindImageExecutionProducesImageOutput() {
+        let toolAction = ToolAction(name: "find_image", args: [
+            "query": "frog"
+        ])
+        let output = ToolsRuntime.shared.execute(toolAction)
+        XCTAssertNotNil(output)
+        XCTAssertEqual(output?.kind, .image)
+
+        guard let data = output?.payload.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(ImagePayload.self, from: data) else {
+            return XCTFail("Expected image payload JSON from find_image")
+        }
+        XCTAssertGreaterThanOrEqual(decoded.resolvedUrls.count, 1)
+        XCTAssertEqual(decoded.alt, "frog")
+    }
+
+    func testFindImageMissingQueryReturnsPromptPayload() {
+        let toolAction = ToolAction(name: "find_image", args: [:])
+        let output = ToolsRuntime.shared.execute(toolAction)
+        XCTAssertNotNil(output)
+        XCTAssertEqual(output?.kind, .markdown)
+
+        guard let payload = output?.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            return XCTFail("Expected structured prompt payload JSON from find_image")
+        }
+        XCTAssertEqual(dict["kind"] as? String, "prompt")
+        XCTAssertEqual(dict["slot"] as? String, "query")
     }
 
     func testUnknownToolReturnsErrorOutput() {

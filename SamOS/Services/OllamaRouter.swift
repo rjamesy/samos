@@ -340,12 +340,14 @@ final class OllamaRouter {
                 }
             }
 
-            if let plan = try? JSONDecoder().decode(Plan.self, from: jsonData) {
+            let normalized = normalizeActionJSON(dict)
+            let normalizedData = (try? JSONSerialization.data(withJSONObject: normalized)) ?? jsonData
+            if let plan = try? JSONDecoder().decode(Plan.self, from: normalizedData) {
                 return plan
             }
 
             // PLAN recognized but decode failed — diagnose specific issue
-            let reasons = diagnoseSchemaMismatch(dict)
+            let reasons = diagnoseSchemaMismatch(normalized)
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
 
@@ -462,7 +464,7 @@ final class OllamaRouter {
     func normalizeActionJSON(_ input: [String: Any]) -> [String: Any] {
         var dict = input
         let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name })
-        let actionRaw = (dict["action"] as? String ?? "").lowercased()
+        var actionRaw = (dict["action"] as? String ?? "").lowercased()
 
         // Coerce args from JSON string to object (LLM sometimes returns args as a string)
         if let argsString = dict["args"] as? String,
@@ -511,6 +513,7 @@ final class OllamaRouter {
                 dict["action"] = typeField
                 dict.removeValue(forKey: "type")
             }
+            actionRaw = (dict["action"] as? String ?? "").lowercased()
         }
 
         // Case 3: "args" missing for TOOL — collect remaining keys
@@ -526,7 +529,13 @@ final class OllamaRouter {
             dict["args"] = args
         }
 
-        // Case 4: CAPABILITY_GAP missing required fields — inject defaults
+        // Case 4: Normalize PLAN step objects (common model schema drift).
+        if (dict["action"] as? String ?? "").uppercased() == "PLAN",
+           let steps = dict["steps"] as? [[String: Any]] {
+            dict["steps"] = steps.map(normalizePlanStepJSON)
+        }
+
+        // Case 5: CAPABILITY_GAP missing required fields — inject defaults
         if actionRaw == "capability_gap" {
             if dict["goal"] == nil { dict["goal"] = "unknown" }
             if dict["missing"] == nil { dict["missing"] = "unknown" }
@@ -536,6 +545,55 @@ final class OllamaRouter {
         }
 
         return dict
+    }
+
+    private func normalizePlanStepJSON(_ input: [String: Any]) -> [String: Any] {
+        var step = input
+
+        if step["step"] == nil, let type = step["type"] as? String {
+            step["step"] = type
+            step.removeValue(forKey: "type")
+        }
+
+        if let argsString = step["args"] as? String,
+           let data = argsString.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            step["args"] = obj
+        }
+
+        if var args = step["args"] as? [String: Any],
+           let say = args["say"] as? String,
+           (step["say"] as? String)?.isEmpty ?? true {
+            step["say"] = say
+            args.removeValue(forKey: "say")
+            step["args"] = args
+        }
+
+        if step["step"] == nil, step["name"] != nil {
+            step["step"] = "tool"
+        }
+
+        let stepType = (step["step"] as? String ?? "").lowercased()
+
+        // Some model outputs misuse delegate for tool execution (name/args shape).
+        if stepType == "delegate" {
+            let task = (step["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let hasToolShape = step["name"] != nil || step["args"] != nil
+            if task.isEmpty && hasToolShape {
+                step["step"] = "tool"
+            }
+        }
+
+        let normalizedType = (step["step"] as? String ?? "").lowercased()
+        if normalizedType == "talk", step["say"] == nil {
+            if let text = step["text"] as? String {
+                step["say"] = text
+            } else if let message = step["message"] as? String {
+                step["say"] = message
+            }
+        }
+
+        return step
     }
 
     /// Extracts a JSON object from text, preferring objects with an "action" key.
@@ -718,6 +776,9 @@ final class OllamaRouter {
         For showing an image (provide 3 direct image URLs separated by | for fallback):
         {"action": "TOOL", "name": "show_image", "args": {"urls": "https://direct-image1.jpg|https://direct-image2.jpg|https://direct-image3.jpg", "alt": "short description"}, "say": "Brief response"}
 
+        For finding images by topic:
+        {"action": "TOOL", "name": "find_image", "args": {"query": "frog"}, "say": "I'll find an image for that."}
+
         For showing text/info/recipes:
         {"action": "TOOL", "name": "show_text", "args": {"markdown": "# Title\\nContent here"}, "say": "Brief response"}
 
@@ -792,6 +853,7 @@ final class OllamaRouter {
         - If user asks to cancel an alarm or task → use cancel_task tool. NEVER claim "cancelled" without calling the tool.
         - If user asks to list alarms or tasks → use list_tasks tool.
         - If user asks something that an installed skill handles → use the appropriate TOOL call.
+        - For image topic requests ("find/show/search image of ..."), prefer find_image with query.
         - If user asks to read/learn/study a website URL → use learn_website with the url and optional focus.
         - If user asks what Sam can see right now through the laptop camera → use describe_camera_view.
         - If user asks to find a specific object in camera view → use find_camera_objects with query.
@@ -820,7 +882,8 @@ final class OllamaRouter {
         - For dense or structured content (markdown blocks, headings/lists/steps, or >200 chars), keep "say" to a short spoken summary and put full details in TOOL show_text markdown.
         - For long or structured content (multi-line, headings, lists, or >240 chars), prefer TOOL show_text with markdown.
         - If user asks for a recipe, instructions, how-to, list, or structured content → MUST use TOOL show_text with markdown in args.
-        - If user asks for a picture, photo, or image → MUST use TOOL show_image with direct image URL in args.
+        - If user asks for a picture, photo, or image by topic → use TOOL find_image with args.query.
+        - If user provided direct image URL(s), use TOOL show_image with those URL(s).
         - NEVER put recipes, instructions, or long content in the "say" field of TALK.
         - The "say" field is for SHORT spoken responses only (one sentence).
         - If you say "here's a recipe/picture", you MUST be using the corresponding tool.

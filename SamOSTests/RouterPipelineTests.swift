@@ -1381,6 +1381,37 @@ final class RouterPipelineTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testPlanDelegateStepWithToolShapeParsesAsToolSteps() async {
+        let malformed = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"find_image","args":{"query":"butter chicken"},"say":"I'll find an image of butter chicken."},{"step":"delegate","name":"learn_website","args":{"url":"https://www.example.com/butter-chicken-recipe","focus":"recipe"},"say":"I'll look for a recipe."}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(malformed)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+
+        do {
+            let plan = try await openAIRouter.routePlan("find a recipe for butter chicken and show me an image of the food")
+            let toolNames = plan.steps.compactMap { step -> String? in
+                if case .tool(let name, _, _) = step { return name }
+                return nil
+            }
+            XCTAssertTrue(toolNames.contains("find_image"))
+            XCTAssertTrue(toolNames.contains("learn_website"))
+        } catch {
+            XCTFail("Should not throw — malformed delegate tool shape should be normalized: \(error)")
+        }
+    }
+
     // MARK: - M) JSON garbage returns friendly error, not raw JSON
 
     @MainActor
@@ -1536,5 +1567,71 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertFalse(text.contains("{"), "Should NOT contain raw JSON")
         XCTAssertTrue(text.contains("not sure") || text.contains("rephras"),
                       "Should contain the default capability gap message, got: \(text)")
+    }
+
+    @MainActor
+    func testUnexpectedCapabilityGapTriggersRepairRetry() async {
+        let first = #"{"action":"CAPABILITY_GAP","goal":"Find a recipe and image","missing":"unknown"}"#
+        let second = #"{"action":"PLAN","steps":[{"step":"tool","name":"find_image","args":{"query":"butter chicken"},"say":"I'll find an image for that."}]}"#
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(first), .success(second)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+
+        do {
+            let plan = try await openAIRouter.routePlan("find a recipe for butter chicken and show me an image of the food")
+            XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Should retry once when CAPABILITY_GAP is unexpected")
+            let hasFindImage = plan.steps.contains { step in
+                if case .tool(let name, _, _) = step {
+                    return name == "find_image"
+                }
+                return false
+            }
+            XCTAssertTrue(hasFindImage, "Repaired plan should use existing tools")
+        } catch {
+            XCTFail("Should not throw: \(error)")
+        }
+    }
+
+    @MainActor
+    func testUnexpectedCapabilityGapAfterRetryFallsBackToTalk() async {
+        let gap = #"{"action":"CAPABILITY_GAP","goal":"Do task","missing":"unknown"}"#
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(gap), .success(gap)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+
+        do {
+            let plan = try await openAIRouter.routePlan("find image of frog")
+            XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Should attempt one repair retry")
+            if case .talk(let say) = plan.steps.first {
+                XCTAssertTrue(
+                    say.contains("without building a new capability"),
+                    "Fallback should avoid triggering capability build: \(say)"
+                )
+            } else {
+                XCTFail("Expected TALK fallback, got: \(plan.steps)")
+            }
+        } catch {
+            XCTFail("Should not throw: \(error)")
+        }
     }
 }

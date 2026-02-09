@@ -624,7 +624,7 @@ struct SettingsView: View {
     private var securitySection: some View {
         Section("Security") {
             #if DEBUG
-            Text("Dev mode: keys stored locally (UserDefaults). No Keychain prompts.")
+            Text("Dev mode: keys stored locally with Keychain fallback enabled.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             #else

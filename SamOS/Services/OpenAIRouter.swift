@@ -42,7 +42,14 @@ final class OpenAIAPILogStore {
                 .appendingPathComponent("SamOS", isDirectory: true)
                 .appendingPathComponent("logs", isDirectory: true)
             try fileManager.createDirectory(at: logsDir, withIntermediateDirectories: true)
-            self.logFileURL = logsDir.appendingPathComponent("openai_api_events.jsonl", isDirectory: false)
+            let fileURL = logsDir.appendingPathComponent("openai_api_events.jsonl", isDirectory: false)
+            if !fileManager.fileExists(atPath: fileURL.path) {
+                fileManager.createFile(atPath: fileURL.path, contents: nil)
+            }
+            self.logFileURL = fileURL
+            #if DEBUG
+            print("[OpenAIAPILogStore] path=\(fileURL.path)")
+            #endif
         } catch {
             #if DEBUG
             print("[OpenAIAPILogStore] init failed: \(error.localizedDescription)")
@@ -161,6 +168,29 @@ final class OpenAIAPILogStore {
             error: nil,
             payload: ["note": note]
         )
+    }
+
+    @discardableResult
+    func logBlockedRequest(service: String,
+                           endpoint: String?,
+                           method: String?,
+                           model: String?,
+                           reason: String,
+                           payload: Any? = nil) -> String {
+        let requestID = UUID().uuidString
+        log(
+            phase: "blocked",
+            requestID: requestID,
+            service: service,
+            endpoint: endpoint,
+            method: method,
+            model: model,
+            statusCode: nil,
+            latencyMs: 0,
+            error: reason,
+            payload: payload
+        )
+        return requestID
     }
 
     private func log(phase: String,
@@ -340,6 +370,14 @@ struct RealOpenAITransport: OpenAITransport {
 
     func chat(messages: [[String: String]], model: String) async throws -> String {
         guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRouter.chat",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: model,
+                reason: "OpenAI API key not configured",
+                payload: ["message_count": messages.count]
+            )
             throw OpenAIRouter.OpenAIError.notConfigured
         }
 
@@ -513,7 +551,17 @@ final class OpenAIRouter {
                    repairReasons: [String]? = nil,
                    repairRawSnippet: String? = nil,
                    alarmContext: AlarmContext? = nil) async throws -> Plan {
-        guard OpenAISettings.isConfigured else { throw OpenAIError.notConfigured }
+        guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRouter.routePlan",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: OpenAISettings.model,
+                reason: "OpenAI API key not configured",
+                payload: ["input_preview": String(input.prefix(160))]
+            )
+            throw OpenAIError.notConfigured
+        }
 
         let systemPrompt = buildLightSystemPrompt(forInput: input)
         var messages = parser.buildMessages(input: input, history: history,
@@ -531,7 +579,26 @@ final class OpenAIRouter {
         // Parse — if it fails, try salvage stages before falling back to TALK
         do {
             let plan = try parser.parsePlanOrAction(from: responseText)
-            return enforcePostParseGuardrails(plan, userInput: input)
+            let guarded = enforcePostParseGuardrails(plan, userInput: input)
+            if shouldRepairUnexpectedCapabilityEscalation(guarded, userInput: input) {
+                if repairReasons == nil {
+                    let reasons = [
+                        "You returned CAPABILITY_GAP/start_skillforge for a normal user task.",
+                        "Only use CAPABILITY_GAP/start_skillforge when the user explicitly asks Sam to build/learn a new capability.",
+                        "For this request, return PLAN/TALK using existing tools only."
+                    ]
+                    return try await routePlan(
+                        input,
+                        history: history,
+                        pendingSlot: pendingSlot,
+                        repairReasons: reasons,
+                        repairRawSnippet: responseText,
+                        alarmContext: alarmContext
+                    )
+                }
+                return fallbackPlanForUnexpectedCapabilityEscalation(userInput: input)
+            }
+            return guarded
         } catch {
             let trimmed = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
@@ -627,7 +694,10 @@ final class OpenAIRouter {
         let installedSkills = SkillStore.shared.loadInstalled()
         var skillBlock = ""
         if !installedSkills.isEmpty {
-            skillBlock += "\n## Installed Skills (do NOT use CAPABILITY_GAP for these)\n"
+            skillBlock += "\n## Installed Skills (NOT tool names)\n"
+            skillBlock += "- These are matched automatically from user text.\n"
+            skillBlock += "- Never call an installed skill name in TOOL steps.\n"
+            skillBlock += "- Use TOOL steps only for names in Available Tools.\n"
             for skill in installedSkills {
                 let triggers = skill.triggerPhrases.joined(separator: ", ")
                 skillBlock += "- \(skill.name): triggers on \"\(triggers)\"\n"
@@ -724,6 +794,7 @@ final class OpenAIRouter {
         {"action":"TALK","say":"Hey! What's up?"}
 
         ## Tool Usage
+        {"action":"TOOL","name":"find_image","args":{"query":"frog"},"say":"I'll find an image for that."}
         {"action":"TOOL","name":"show_image","args":{"urls":"https://example.com/img.jpg","alt":"description"},"say":"Here you go."}
         {"action":"TOOL","name":"show_text","args":{"markdown":"# Title\\nContent"},"say":"Here it is."}
         {"action":"TOOL","name":"save_memory","args":{"type":"fact","content":"Your dog's name is Bailey."},"say":"I'll remember that."}
@@ -757,7 +828,8 @@ final class OpenAIRouter {
         - For dense or structured content (markdown blocks, headings/lists/steps, or >200 chars), keep say as a short spoken summary and put full details in show_text markdown.
         - For long or structured content (multi-line, headings, lists, >240 chars) → prefer show_text with markdown.
         - For recipes/instructions → show_text with markdown.
-        - For images → show_image with direct image URLs (2-3, pipe-separated).
+        - For user requests to find/search/show an image by topic -> use find_image with args.query.
+        - Use show_image when the user already provided direct image URL(s).
         - For requests to read/learn/study a URL → use learn_website with the provided url and optional focus.
         - For requests to describe what Sam can currently see through camera vision → use describe_camera_view.
         - For requests to find objects in the camera view → use find_camera_objects with query.
@@ -910,6 +982,31 @@ final class OpenAIRouter {
             .contains { lower.contains($0) }
 
         return hasCapabilityNoun && hasBuildVerb
+    }
+
+    private func shouldRepairUnexpectedCapabilityEscalation(_ plan: Plan, userInput: String) -> Bool {
+        if isCapabilityLearningRequest(userInput) || isStopCapabilityLearningRequest(userInput) {
+            return false
+        }
+
+        let hasGapDelegate = plan.steps.contains { step in
+            if case .delegate(let task, _, _) = step {
+                return task.lowercased().hasPrefix("capability_gap:")
+            }
+            return false
+        }
+        let hasForgeTool = planContainsTool(plan, named: "start_skillforge")
+        return hasGapDelegate || hasForgeTool
+    }
+
+    private func fallbackPlanForUnexpectedCapabilityEscalation(userInput: String) -> Plan {
+        let prompt: String
+        if inputContainsURL(userInput) {
+            prompt = "I can do this directly. If you want, I can read that URL and summarize what I find."
+        } else {
+            prompt = "I can help directly without building a new capability. Try again with the exact task, and include a URL if you want me to learn from a specific page."
+        }
+        return Plan(steps: [.talk(say: prompt)])
     }
 
     private func isStopCapabilityLearningRequest(_ input: String) -> Bool {

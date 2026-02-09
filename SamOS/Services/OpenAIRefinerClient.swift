@@ -51,7 +51,17 @@ final class OpenAIRefinerClient {
                          requirements: CapabilityRequirements,
                          toolList: [String],
                          onDebugExchange: ((DebugExchange) -> Void)? = nil) async throws -> SkillSpec {
-        guard OpenAISettings.isConfigured else { throw RefinerError.notConfigured }
+        guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRefinerClient.refineSkillSpec",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: OpenAISettings.model,
+                reason: "OpenAI API key not configured",
+                payload: ["goal": goal]
+            )
+            throw RefinerError.notConfigured
+        }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -69,6 +79,13 @@ final class OpenAIRefinerClient {
         Slot types: "date", "string", "number".
         Step actions: tool names (e.g. "schedule_task", "show_text") or "talk".
         Step args support {{slotName}} interpolation.
+        IMPORTANT:
+        - Use placeholders ONLY for declared slot names.
+        - Do NOT invent placeholders from previous tool outputs (e.g. {{fetchedImageUrl}} is invalid).
+        - For show_image, valid args are 'url' (single) or 'urls' (pipe-separated).
+        - For show_text, use arg 'markdown'.
+        - Design capabilities using ONLY the listed tools; do NOT require new external APIs/services.
+        - If a goal mentions an unavailable integration, implement the closest feasible behavior with available tools.
 
         Return ONLY the JSON object. No explanation, no markdown, no code fences.
         """
@@ -212,6 +229,8 @@ final class OpenAIRefinerClient {
 
         do {
             return try JSONDecoder().decode(SkillSpec.self, from: jsonData)
+        } catch let error as DecodingError {
+            throw RefinerError.parseFailed(describeDecodingError(error))
         } catch {
             throw RefinerError.parseFailed(error.localizedDescription)
         }
@@ -222,7 +241,17 @@ final class OpenAIRefinerClient {
                                      missing: String,
                                      toolList: [String],
                                      onDebugExchange: ((DebugExchange) -> Void)? = nil) async throws -> CapabilityRequirements {
-        guard OpenAISettings.isConfigured else { throw RefinerError.notConfigured }
+        guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRefinerClient.fetchCapabilityRequirements",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: OpenAISettings.model,
+                reason: "OpenAI API key not configured",
+                payload: ["goal": goal, "missing": missing]
+            )
+            throw RefinerError.notConfigured
+        }
 
         let tools = toolList.joined(separator: ", ")
         let systemMessage = """
@@ -242,6 +271,9 @@ final class OpenAIRefinerClient {
         - Be specific and implementation-oriented.
         - Avoid vague placeholders.
         - requirements must describe what must exist for this capability to work.
+        - REQUIREMENTS MUST be implementable using ONLY the listed tools.
+        - Do NOT require external APIs/services that are not present as tools.
+        - If the user's ideal request exceeds available tools, write feasible requirements for the closest useful capability.
         - No markdown, no prose outside JSON.
         """
 
@@ -379,7 +411,17 @@ final class OpenAIRefinerClient {
                          requirements: CapabilityRequirements,
                          toolList: [String],
                          onDebugExchange: ((DebugExchange) -> Void)? = nil) async throws -> ImplementationReview {
-        guard OpenAISettings.isConfigured else { throw RefinerError.notConfigured }
+        guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRefinerClient.reviewSkillSpec",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: OpenAISettings.model,
+                reason: "OpenAI API key not configured",
+                payload: ["goal": goal, "missing": missing, "spec_id": spec.id]
+            )
+            throw RefinerError.notConfigured
+        }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -401,10 +443,12 @@ final class OpenAIRefinerClient {
         }
 
         Rules:
-        - approved=true ONLY if the steps are concrete and executable for the goal.
+        - approved=true ONLY if the steps are concrete and executable with the available tools.
         - Reject placeholder-only specs.
         - Reject self-referential learning loops (e.g. start_skillforge as skill behavior).
         - implementation_steps must be actionable and specific.
+        - Do NOT require external APIs/services that are not available as tools.
+        - Evaluate the best feasible implementation for the goal using available tools.
         - No markdown, no prose outside JSON.
         """
 
@@ -613,5 +657,25 @@ final class OpenAIRefinerClient {
               let end = text.lastIndex(of: "}")
         else { return text }
         return String(text[start...end])
+    }
+
+    private func describeDecodingError(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            return "Missing key '\(key.stringValue)' at \(codingPathString(context.codingPath))"
+        case .valueNotFound(let type, let context):
+            return "Missing value for \(type) at \(codingPathString(context.codingPath))"
+        case .typeMismatch(let type, let context):
+            return "Type mismatch for \(type) at \(codingPathString(context.codingPath)): \(context.debugDescription)"
+        case .dataCorrupted(let context):
+            return "Data corrupted at \(codingPathString(context.codingPath)): \(context.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private func codingPathString(_ codingPath: [CodingKey]) -> String {
+        guard !codingPath.isEmpty else { return "root" }
+        return codingPath.map(\.stringValue).joined(separator: ".")
     }
 }

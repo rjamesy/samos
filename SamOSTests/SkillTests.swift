@@ -75,6 +75,75 @@ final class SkillTests: XCTestCase {
         XCTAssertNil(spec.onTrigger)
     }
 
+    func testSkillSpecDecodeOpenAIShapeWithoutSlotRequired() throws {
+        let json = """
+        {
+          "id": "forged_8795d555",
+          "name": "Fetch an image using Google Images",
+          "version": 1,
+          "triggerPhrases": [
+            "fetch an image using google images search and display it in the output canvas."
+          ],
+          "slots": [
+            {
+              "name": "searchTerm",
+              "type": "string"
+            }
+          ],
+          "steps": [
+            {
+              "action": "talk",
+              "args": {
+                "say": "I'm working on: Fetch an image using Google Images search and display it in the output canvas."
+              }
+            },
+            {
+              "action": "learn_website",
+              "args": {
+                "url": "https://www.google.com/imghp",
+                "searchTerm": "{{searchTerm}}"
+              }
+            },
+            {
+              "action": "show_image",
+              "args": {
+                "imageUrl": "{{fetchedImageUrl}}"
+              }
+            }
+          ]
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let spec = try JSONDecoder().decode(SkillSpec.self, from: data)
+
+        XCTAssertEqual(spec.id, "forged_8795d555")
+        XCTAssertEqual(spec.slots.count, 1)
+        XCTAssertEqual(spec.slots[0].name, "searchTerm")
+        XCTAssertTrue(spec.slots[0].required, "Missing `required` should default to true")
+        XCTAssertEqual(spec.steps.count, 3)
+        XCTAssertEqual(spec.steps[2].args["imageUrl"], "{{fetchedImageUrl}}")
+    }
+
+    func testSkillSpecDecodeCoercesNonStringStepArgs() throws {
+        let json = """
+        {
+          "id": "forged_types",
+          "name": "Type Coercion",
+          "version": 1,
+          "triggerPhrases": ["type coercion"],
+          "slots": [],
+          "steps": [
+            { "action": "show_text", "args": { "markdown": "# hi", "days": 3, "enabled": true } }
+          ]
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let spec = try JSONDecoder().decode(SkillSpec.self, from: data)
+
+        XCTAssertEqual(spec.steps[0].args["days"], "3")
+        XCTAssertEqual(spec.steps[0].args["enabled"], "true")
+    }
+
     // MARK: - SkillStore
 
     func testSkillStoreInstallLoadRemove() throws {
@@ -159,6 +228,37 @@ final class SkillTests: XCTestCase {
         // indirectly. For a full integration test, would need dependency injection.
 
         // Cleanup
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    func testSkillEngineMatchesTriggerWithUnderscoreInput() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SkillEngineUnderscore_\(UUID().uuidString)")
+        let store = SkillStore(directory: tempDir)
+        let dynamicId = "forged_find_image_\(UUID().uuidString.prefix(8).lowercased())"
+        let token = UUID().uuidString.prefix(6).lowercased()
+        let triggerPhrase = "find \(token) image"
+        let underscoredInput = "please run find_\(token)_image now"
+        var skill = SkillSpec(
+            id: dynamicId,
+            name: "find_image",
+            version: 1,
+            triggerPhrases: [triggerPhrase],
+            slots: [],
+            steps: [SkillSpec.StepDef(action: "talk", args: ["say": "ok"])],
+            onTrigger: nil
+        )
+        skill.status = "active"
+        skill.approvedAt = Date()
+        XCTAssertTrue(store.install(skill))
+
+        // Install into shared store path for engine match behavior.
+        XCTAssertTrue(SkillStore.shared.install(skill))
+        defer { _ = SkillStore.shared.remove(id: skill.id) }
+
+        let matched = SkillEngine.shared.match(underscoredInput)
+        XCTAssertNotNil(matched)
+        XCTAssertEqual(matched?.0.id, skill.id)
+
         try? FileManager.default.removeItem(at: tempDir)
     }
 
@@ -359,5 +459,70 @@ final class SkillTests: XCTestCase {
         XCTAssertEqual(job.status, .failed)
         XCTAssertNotNil(job.completedAt)
         XCTAssertTrue(job.logs.last?.message.contains("Failed") ?? false)
+    }
+
+    // MARK: - ToolsRuntime Skill Fallback
+
+    func testToolsRuntimeExecutesInstalledSkillByName() {
+        let skillId = "forged_runtime_\(UUID().uuidString.prefix(8).lowercased())"
+        var skill = SkillSpec(
+            id: skillId,
+            name: "find_image",
+            version: 1,
+            triggerPhrases: ["find image"],
+            slots: [SkillSpec.SlotDef(name: "query", type: .string, required: false, prompt: nil)],
+            steps: [
+                SkillSpec.StepDef(action: "show_text", args: ["markdown": "# Result\\n- {{query}}"])
+            ],
+            onTrigger: nil
+        )
+        skill.status = "active"
+        skill.approvedAt = Date()
+
+        XCTAssertTrue(SkillStore.shared.install(skill))
+        defer { _ = SkillStore.shared.remove(id: skill.id) }
+
+        let output = ToolsRuntime.shared.execute(ToolAction(name: "find_image", args: ["query": "snake"]))
+
+        XCTAssertNotNil(output)
+        XCTAssertNotEqual(output?.payload, "**Error:** Unknown tool `find_image`.")
+
+        let payload = extractedFormattedMarkdown(from: output?.payload)
+        XCTAssertTrue(payload.contains("snake"))
+    }
+
+    func testToolsRuntimeExecutesInstalledSkillByID() {
+        let skillId = "forged_runtime_\(UUID().uuidString.prefix(8).lowercased())"
+        var skill = SkillSpec(
+            id: skillId,
+            name: "capability_probe",
+            version: 1,
+            triggerPhrases: ["capability probe"],
+            slots: [],
+            steps: [
+                SkillSpec.StepDef(action: "show_text", args: ["markdown": "Skill ID call works"])
+            ],
+            onTrigger: nil
+        )
+        skill.status = "active"
+        skill.approvedAt = Date()
+
+        XCTAssertTrue(SkillStore.shared.install(skill))
+        defer { _ = SkillStore.shared.remove(id: skill.id) }
+
+        let output = ToolsRuntime.shared.execute(ToolAction(name: skill.id, args: [:]))
+
+        XCTAssertNotNil(output)
+        XCTAssertNotEqual(output?.payload, "**Error:** Unknown tool `\(skill.id)`.")
+        let payload = extractedFormattedMarkdown(from: output?.payload)
+        XCTAssertTrue(payload.contains("Skill ID call works"))
+    }
+
+    private func extractedFormattedMarkdown(from payload: String?) -> String {
+        guard let payload, let data = payload.data(using: .utf8) else { return payload ?? "" }
+        guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return payload
+        }
+        return (dict["formatted"] as? String) ?? payload
     }
 }
