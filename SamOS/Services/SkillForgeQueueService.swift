@@ -20,11 +20,15 @@ final class SkillForgeQueueService {
     /// Callback when a job fails. Called on MainActor by drain loop.
     var onJobFailed: (@MainActor (ForgeQueueJob, String) -> Void)?
 
+    /// Callback for streaming forge progress/log lines. Called on MainActor by drain loop.
+    var onJobLog: (@MainActor (ForgeQueueJob, String) -> Void)?
+
     // MARK: - Private State
 
     private var db: OpaquePointer?
     private(set) var isAvailable = false
     private var isDraining = false
+    private var drainTask: Task<Void, Never>?
 
     /// Serial queue protecting ALL sqlite3 operations on `db`.
     private let dbQueue = DispatchQueue(label: "com.samos.forgequeue.db")
@@ -167,6 +171,8 @@ final class SkillForgeQueueService {
 
     /// Clears the entire queue (including queued/running). Use with caution.
     func clearAll() {
+        drainTask?.cancel()
+        drainTask = nil
         dbQueue.sync {
             guard let db = db else { return }
             sqlite3_exec(db, "DELETE FROM forge_queue", nil, nil, nil)
@@ -175,19 +181,27 @@ final class SkillForgeQueueService {
         isDraining = false
     }
 
+    /// Stops active/queued forge processing and clears the queue.
+    /// In-flight OpenAI calls are cancelled via Task cancellation where possible.
+    func stopAll() {
+        clearAll()
+    }
+
     // MARK: - Drain Loop
 
     private func drainIfIdle() {
         guard !isDraining else { return }
         isDraining = true
-        Task { @MainActor in
+        drainTask = Task { @MainActor in
             await self.drainLoop()
         }
     }
 
     @MainActor
     private func drainLoop() async {
+        defer { drainTask = nil }
         while let next = dequeueNext() {
+            if Task.isCancelled { break }
             var job = next
             job.status = .running
             job.startedAt = Date()
@@ -195,10 +209,22 @@ final class SkillForgeQueueService {
             currentJob = job
 
             do {
+                var emittedLogCount = 0
                 let skill = try await SkillForge.shared.forge(
                     goal: job.goal,
                     missing: job.constraints ?? job.goal
-                ) { _ in /* progress updates handled by SkillForge internally */ }
+                ) { skillJob in
+                    guard skillJob.logs.count > emittedLogCount else { return }
+                    let newLogs = skillJob.logs[emittedLogCount...]
+                    emittedLogCount = skillJob.logs.count
+                    let messages = newLogs.map(\.message)
+                    Task { @MainActor in
+                        for message in messages {
+                            self.onJobLog?(job, message)
+                        }
+                    }
+                }
+                if Task.isCancelled { break }
 
                 job.status = .completed
                 job.completedAt = Date()
@@ -207,6 +233,7 @@ final class SkillForgeQueueService {
 
                 onJobCompleted?(job, skill)
             } catch {
+                if Task.isCancelled { break }
                 job.status = .failed
                 job.completedAt = Date()
                 updateJob(job)

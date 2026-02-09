@@ -14,7 +14,7 @@ struct OutputCanvasView: View {
                 Spacer()
                 if !appState.outputItems.isEmpty {
                     Button("Clear") {
-                        appState.outputItems.removeAll()
+                        appState.clearOutputCanvas()
                     }
                     .buttonStyle(.borderless)
                     .font(.caption)
@@ -55,13 +55,23 @@ struct OutputCanvasView: View {
 struct OutputItemView: View {
     @EnvironmentObject var appState: AppState
     let item: OutputItem
+    private let parsedCardType: String?
+
+    init(item: OutputItem) {
+        self.item = item
+        if item.kind == .card {
+            self.parsedCardType = Self.parseCardType(item.payload)
+        } else {
+            self.parsedCardType = nil
+        }
+    }
 
     var body: some View {
         switch item.kind {
         case .markdown:
             MarkdownTextView(markdown: item.payload)
         case .card:
-            if let cardType = parseCardType(item.payload), cardType == "alarm" {
+            if parsedCardType == "alarm" {
                 AlarmCardView(payload: item.payload)
                     .environmentObject(appState)
             } else {
@@ -72,7 +82,7 @@ struct OutputItemView: View {
         }
     }
 
-    private func parseCardType(_ payload: String) -> String? {
+    private static func parseCardType(_ payload: String) -> String? {
         guard let data = payload.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
@@ -156,20 +166,297 @@ struct AlarmCardView: View {
 
 struct MarkdownTextView: View {
     let markdown: String
+    private static let defaultVisiblePages: Int = 2
+    private static let pageCharacterCount: Int = 6_000
 
-    var body: some View {
-        Text(attributedMarkdown)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(Color(nsColor: .textBackgroundColor))
-            .cornerRadius(8)
+    private struct RenderCache {
+        let source: String
+        let pages: Int
+        let blocks: [OutputCanvasMarkdown.Block]
+        let hasMore: Bool
     }
 
-    private var attributedMarkdown: AttributedString {
-        (try? AttributedString(markdown: markdown, options: .init(
-            interpretedSyntax: .full
-        ))) ?? AttributedString(markdown)
+    @State private var visiblePages: Int
+    @State private var renderCache: RenderCache
+
+    init(markdown: String) {
+        self.markdown = markdown
+        let initialPages = Self.defaultVisiblePages
+        _visiblePages = State(initialValue: initialPages)
+        _renderCache = State(initialValue: Self.buildCache(markdown: markdown, pages: initialPages))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(renderCache.blocks.enumerated()), id: \.offset) { _, block in
+                MarkdownBlockView(block: block)
+            }
+
+            if renderCache.hasMore {
+                Button("Show More") {
+                    visiblePages += 1
+                }
+                .buttonStyle(.borderless)
+                .font(.caption.weight(.semibold))
+                .padding(.top, 4)
+            }
+        }
+        .onChange(of: visiblePages) { _, newPages in
+            refreshCache(pages: newPages)
+        }
+        .onChange(of: markdown) { _, _ in
+            visiblePages = Self.defaultVisiblePages
+            refreshCache(pages: visiblePages)
+        }
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(nsColor: .textBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func refreshCache(pages: Int) {
+        let normalizedPages = max(1, pages)
+        let next = Self.buildCache(markdown: markdown, pages: normalizedPages)
+        if next.source != renderCache.source
+            || next.pages != renderCache.pages
+            || next.blocks != renderCache.blocks
+            || next.hasMore != renderCache.hasMore {
+            renderCache = next
+        }
+    }
+
+    private static func buildCache(markdown: String, pages: Int) -> RenderCache {
+        let source = OutputCanvasMarkdown.toolDisplayString(markdown)
+        let visibleRaw = OutputCanvasMarkdown.visibleSlice(
+            from: source,
+            pages: pages,
+            pageCharacterCount: pageCharacterCount
+        )
+        let blocks = OutputCanvasMarkdown.blocks(from: visibleRaw)
+        return RenderCache(
+            source: source,
+            pages: pages,
+            blocks: blocks,
+            hasMore: visibleRaw.count < source.count
+        )
+    }
+}
+
+private struct MarkdownBlockView: View {
+    let block: OutputCanvasMarkdown.Block
+
+    var body: some View {
+        switch block {
+        case .blank:
+            Color.clear
+                .frame(height: 8)
+
+        case .heading(let level, let text):
+            inlineMarkdownText(text)
+                .font(headingFont(level: level))
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .bullet(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•")
+                inlineMarkdownText(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .numbered(let number, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(number).")
+                inlineMarkdownText(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .code(let language, let text):
+            VStack(alignment: .leading, spacing: 4) {
+                if let language, !language.isEmpty {
+                    Text(language)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                ScrollView(.horizontal, showsIndicators: true) {
+                    Text(text)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(6)
+
+        case .plain(let text):
+            inlineMarkdownText(text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func headingFont(level: Int) -> Font {
+        switch level {
+        case 1:
+            return .system(size: 22)
+        case 2:
+            return .system(size: 19)
+        case 3:
+            return .system(size: 17)
+        default:
+            return .system(size: 15)
+        }
+    }
+
+    @ViewBuilder
+    private func inlineMarkdownText(_ value: String) -> some View {
+        InlineMarkdownTextView(value: value)
+    }
+}
+
+enum OutputCanvasMarkdown {
+    enum Block: Equatable {
+        case heading(level: Int, text: String)
+        case bullet(text: String)
+        case numbered(number: String, text: String)
+        case code(language: String?, text: String)
+        case plain(text: String)
+        case blank
+    }
+
+    /// Tool-window markdown must be rendered exactly as stored.
+    static func toolDisplayString(_ markdown: String) -> String {
+        markdown
+    }
+
+    private static let headingRegex = try! NSRegularExpression(pattern: "^(#{1,6})\\s+(.+)$")
+    private static let bulletRegex = try! NSRegularExpression(pattern: "^[-*]\\s+(.+)$")
+    private static let numberedRegex = try! NSRegularExpression(pattern: "^(\\d+)[\\.)]\\s+(.+)$")
+
+    static func blocks(from markdown: String) -> [Block] {
+        let normalized = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        var blocks: [Block] = []
+        var codeFenceLanguage: String?
+        var codeBuffer: [String] = []
+        var inCodeFence = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if inCodeFence {
+                    let text = codeBuffer.joined(separator: "\n")
+                    blocks.append(.code(language: codeFenceLanguage, text: text))
+                    codeFenceLanguage = nil
+                    codeBuffer.removeAll(keepingCapacity: false)
+                    inCodeFence = false
+                } else {
+                    let languageRaw = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    codeFenceLanguage = languageRaw.isEmpty ? nil : languageRaw
+                    inCodeFence = true
+                }
+                continue
+            }
+
+            if inCodeFence {
+                codeBuffer.append(line)
+                continue
+            }
+
+            blocks.append(parseLine(line))
+        }
+
+        // Unterminated fence: still render buffered content as code.
+        if inCodeFence {
+            blocks.append(.code(language: codeFenceLanguage, text: codeBuffer.joined(separator: "\n")))
+        }
+
+        return blocks
+    }
+
+    static func visibleSlice(from markdown: String, pages: Int, pageCharacterCount: Int) -> String {
+        let safePages = max(1, pages)
+        let safePageSize = max(1, pageCharacterCount)
+        let limit = safePages * safePageSize
+
+        guard markdown.count > limit else { return markdown }
+        let sliceEnd = markdown.index(markdown.startIndex, offsetBy: limit)
+        let prefix = String(markdown[..<sliceEnd])
+
+        // Cut at a nearby newline so incremental pages avoid splitting list tokens mid-line.
+        let minReadableCut = max(0, min(prefix.count, limit - 300))
+        let minReadableIndex = prefix.index(prefix.startIndex, offsetBy: minReadableCut)
+        if let newline = prefix.lastIndex(of: "\n"), newline > minReadableIndex {
+            return String(prefix[...newline])
+        }
+
+        return prefix
+    }
+
+    private static func parseLine(_ line: String) -> Block {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return .blank }
+
+        if let match = match(trimmed, regex: headingRegex),
+           match.count > 2 {
+            let hashes = match[1]
+            let text = match[2]
+            return .heading(level: hashes.count, text: text)
+        }
+
+        if let match = match(trimmed, regex: bulletRegex),
+           match.count > 1 {
+            let text = match[1]
+            return .bullet(text: text)
+        }
+
+        if let match = match(trimmed, regex: numberedRegex),
+           match.count > 2 {
+            let number = match[1]
+            let text = match[2]
+            return .numbered(number: number, text: text)
+        }
+
+        return .plain(text: trimmed)
+    }
+
+    private static func match(_ text: String, regex: NSRegularExpression) -> [String]? {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let result = regex.firstMatch(in: text, range: range) else { return nil }
+        var captures: [String] = []
+        captures.reserveCapacity(result.numberOfRanges)
+        for idx in 0..<result.numberOfRanges {
+            let nsRange = result.range(at: idx)
+            guard let captureRange = Range(nsRange, in: text) else {
+                captures.append("")
+                continue
+            }
+            captures.append(String(text[captureRange]))
+        }
+        return captures
+    }
+}
+
+private struct InlineMarkdownTextView: View {
+    let value: String
+    @State private var rendered: AttributedString
+
+    init(value: String) {
+        self.value = value
+        _rendered = State(initialValue: Self.parse(value))
+    }
+
+    var body: some View {
+        Text(rendered)
+            .onChange(of: value) { _, newValue in
+                rendered = Self.parse(newValue)
+            }
+    }
+
+    private static func parse(_ markdown: String) -> AttributedString {
+        (try? AttributedString(markdown: markdown)) ?? AttributedString(markdown)
     }
 }
 
@@ -273,11 +560,17 @@ final class ImageLoader: ObservableObject {
 
 struct ImageOutputView: View {
     let payload: String
+    private let decodedPayload: ImagePayload?
     @StateObject private var loader = ImageLoader()
+
+    init(payload: String) {
+        self.payload = payload
+        self.decodedPayload = Self.decodePayload(from: payload)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let decoded = decodePayload() {
+            if let decoded = decodedPayload {
                 let candidateUrls = decoded.resolvedUrls.compactMap { URL(string: $0) }
                 if !candidateUrls.isEmpty {
                     Group {
@@ -325,6 +618,10 @@ struct ImageOutputView: View {
     }
 
     func decodePayload() -> ImagePayload? {
+        Self.decodePayload(from: payload)
+    }
+
+    private static func decodePayload(from payload: String) -> ImagePayload? {
         guard let data = payload.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ImagePayload.self, from: data)
     }

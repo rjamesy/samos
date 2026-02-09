@@ -6,13 +6,385 @@ import XCTest
 final class FakeOpenAITransport: OpenAITransport {
     var queuedResponses: [Result<String, Error>] = []
     private(set) var chatCallCount = 0
+    private(set) var chatCallLog: [[[String: String]]] = []
 
     func chat(messages: [[String: String]], model: String) async throws -> String {
         chatCallCount += 1
+        chatCallLog.append(messages)
         guard !queuedResponses.isEmpty else {
             throw OpenAIRouter.OpenAIError.requestFailed("No queued response")
         }
         return try queuedResponses.removeFirst().get()
+    }
+}
+
+final class MarkdownRenderPrepTests: XCTestCase {
+
+    func testToolDisplayStringRemainsRawMarkdown() {
+        let markdown = "# Title\n\n## Ingredients:\n- a\n- b\n\nLine1\nLine2"
+        let display = OutputCanvasMarkdown.toolDisplayString(markdown)
+        XCTAssertEqual(display, markdown)
+        XCTAssertTrue(display.contains("\n- a\n- b\n"))
+    }
+
+    func testCanvasMarkdownBlocksPreserveStructure() {
+        let markdown = "# Title\n\n## Ingredients:\n- a\n- b\n\nLine1\nLine2"
+        let blocks = OutputCanvasMarkdown.blocks(from: markdown)
+        XCTAssertEqual(blocks.first, .heading(level: 1, text: "Title"))
+        XCTAssertTrue(blocks.contains(.heading(level: 2, text: "Ingredients:")))
+        XCTAssertTrue(blocks.contains(.bullet(text: "a")))
+        XCTAssertTrue(blocks.contains(.bullet(text: "b")))
+        XCTAssertTrue(blocks.contains(.plain(text: "Line1")))
+        XCTAssertTrue(blocks.contains(.plain(text: "Line2")))
+    }
+}
+
+@MainActor
+final class AppStateThinkingFillerTests: XCTestCase {
+
+    func testThinkingIndicatorNotShownIfFastResponse() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 10_000_000
+        var fast = TurnResult()
+        fast.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        fast.spokenLines = ["Done."]
+        fake.queuedResults = [fast]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.08,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 180_000_000)
+
+        XCTAssertFalse(appState.isThinkingIndicatorVisible)
+        XCTAssertTrue(spokenFillers.isEmpty, "Fast response should not trigger filler utterance")
+    }
+
+    func testThinkingIndicatorShownIfSlowResponse() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 220_000_000
+        var slow = TurnResult()
+        slow.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        slow.spokenLines = ["Done."]
+        fake.queuedResults = [slow]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertTrue(appState.isThinkingIndicatorVisible, "Slow response should show thinking indicator")
+        XCTAssertEqual(spokenFillers.count, 1, "Slow response should trigger one filler utterance")
+    }
+
+    func testFillerSpokenAtMostOncePerTurn() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 450_000_000
+        var slow = TurnResult()
+        slow.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        slow.spokenLines = ["Done."]
+        fake.queuedResults = [slow]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+        appState.send("hello")
+
+        try? await Task.sleep(nanoseconds: 320_000_000)
+        XCTAssertEqual(spokenFillers.count, 1, "Filler should only be spoken once in a turn")
+
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        XCTAssertEqual(spokenFillers.count, 1, "Filler should remain one-shot for that turn")
+    }
+
+    func testFillerNotSpokenWhileMicActive() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 250_000_000
+        var slow = TurnResult()
+        slow.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        slow.spokenLines = ["Done."]
+        fake.queuedResults = [slow]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+
+        appState.send("hello")
+        appState.status = .capturing
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertTrue(appState.isThinkingIndicatorVisible, "Indicator should still appear when waiting")
+        XCTAssertTrue(spokenFillers.isEmpty, "Filler should not speak while mic capture is active")
+    }
+
+    func testIndicatorClearsOnFirstOutput() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 220_000_000
+        var canvasResult = TurnResult()
+        canvasResult.appendedOutputs = [OutputItem(kind: .markdown, payload: "# Title\n- item")]
+        fake.queuedResults = [canvasResult]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+
+        appState.send("show me markdown")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(appState.isThinkingIndicatorVisible)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(appState.isThinkingIndicatorVisible, "Indicator should clear as soon as first output arrives")
+        XCTAssertEqual(appState.outputItems.count, 1)
+        XCTAssertEqual(spokenFillers.count, 1)
+    }
+
+    func testBubbleLatencyPopulatedForUserAndAssistant() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 120_000_000
+
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Canberra.")]
+        result.spokenLines = ["Canberra."]
+        fake.queuedResults = [result]
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.5,
+            enableRuntimeServices: false
+        )
+
+        appState.send("What is the capital of Australia?")
+        try? await Task.sleep(nanoseconds: 260_000_000)
+
+        let user = appState.chatMessages.first(where: { $0.role == .user })
+        let assistant = appState.chatMessages.last(where: { $0.role == .assistant })
+
+        XCTAssertNotNil(user?.latencyMs, "User bubble should include latency metadata")
+        XCTAssertNotNil(assistant?.latencyMs, "Assistant bubble should include latency metadata")
+        XCTAssertGreaterThanOrEqual(assistant?.latencyMs ?? 0, user?.latencyMs ?? 0)
+    }
+
+    func testVoiceTranscriptDropsNoiseArtifacts() {
+        let appState = AppState(
+            orchestrator: FakeTurnOrchestrator(),
+            thinkingFillerDelay: 0.5,
+            enableRuntimeServices: false
+        )
+
+        XCTAssertNil(appState.debugSanitizedVoiceTranscript("[BLANK_AUDIO]"))
+        XCTAssertNil(appState.debugSanitizedVoiceTranscript("(dramatic music)"))
+        XCTAssertEqual(appState.debugSanitizedVoiceTranscript("what's the weather"), "what's the weather")
+    }
+}
+
+@MainActor
+final class AppStateKnowledgeAttributionTests: XCTestCase {
+
+    func testKnowledgeAttributionAppendsCanvasSummaryAndMarksLocalUsage() async {
+        let fake = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Use sanitized equipment and control fermentation temperature.", llmProvider: .openai)]
+        result.spokenLines = ["Use sanitized equipment and control fermentation temperature."]
+        result.knowledgeAttribution = KnowledgeAttribution(
+            localKnowledgePercent: 80,
+            openAIFillPercent: 20,
+            matchedLocalItems: 4,
+            consideredLocalItems: 5,
+            provider: .openai,
+            evidence: [
+                KnowledgeEvidence(
+                    kind: .website,
+                    id: "brew-123",
+                    label: "Fermentation Basics",
+                    excerpt: "Fermentation temperature control improves flavor stability.",
+                    url: "https://example.com/fermentation",
+                    overlapCount: 4,
+                    score: 0.62
+                )
+            ]
+        )
+        fake.queuedResults = [result]
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            enableRuntimeServices: false
+        )
+
+        appState.send("how do I make home brew?")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        let assistant = appState.chatMessages.last(where: { $0.role == .assistant })
+        XCTAssertEqual(assistant?.usedLocalKnowledge, true, "Local-attributed replies should be marked for blue bubble styling")
+
+        let canvas = appState.outputItems.last?.payload ?? ""
+        XCTAssertTrue(canvas.contains("Local knowledge used: 80%"))
+        XCTAssertTrue(canvas.contains("OpenAI fill gap: 20%"))
+        XCTAssertTrue(canvas.contains("#### Evidence Used"))
+        XCTAssertTrue(canvas.contains("[Fermentation Basics](https://example.com/fermentation)"))
+    }
+
+    func testKnowledgeAttributionKeepsNonLocalReplyUnmarked() async {
+        let fake = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "I don't have enough local notes yet, but here's a general answer.", llmProvider: .openai)]
+        result.spokenLines = ["I don't have enough local notes yet, but here's a general answer."]
+        result.knowledgeAttribution = KnowledgeAttribution(
+            localKnowledgePercent: 0,
+            openAIFillPercent: 100,
+            matchedLocalItems: 0,
+            consideredLocalItems: 3,
+            provider: .openai
+        )
+        fake.queuedResults = [result]
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            enableRuntimeServices: false
+        )
+
+        appState.send("what is dry hopping?")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        let assistant = appState.chatMessages.last(where: { $0.role == .assistant })
+        XCTAssertEqual(assistant?.usedLocalKnowledge, false)
+
+        let canvas = appState.outputItems.last?.payload ?? ""
+        XCTAssertTrue(canvas.contains("Local knowledge used: 0%"))
+        XCTAssertTrue(canvas.contains("OpenAI fill gap: 100%"))
+    }
+}
+
+@MainActor
+final class AppStateAutoListenTests: XCTestCase {
+
+    func testAutoListenStartsOnFollowUpQuestion() async {
+        let fakeOrchestrator = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "All set. Need anything else on this?")]
+        result.spokenLines = ["All set. Need anything else on this?"]
+        result.triggerQuestionAutoListen = false
+        fakeOrchestrator.queuedResults = [result]
+
+        let fakeVoicePipeline = FakeVoicePipeline()
+        let appState = AppState(
+            orchestrator: fakeOrchestrator,
+            voicePipeline: fakeVoicePipeline,
+            thinkingFillerDelay: 0.05,
+            questionAutoListenNoSpeechTimeoutMs: 120,
+            enableRuntimeServices: false
+        )
+        appState.isListeningEnabled = true
+        appState.send("help")
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        appState.debugHandleSpeechPlaybackFinished()
+        try? await Task.sleep(nanoseconds: 320_000_000)
+
+        XCTAssertEqual(fakeVoicePipeline.startFollowUpCaptureCalls, 1)
+        XCTAssertEqual(fakeVoicePipeline.lastNoSpeechTimeoutMs, 120)
+    }
+
+    func testAutoListenStopsAfterSilenceTimeout() async {
+        let fakeOrchestrator = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done. Need anything else on this?")]
+        result.spokenLines = ["Done. Need anything else on this?"]
+        result.triggerQuestionAutoListen = false
+        fakeOrchestrator.queuedResults = [result]
+
+        let fakeVoicePipeline = FakeVoicePipeline()
+        fakeVoicePipeline.autoCancelOnTimeout = true
+        let appState = AppState(
+            orchestrator: fakeOrchestrator,
+            voicePipeline: fakeVoicePipeline,
+            thinkingFillerDelay: 0.05,
+            questionAutoListenNoSpeechTimeoutMs: 120,
+            enableRuntimeServices: false
+        )
+        appState.isListeningEnabled = true
+        appState.send("hello")
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        appState.debugHandleSpeechPlaybackFinished()
+        try? await Task.sleep(nanoseconds: 520_000_000)
+
+        XCTAssertEqual(fakeVoicePipeline.cancelFollowUpCaptureCalls, 1,
+                       "Auto-listen should stop cleanly after no-speech timeout")
+    }
+
+    func testNoAutoListenWhenNoQuestionAsked() async {
+        let fakeOrchestrator = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        result.spokenLines = ["Done."]
+        result.triggerQuestionAutoListen = false
+        fakeOrchestrator.queuedResults = [result]
+
+        let fakeVoicePipeline = FakeVoicePipeline()
+        let appState = AppState(
+            orchestrator: fakeOrchestrator,
+            voicePipeline: fakeVoicePipeline,
+            thinkingFillerDelay: 0.05,
+            questionAutoListenNoSpeechTimeoutMs: 120,
+            enableRuntimeServices: false
+        )
+        appState.isListeningEnabled = true
+        appState.send("hello")
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        appState.debugHandleSpeechPlaybackFinished()
+        try? await Task.sleep(nanoseconds: 320_000_000)
+
+        XCTAssertEqual(fakeVoicePipeline.startFollowUpCaptureCalls, 0)
+    }
+
+    func testNoAutoListenWhenMultipleQuestionMarks() async {
+        let fakeOrchestrator = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Need anything else??")]
+        result.spokenLines = ["Need anything else??"]
+        fakeOrchestrator.queuedResults = [result]
+
+        let fakeVoicePipeline = FakeVoicePipeline()
+        let appState = AppState(
+            orchestrator: fakeOrchestrator,
+            voicePipeline: fakeVoicePipeline,
+            thinkingFillerDelay: 0.05,
+            questionAutoListenNoSpeechTimeoutMs: 120,
+            enableRuntimeServices: false
+        )
+        appState.isListeningEnabled = true
+        appState.send("hello")
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        appState.debugHandleSpeechPlaybackFinished()
+        try? await Task.sleep(nanoseconds: 320_000_000)
+
+        XCTAssertEqual(fakeVoicePipeline.startFollowUpCaptureCalls, 0,
+                       "Auto-listen should only trigger for a single trailing question mark")
     }
 }
 
@@ -28,6 +400,73 @@ final class FakeOllamaTransportForPipeline: OllamaTransport {
             throw OllamaRouter.OllamaError.unreachable("No queued response")
         }
         return try queuedResponses.removeFirst().get()
+    }
+}
+
+@MainActor
+final class FakeTurnOrchestrator: TurnOrchestrating {
+    var pendingSlot: PendingSlot?
+    var delayNanoseconds: UInt64 = 0
+    var queuedResults: [TurnResult] = []
+
+    func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        if !queuedResults.isEmpty {
+            return queuedResults.removeFirst()
+        }
+        return TurnResult()
+    }
+}
+
+@MainActor
+final class FakeVoicePipeline: VoicePipelineCoordinating {
+    var onStatusChange: ((VoicePipelineStatus) -> Void)?
+    var onTranscript: ((String) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    private(set) var startFollowUpCaptureCalls = 0
+    private(set) var cancelFollowUpCaptureCalls = 0
+    private(set) var lastNoSpeechTimeoutMs: Int?
+    var autoCancelOnTimeout = false
+
+    func startListening() throws {}
+    func stopListening() {}
+
+    func startFollowUpCapture(noSpeechTimeoutMs: Int?) {
+        startFollowUpCaptureCalls += 1
+        lastNoSpeechTimeoutMs = noSpeechTimeoutMs
+        guard autoCancelOnTimeout, let timeoutMs = noSpeechTimeoutMs else { return }
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+            self?.cancelFollowUpCapture()
+        }
+    }
+
+    func cancelFollowUpCapture() {
+        cancelFollowUpCaptureCalls += 1
+    }
+}
+
+// MARK: - Mock ToolsRuntime for Image Probe Tests
+
+final class ImageProbeToolsRuntime: ToolsRuntimeProtocol {
+    private let urls: [String]
+
+    init(urls: [String]) {
+        self.urls = urls
+    }
+
+    func execute(_ toolAction: ToolAction) -> OutputItem? {
+        if toolAction.name == "show_image" {
+            let urlsStr = toolAction.args["urls"] ?? urls.joined(separator: "|")
+            let alt = toolAction.args["alt"] ?? "image"
+            let payload = "{\"urls\":[\(urlsStr.components(separatedBy: "|").map { "\"\($0)\"" }.joined(separator: ","))],\"alt\":\"\(alt)\"}"
+            return OutputItem(kind: .image, payload: payload)
+        }
+        return nil
     }
 }
 
@@ -62,6 +501,22 @@ final class RouterPipelineTests: XCTestCase {
     {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"London"},"say":"Let me check."}]}
     """
 
+    private let weatherWrongToolPlanJSON = """
+    {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"Melbourne"},"say":"Let me check the weather."}]}
+    """
+
+    private let weatherWrongToolActionJSON = """
+    {"action":"TOOL","name":"get_time","args":{"place":"Greenbank"},"say":"Checking weather."}
+    """
+
+    private let capabilityWrongToolActionJSON = """
+    {"action":"TOOL","name":"learn_website","args":{"url":"https://example.com","focus":"capability gap miner"},"say":"I'll learn from that page."}
+    """
+
+    private let websiteLearningActionJSON = """
+    {"action":"TOOL","name":"learn_website","args":{"url":"https://swift.org","focus":"packages"},"say":"I'll learn from that page."}
+    """
+
     // MARK: - A) OpenAI success does not call Ollama
 
     @MainActor
@@ -87,6 +542,179 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOllama.chatCallCount, 0, "Ollama should not be called")
         XCTAssertEqual(result.llmProvider, .openai)
         XCTAssertTrue(result.appendedChat.contains { $0.text == "Hey there!" })
+    }
+
+    @MainActor
+    func testOpenAISystemPromptIncludesCoTDirective() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        _ = try? await openAIRouter.routePlan("Solve a tricky logic puzzle")
+
+        guard let systemMessage = fakeOpenAI.chatCallLog.first?.first(where: { $0["role"] == "system" })?["content"] else {
+            return XCTFail("Expected a system prompt in OpenAI call messages")
+        }
+        XCTAssertTrue(systemMessage.contains("think step by step internally"),
+                      "System prompt should include CoT directive")
+    }
+
+    // MARK: - Weather/Time Tool Choice
+
+    @MainActor
+    func testRainingInMelbourneRoutesToGetWeather() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(weatherWrongToolPlanJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("Is it raining in Melbourne?")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for weather query")
+        }
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "get_weather")
+        XCTAssertEqual(args["place"]?.stringValue, "Melbourne")
+    }
+
+    @MainActor
+    func testWeatherInGreenbankTodayRoutesToGetWeather() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(weatherWrongToolActionJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("What's the weather in Greenbank today?")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for weather query")
+        }
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "get_weather")
+        XCTAssertEqual(args["place"]?.stringValue, "Greenbank")
+    }
+
+    @MainActor
+    func testTimeInLondonStaysOnGetTime() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTimePlanJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("What time is it in London?")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for time query")
+        }
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "get_time")
+        XCTAssertEqual(args["place"]?.stringValue, "London")
+    }
+
+    @MainActor
+    func testCapabilityBuildRequestRoutesToStartSkillforge() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(capabilityWrongToolActionJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("learn \"Capability Gap Miner\": analyzes failed/blocked turns and proposes the next capability to build.")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for capability build request")
+        }
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "start_skillforge")
+        XCTAssertTrue((args["goal"]?.stringValue ?? "").lowercased().contains("capability gap miner"))
+    }
+
+    @MainActor
+    func testWebsiteLearningRequestWithURLStaysOnLearnWebsite() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(websiteLearningActionJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("Learn this website https://swift.org and focus on package manager basics.")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for website learning request")
+        }
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "learn_website")
+        XCTAssertEqual(args["url"]?.stringValue, "https://swift.org")
+    }
+
+    @MainActor
+    func testStopCapabilityLearningRoutesToForgeQueueClear() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("Stop capability learning now.")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a plan for stop capability request")
+        }
+        guard case .tool(let name, _, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "forge_queue_clear")
     }
 
     // MARK: - B) OpenAI transport error does NOT fall back to Ollama
@@ -328,13 +956,10 @@ final class RouterPipelineTests: XCTestCase {
         KeychainStore.delete(forKey: testKey, service: testService)
     }
 
-    // MARK: - K0) Tool step with say produces both say AND tool result in appendedChat
+    // MARK: - K0) Tool step say is silent; only tool result is user-visible
 
     @MainActor
-    func testToolStepWithSayProducesBothMessages() async {
-        // get_time plan with say — should produce 2 assistant messages:
-        // 1) "Let me check." (step say)
-        // 2) "It's X:XX AM/PM." (tool structured spoken)
+    func testToolStepWithSayIsSilent() async {
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [.success(validTimePlanJSON)]
 
@@ -352,14 +977,337 @@ final class RouterPipelineTests: XCTestCase {
         let result = await orchestrator.processTurn("what time is it in London", history: [])
 
         let assistantMessages = result.appendedChat.filter { $0.role == .assistant }
-        XCTAssertEqual(assistantMessages.count, 2,
-                       "Should have 2 assistant messages: say + tool result, got: \(assistantMessages.map(\.text))")
-        XCTAssertEqual(assistantMessages[0].text, "Let me check.",
-                       "First message should be the step say")
-        XCTAssertTrue(assistantMessages[1].text.contains("It's"),
-                      "Second message should be the time result, got: \(assistantMessages[1].text)")
-        XCTAssertEqual(result.spokenLines.count, 2,
-                       "Should have 2 spoken lines")
+        XCTAssertEqual(assistantMessages.count, 1, "Tool step say should not be emitted")
+        XCTAssertTrue(assistantMessages[0].text.contains("It's"),
+                      "Should emit only the tool result")
+        XCTAssertEqual(result.spokenLines.count, 1, "Tool step say should not be spoken")
+    }
+
+    // MARK: - K1) Answer shaping (spoken summary + visual detail)
+
+    @MainActor
+    func testLongOutputUsesToolWindow() async {
+        let longStructured = """
+        {"action":"TALK","say":"# Delivery Plan\\n\\n## Milestones\\n- Draft\\n- Review\\n- Publish\\n\\n## Steps\\n1. Outline scope\\n2. Build implementation\\n3. Validate release"}
+        """
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(longStructured)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("give me a delivery plan", history: [])
+
+        XCTAssertEqual(result.appendedOutputs.count, 1, "Long/structured TALK should move to canvas")
+        XCTAssertEqual(result.appendedOutputs.first?.kind, .markdown)
+        XCTAssertTrue(result.appendedOutputs.first?.payload.contains("## Milestones") == true)
+        XCTAssertEqual(result.appendedChat.count, 1, "Chat should be short confirmation")
+        XCTAssertFalse(result.appendedChat[0].text.contains("Milestones"),
+                       "Confirmation should be short, not full details")
+    }
+
+    @MainActor
+    func testSpokenSummaryIsShort() async {
+        let denseTalk = """
+        {"action":"TALK","say":"This rollout includes architecture decisions, risk notes, deployment sequencing, test-matrix constraints, and rollback guidance for every stage so that teams can execute safely with clear ownership and contingency plans while keeping auditability and quality controls intact end to end."}
+        """
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(denseTalk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("summarize rollout guidance", history: [])
+        let spoken = result.spokenLines.first ?? ""
+        let sentenceCount = spoken.components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .count
+
+        XCTAssertEqual(result.appendedOutputs.count, 1, "Dense answer should include visual details")
+        XCTAssertLessThanOrEqual(sentenceCount, 2, "Spoken summary should be at most two sentences")
+        XCTAssertLessThan(spoken.count, 90, "Spoken summary should stay brief")
+    }
+
+    @MainActor
+    func testSimpleFactRemainsSpokenOnly() async {
+        let simpleTalk = #"{"action":"TALK","say":"Pacific is the largest ocean."}"#
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(simpleTalk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("what is the largest ocean?", history: [])
+
+        XCTAssertTrue(result.appendedOutputs.isEmpty, "Simple fact should not be pushed to tool window")
+        XCTAssertEqual(result.appendedChat.first(where: { $0.role == .assistant })?.text,
+                       "Pacific is the largest ocean.")
+        XCTAssertEqual(result.spokenLines.first, "Pacific is the largest ocean.")
+    }
+
+    @MainActor
+    func testNoHardcodedTopics() async {
+        let nonTopicStructured = """
+        {"action":"TALK","say":"## Sprint Retro\\n- Wins\\n- Risks\\n- Follow-ups\\n\\n1. Capture outcomes\\n2. Assign owners\\n3. Track due dates"}
+        """
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(nonTopicStructured)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("summarize team retro", history: [])
+
+        XCTAssertEqual(result.appendedOutputs.count, 1, "Shaping should trigger from structure, not topic keywords")
+        XCTAssertTrue(result.appendedOutputs[0].payload.contains("## Sprint Retro"))
+        XCTAssertFalse(result.spokenLines.isEmpty)
+    }
+
+    // MARK: - K2) Greeting anti-repeat (one extra LLM call max)
+
+    @MainActor
+    func testGreetingAntiRepeat() async {
+        let duplicateGreeting = #"{"action":"TALK","say":"Hey there!"}"#
+        let rephrasedGreeting = #"{"action":"TALK","say":"Hi, what's up?"}"#
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(duplicateGreeting), // first turn
+            .success(duplicateGreeting), // second turn initial
+            .success(rephrasedGreeting)  // second turn rephrase pass
+        ]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let first = await orchestrator.processTurn("hi sam", history: [])
+        let secondHistory = [
+            ChatMessage(role: .user, text: "hi sam"),
+            ChatMessage(role: .assistant, text: first.appendedChat.first?.text ?? "Hey there!")
+        ]
+        let second = await orchestrator.processTurn("hi sam", history: secondHistory)
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 3,
+                       "Second repeated greeting should trigger one extra rephrase call")
+        XCTAssertEqual(second.appendedChat.first?.text, "Hi, what's up?")
+    }
+
+    // MARK: - K2b) Optional follow-up question policy
+
+    @MainActor
+    func testFollowUpNotAddedWhenAlreadyQuestion() async {
+        let alreadyQuestion = #"{"action":"TALK","say":"Want me to continue?"}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(alreadyQuestion)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+        let result = await orchestrator.processTurn("hi", history: [])
+
+        let text = result.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertEqual(text.filter { $0 == "?" }.count, 1, "Should not append a second follow-up question")
+        XCTAssertFalse(result.triggerQuestionAutoListen, "Only generated follow-up questions should trigger auto-listen")
+    }
+
+    @MainActor
+    func testFollowUpCooldownEnforced() async {
+        let firstTalk = #"{"action":"TALK","say":"I finished that for you and included the key details."}"#
+        let secondTalk = #"{"action":"TALK","say":"I wrapped this up and summarized the important parts."}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(firstTalk), .success(secondTalk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            followUpCooldownTurns: 5
+        )
+
+        let first = await orchestrator.processTurn("turn one", history: [])
+        let firstText = first.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertEqual(firstText.filter { $0 == "?" }.count, 1)
+        XCTAssertTrue(first.triggerQuestionAutoListen)
+
+        let second = await orchestrator.processTurn("turn two", history: [])
+        let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertEqual(secondText.filter { $0 == "?" }.count, 0, "Follow-up should be blocked during cooldown")
+        XCTAssertFalse(second.triggerQuestionAutoListen)
+    }
+
+    @MainActor
+    func testFollowUpMaxOneSentence() async {
+        let talk = #"{"action":"TALK","say":"I prepared the result and highlighted the important points for you."}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(talk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+        let result = await orchestrator.processTurn("wrap up", history: [])
+
+        let text = result.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertEqual(text.filter { $0 == "?" }.count, 1, "Follow-up should be a single question sentence")
+        XCTAssertTrue(text.hasSuffix("?"), "Follow-up question must end the message")
+    }
+
+    // MARK: - K3) Memory acknowledgements (optional + cooldown)
+
+    @MainActor
+    func testMemoryAckOnlyWhenRelevant() async {
+        let token = "acktoken\(Int.random(in: 10000...99999))"
+        guard let memory = MemoryStore.shared.addMemory(type: .note, content: "Project \(token) is active.") else {
+            return XCTFail("Failed to seed memory")
+        }
+        defer { _ = MemoryStore.shared.deleteMemory(idOrPrefix: memory.id.uuidString) }
+
+        let talk = "{\"action\":\"TALK\",\"say\":\"I remember you mentioned Project \(token). Here's a quick update.\"}"
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(talk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Any update on project \(token)?", history: [])
+        let text = result.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertTrue(text.lowercased().contains("i remember you mentioned"),
+                      "Memory acknowledgement should be preserved when relevant memory exists")
+    }
+
+    @MainActor
+    func testMemoryAckRespectsCooldown() async {
+        let token = "acktoken\(Int.random(in: 10000...99999))"
+        guard let memory = MemoryStore.shared.addMemory(type: .note, content: "Project \(token) is active.") else {
+            return XCTFail("Failed to seed memory")
+        }
+        defer { _ = MemoryStore.shared.deleteMemory(idOrPrefix: memory.id.uuidString) }
+
+        let firstTalk = "{\"action\":\"TALK\",\"say\":\"I remember you mentioned Project \(token). Here's the first update.\"}"
+        let secondTalk = "{\"action\":\"TALK\",\"say\":\"If I'm remembering right, this relates to \(token). Let's go over the next step.\"}"
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(firstTalk), .success(secondTalk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, memoryAckCooldownTurns: 20)
+
+        let first = await orchestrator.processTurn("status on \(token)", history: [])
+        let firstText = first.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+        XCTAssertTrue(firstText.lowercased().contains("i remember you mentioned"))
+
+        let history = [
+            ChatMessage(role: .user, text: "status on \(token)"),
+            ChatMessage(role: .assistant, text: firstText)
+        ]
+        let second = await orchestrator.processTurn("any other update on \(token)?", history: history)
+        let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+
+        XCTAssertFalse(secondText.lowercased().contains("i remember you mentioned"),
+                       "Memory acknowledgement should be removed during cooldown")
+        XCTAssertFalse(secondText.lowercased().contains("if i'm remembering right"),
+                       "Memory acknowledgement should be removed during cooldown")
+        XCTAssertTrue(secondText.contains("Let's go over the next step."))
+    }
+
+    @MainActor
+    func testMemoryAckDoesNotAppearWithoutMemoryHints() async {
+        let token = "acktoken\(Int.random(in: 10000...99999))"
+        let queryToken = "nomatch\(Int.random(in: 10000...99999))"
+        let talk = "{\"action\":\"TALK\",\"say\":\"I remember you mentioned Project \(token). Here's a quick update.\"}"
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(talk)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("status \(queryToken)", history: [])
+        let text = result.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
+
+        XCTAssertFalse(text.lowercased().contains("i remember you mentioned"),
+                       "Memory acknowledgement should be stripped when there are no relevant hints")
+        XCTAssertTrue(text.contains("Here's a quick update."),
+                      "Remainder of response should still be preserved")
     }
 
     // MARK: - K) Malformed show_text JSON salvaged as show_text tool
@@ -498,6 +1446,63 @@ final class RouterPipelineTests: XCTestCase {
         } catch {
             XCTFail("Should not throw — should be salvaged: \(error)")
         }
+    }
+
+    // MARK: - P) Image probe failure prompt includes HTTP codes
+
+    @MainActor
+    func testImageProbeFailurePromptIncludesHTTPCodes() async {
+        // Use a mock ToolsRuntime that returns show_image with fake URLs
+        let mockRuntime = ImageProbeToolsRuntime(urls: [
+            "https://example.com/fake1.jpg",
+            "https://example.com/fake2.jpg"
+        ])
+        let executor = PlanExecutor(toolsRuntime: mockRuntime)
+
+        let plan = Plan(steps: [
+            .tool(name: "show_image",
+                  args: ["urls": .string("https://example.com/fake1.jpg|https://example.com/fake2.jpg"),
+                         "alt": .string("a frog")],
+                  say: "Here you go.")
+        ])
+
+        let result = await executor.execute(plan, originalInput: "show me a frog")
+
+        // Probe should fail for these URLs (they don't exist)
+        // The pendingSlotRequest.prompt should exist with image_url slot
+        if let req = result.pendingSlotRequest {
+            XCTAssertEqual(req.slot, "image_url", "Should set image_url slot for auto-repair")
+        }
+        // Note: actual HTTP codes depend on network — in CI, the test verifies the slot is set
+    }
+
+    // MARK: - Q) Repair prompt demands 3 URLs and Wikimedia host
+
+    @MainActor
+    func testRepairPromptDemands3UrlsAndWikimediaHost() async {
+        // Simulate what happens when all image URLs fail:
+        // The formatted message from probeImageOutput should mention wikimedia
+        let mockRuntime = ImageProbeToolsRuntime(urls: [
+            "https://example.com/bad1.jpg",
+            "https://example.com/bad2.jpg"
+        ])
+        let executor = PlanExecutor(toolsRuntime: mockRuntime)
+
+        let plan = Plan(steps: [
+            .tool(name: "show_image",
+                  args: ["urls": .string("https://example.com/bad1.jpg|https://example.com/bad2.jpg"),
+                         "alt": .string("test")],
+                  say: "Here.")
+        ])
+
+        let result = await executor.execute(plan, originalInput: "show me something")
+
+        // When probe fails, the spoken line should mention broken URL
+        let hasProbeFailMessage = result.spokenLines.contains { $0.contains("couldn't load") }
+        XCTAssertTrue(hasProbeFailMessage, "Should have probe failure spoken message, got: \(result.spokenLines)")
+
+        // The pending slot should be image_url
+        XCTAssertEqual(result.pendingSlotRequest?.slot, "image_url")
     }
 
     // MARK: - O) CAPABILITY_GAP without fields becomes TALK

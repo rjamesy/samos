@@ -471,6 +471,15 @@ final class OllamaRouter {
             dict["args"] = obj
         }
 
+        // Move "say" from inside args to top level (LLM sometimes nests it)
+        if var args = dict["args"] as? [String: Any],
+           let say = args["say"] as? String,
+           (dict["say"] == nil || (dict["say"] as? String)?.isEmpty == true) {
+            dict["say"] = say
+            args.removeValue(forKey: "say")
+            dict["args"] = args
+        }
+
         // Case 1: LLM used tool name as action (e.g. "action": "show_image")
         if toolNames.contains(actionRaw) {
             let toolName = actionRaw
@@ -594,9 +603,8 @@ final class OllamaRouter {
             toolDescriptions += "- \(tool.name): \(tool.description)\n"
         }
 
-        // Build memory context: relevant matches + recent
-        let relevantMemories = MemoryStore.shared.searchMemories(query: input, limit: 5)
-        let recentMemories = MemoryStore.shared.recentMemories(limit: 5)
+        // Build compact memory context to avoid prompt bloat.
+        let relevantMemories = MemoryStore.shared.memoryContext(query: input, maxItems: 3, maxChars: 300)
 
         var memoryBlock = ""
         if !relevantMemories.isEmpty {
@@ -605,11 +613,27 @@ final class OllamaRouter {
                 memoryBlock += "- [\(mem.type.rawValue)]: \(mem.content)\n"
             }
         }
-        if !recentMemories.isEmpty {
-            memoryBlock += "\n## Recent Memories\n"
-            for mem in recentMemories {
-                memoryBlock += "- [\(mem.type.rawValue)]: \(mem.content)\n"
+
+        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 3, maxChars: 260)
+        var selfLearningBlock = ""
+        if !selfLessons.isEmpty {
+            selfLearningBlock += "\n## Self-Improvement Lessons (private)\n"
+            for lesson in selfLessons {
+                selfLearningBlock += "- \(lesson)\n"
             }
+            selfLearningBlock += "- Use these lessons as internal quality guidance only.\n"
+            selfLearningBlock += "- Never mention these lessons directly to the user.\n"
+        }
+
+        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 10, maxChars: 1200)
+        var websiteLearningBlock = ""
+        if !websiteHints.isEmpty {
+            websiteLearningBlock += "\n## Learned Website Notes\n"
+            for note in websiteHints {
+                websiteLearningBlock += "- \(note)\n"
+            }
+            websiteLearningBlock += "- Use these notes when user asks about previously learned websites.\n"
+            websiteLearningBlock += "- Do not invent details not present in these notes.\n"
         }
 
         // Build installed skills context
@@ -633,8 +657,16 @@ final class OllamaRouter {
         - Greet naturally: "Hey!", "What's up?", "Good to see you" — NEVER "Hello! How can I assist you today?"
         - NEVER say "As an AI…", "I'm just a language model…", or "I don't have feelings…"
         - Keep spoken responses short — one to two sentences. People are listening, not reading.
+        - You may include one brief follow-up question if it helps the user proceed.
+        - Do NOT ask whether the user wants a quick/brief/detailed version unless they explicitly ask for that choice.
         - Match the user's energy: casual question → casual answer; serious question → thoughtful answer.
         - Use contractions (I'm, don't, that's) and informal phrasing. Avoid stiff or corporate language.
+        - If your last message asked a question and the user replies briefly, treat it as an answer to that question unless they clearly changed topic.
+
+        ## Reasoning (CoT)
+        - For complex tasks (math, logic, coding, multi-step planning), think step by step internally before choosing the final JSON action.
+        - Break the task into small logical checks internally, then output only the best final action.
+        - Keep internal reasoning private. Never output chain-of-thought text.
 
         ## Anti-Repetition
         - Never reuse the same greeting or phrase verbatim within the last 10 assistant messages.
@@ -713,20 +745,20 @@ final class OllamaRouter {
         For getting the time in a specific timezone (IANA ID):
         {"action": "TOOL", "name": "get_time", "args": {"timezone": "America/Chicago"}, "say": "Let me check"}
 
-        For requests you cannot handle (offer to learn):
-        {"action":"PLAN","say":"I can't do that yet, but I could try to learn.","steps":[
-          {"step":"ask","slot":"learn_confirm","prompt":"Want me to try to learn that?"}
-        ]}
+        For learning from a website URL:
+        {"action": "TOOL", "name": "learn_website", "args": {"url": "https://example.com", "focus": "pricing"}, "say": "I'll learn from that page."}
 
-        After user confirms learning (start_skillforge):
-        {"action":"PLAN","steps":[
-          {"step":"tool","name":"start_skillforge","args":{"goal":"convert currencies"},"say":"On it — I'll start learning that."}
-        ]}
+        For autonomous timed learning:
+        {"action": "TOOL", "name": "autonomous_learn", "args": {"minutes": "5", "topic": "software engineering"}, "say": "I'll go learn and report back."}
 
-        Check forge queue status:
-        {"action":"PLAN","steps":[
-          {"step":"tool","name":"forge_queue_status","args":{},"say":"Let me check."}
-        ]}
+        For stopping autonomous timed learning:
+        {"action": "TOOL", "name": "stop_autonomous_learn", "args": {}, "say": "Okay, I'll stop learning now."}
+
+        For building a new capability/skill:
+        {"action": "TOOL", "name": "start_skillforge", "args": {"goal": "Capability Gap Miner", "constraints": "Analyze failed/blocked turns and propose the next capability to build."}, "say": "I'll build that capability."}
+
+        For stopping capability learning:
+        {"action": "TOOL", "name": "forge_queue_clear", "args": {}, "say": "Okay, I stopped capability learning."}
 
         Legacy capability gap (still accepted):
         {"action": "CAPABILITY_GAP", "goal": "what user wanted", "missing": "what is needed", "say": "Brief response"}
@@ -747,10 +779,12 @@ final class OllamaRouter {
           Example: "Do you mean Bailey? I don't have that information — would you like to tell me?"
         - If a question is ambiguous and multiple or uncertain memory matches exist, ask a short clarifying question referencing the best match
         \(memoryBlock)
+        \(selfLearningBlock)
+        \(websiteLearningBlock)
 
         ## TOOLS & SKILLS POLICY
         YOU are responsible for choosing which tool to use. The app trusts your judgment.
-        - For time questions, prefer get_time tool for accurate results. Do NOT call start_skillforge or any forge tools for time/date/weather/general questions.
+        - For time questions, prefer get_time tool for accurate results.
         - For get_time: use "place" arg for any city or state name (e.g. "London", "Tokyo", "Alabama", "New York"), "timezone" for IANA IDs. The tool resolves international cities internally. If the user says a country or region with multiple timezones (America, US, United States), ask which state or city first using a PLAN ask step with slot "timezone".
         - If user says "timer", "countdown", or relative time ("in 10 seconds", "5 minutes from now") → use schedule_task with in_seconds arg (value in seconds).
         - If user says "alarm" or absolute time ("at 7 AM", "tomorrow at noon") → use schedule_task with run_at arg.
@@ -758,10 +792,24 @@ final class OllamaRouter {
         - If user asks to cancel an alarm or task → use cancel_task tool. NEVER claim "cancelled" without calling the tool.
         - If user asks to list alarms or tasks → use list_tasks tool.
         - If user asks something that an installed skill handles → use the appropriate TOOL call.
+        - If user asks to read/learn/study a website URL → use learn_website with the url and optional focus.
+        - If user asks what Sam can see right now through the laptop camera → use describe_camera_view.
+        - If user asks to find a specific object in camera view → use find_camera_objects with query.
+        - If user asks about face presence/count in camera view → use get_camera_face_presence.
+        - If user asks Sam to learn/register a face from camera view → use enroll_camera_face with name.
+        - If user asks Sam to identify/recognize known faces from camera view → use recognize_camera_faces.
+        - If user asks a camera question (for example "Do you see X?") → use camera_visual_qa with question.
+        - If user asks for camera inventory tracking/snapshot → use camera_inventory_snapshot.
+        - If user asks to save what camera currently sees for later recall → use save_camera_memory_note.
+        - If user asks you to learn autonomously for a duration (for example, "learn for 5 minutes") → use autonomous_learn.
+        - If user asks to stop autonomous timed learning → use stop_autonomous_learn.
+        - If user asks Sam to build/create/learn a new capability or skill → use start_skillforge with goal and optional constraints.
+        - Do NOT use learn_website or autonomous_learn as substitutes for capability-building requests.
+        - After learn_website, use learned website notes for follow-up questions.
+        - If user asks to stop/abort capability learning, use forge_queue_clear.
         - If user asks to remember something → use save_memory. If they ask what you remember → use list_memories.
         - If no tool/skill exists for the request → use CAPABILITY_GAP.
         - For general conversation, greetings, opinions, jokes, factual questions → use TALK.
-        - NEVER call start_skillforge unless the user explicitly asked to learn or you are confirming learn_confirm/batch_confirm. Time, weather, and general knowledge questions are NOT learning requests.
 
         ## TOOL PAYLOAD LIMITS
         - For show_text, keep args.markdown under ~1200 characters.
@@ -769,6 +817,8 @@ final class OllamaRouter {
         - ALWAYS return complete, valid JSON with closed quotes and braces. Never cut off mid-string.
 
         ## CANVAS CONTENT POLICY
+        - For dense or structured content (markdown blocks, headings/lists/steps, or >200 chars), keep "say" to a short spoken summary and put full details in TOOL show_text markdown.
+        - For long or structured content (multi-line, headings, lists, or >240 chars), prefer TOOL show_text with markdown.
         - If user asks for a recipe, instructions, how-to, list, or structured content → MUST use TOOL show_text with markdown in args.
         - If user asks for a picture, photo, or image → MUST use TOOL show_image with direct image URL in args.
         - NEVER put recipes, instructions, or long content in the "say" field of TALK.
@@ -780,19 +830,6 @@ final class OllamaRouter {
         - If user says "timer"/"countdown"/relative time → in_seconds. If "alarm"/absolute → run_at
         - If you need information to complete a request → use ask step with slot name matching the info needed (e.g. "time", "timezone", "task_id")
         - Single TALK/TOOL actions are still accepted as fallback
-
-        ## SKILLFORGE (Self-Directed Learning)
-        - If you can't handle a request and no installed skill covers it, use a PLAN with:
-          1. A talk step explaining you can't do it yet but could learn
-          2. An ask step with slot "learn_confirm" and prompt "Want me to try to learn that?"
-        - If the user confirms (the [PENDING_SLOT] reply is affirmative), use a PLAN with:
-          A tool step: {"step":"tool","name":"start_skillforge","args":{"goal":"<what to learn>","constraints":"<optional constraints>"}}
-        - The "constraints" arg is OPTIONAL — only include it if the user specified constraints
-        - If the user declines, respond with a friendly TALK acknowledging
-        - To check forge queue status: use forge_queue_status tool
-        - To clear finished forge jobs: use forge_queue_clear tool
-        - NEVER call start_skillforge without user confirmation first
-        - If user explicitly says "learn X" or "teach yourself X", treat as confirmed — go straight to start_skillforge
 
         ## CRITICAL RULES
         - The "action" field must be EXACTLY one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP

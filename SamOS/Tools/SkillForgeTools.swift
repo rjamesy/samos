@@ -4,7 +4,7 @@ import Foundation
 
 struct StartSkillForgeTool: Tool {
     let name = "start_skillforge"
-    let description = "Queue a new skill to be learned/built. Args: 'goal' (required), 'constraints' (optional). Enqueues into the forge queue; processed FIFO."
+    let description = "Queue a new capability/skill build for Sam. Use when user asks Sam to build/create/learn a capability. Args: 'goal' (required), 'constraints' (optional). Enqueues into the forge queue; processed FIFO."
 
     func execute(args: [String: String]) -> OutputItem {
         let goal = args["goal"] ?? ""
@@ -112,19 +112,28 @@ struct ForgeQueueStatusTool: Tool {
 
 struct ForgeQueueClearTool: Tool {
     let name = "forge_queue_clear"
-    let description = "Clear finished (completed/failed) jobs from the forge queue"
+    let description = "Stop/abort active capability learning and clear queued/running forge jobs. Optional arg: 'scope' = 'finished' to only clear completed/failed history."
 
     func execute(args: [String: String]) -> OutputItem {
-        SkillForgeQueueService.shared.clearFinished()
+        let scope = args["scope"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if scope == "finished" {
+            SkillForgeQueueService.shared.clearFinished()
+        } else {
+            SkillForgeQueueService.shared.stopAll()
+        }
 
         let payload: [String: Any] = [
-            "spoken": "Cleared the forge queue.",
-            "formatted": "Finished forge jobs cleared."
+            "spoken": scope == "finished"
+                ? "Cleared finished forge jobs."
+                : "Stopped capability learning and cleared the forge queue.",
+            "formatted": scope == "finished"
+                ? "Finished forge jobs cleared."
+                : "Stopped active capability learning. Cleared queued and running forge jobs."
         ]
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let json = String(data: data, encoding: .utf8) {
             return OutputItem(kind: .markdown, payload: json)
         }
-        return OutputItem(kind: .markdown, payload: "Forge queue cleared.")
+        return OutputItem(kind: .markdown, payload: "Capability learning queue cleared.")
     }
 }

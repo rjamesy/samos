@@ -87,19 +87,31 @@ final class STTService {
 
     /// Transcribes a 16 kHz mono WAV file and returns the text. Deletes the WAV file after processing.
     func transcribe(wavURL: URL) async throws -> String {
+        let useRealtimeSTT = OpenAISettings.realtimeModeEnabled && !OpenAISettings.realtimeUseClassicSTT
+        if useRealtimeSTT {
+            defer { try? FileManager.default.removeItem(at: wavURL) }
+            do {
+                return try await OpenAIRealtimeSocket.transcribeWav(wavURL)
+            } catch OpenAIRealtimeSocket.RealtimeError.missingTranscript {
+                return ""
+            } catch OpenAIRealtimeSocket.RealtimeError.requestFailed(let message) {
+                if message.lowercased().contains("audio buffer empty") {
+                    return ""
+                }
+                throw OpenAIRealtimeSocket.RealtimeError.requestFailed(message)
+            }
+        }
+
         guard let ctx = ctx else { throw STTError.modelLoadFailed }
-
-        let samples = try loadWAVSamples(url: wavURL)
-
-        // Clean up temp file
-        try? FileManager.default.removeItem(at: wavURL)
-
-        let capturedSamples = samples
         let capturedCtx = ctx
+        let capturedWavURL = wavURL
 
         let text: String = try await Task.detached(priority: .userInitiated) {
+            defer { try? FileManager.default.removeItem(at: capturedWavURL) }
+            let capturedSamples = try Self.loadWAVSamples(url: capturedWavURL)
+
             var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-            params.n_threads = Int32(min(ProcessInfo.processInfo.activeProcessorCount, 4))
+            params.n_threads = Self.optimalThreadCount()
             params.print_special = false
             params.print_progress = false
             params.print_realtime = false
@@ -133,9 +145,16 @@ final class STTService {
         return text
     }
 
+    private static func optimalThreadCount() -> Int32 {
+        let coreCount = ProcessInfo.processInfo.activeProcessorCount
+        // Keep one core free for UI/audio and cap to avoid diminishing returns.
+        let tuned = max(2, min(coreCount - 1, 8))
+        return Int32(tuned)
+    }
+
     // MARK: - WAV Loading
 
-    private func loadWAVSamples(url: URL) throws -> [Float] {
+    private static func loadWAVSamples(url: URL) throws -> [Float] {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw STTError.noAudioFile
         }

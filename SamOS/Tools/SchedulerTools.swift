@@ -1,5 +1,26 @@
 import Foundation
 
+private enum SchedulerFormatting {
+    static let mediumDateShortTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    static let strictISOWithFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static let strictISO: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+}
+
 // MARK: - Schedule Task Tool
 
 struct ScheduleTaskTool: Tool {
@@ -58,10 +79,7 @@ struct ScheduleTaskTool: Tool {
                 spoken = "Timer set for \(display)."
                 formatted = "Timer set for \(display). `(\(shortId))`"
             } else {
-                let formatter = DateFormatter()
-                formatter.dateStyle = .medium
-                formatter.timeStyle = .short
-                let display = formatter.string(from: runAt)
+                let display = SchedulerFormatting.mediumDateShortTime.string(from: runAt)
                 spoken = "Alarm set for \(display)."
                 formatted = "Alarm set for \(display). `(\(shortId))`"
             }
@@ -94,13 +112,8 @@ struct ScheduleTaskTool: Tool {
         let lastChar = trimmed.last
         guard lastChar == "Z" || lastChar == "z" || lastChar?.isNumber == true else { return nil }
 
-        let iso1 = ISO8601DateFormatter()
-        iso1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = iso1.date(from: trimmed) { return d }
-
-        let iso2 = ISO8601DateFormatter()
-        iso2.formatOptions = [.withInternetDateTime]
-        if let d = iso2.date(from: trimmed) { return d }
+        if let d = SchedulerFormatting.strictISOWithFractional.date(from: trimmed) { return d }
+        if let d = SchedulerFormatting.strictISO.date(from: trimmed) { return d }
 
         return nil
     }
@@ -147,15 +160,11 @@ struct CancelTaskTool: Tool {
                 return OutputItem(kind: .markdown, payload: "There are no pending alarms to cancel.")
             }
 
-            let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .short
-
             let spoken = "Which one do you want to cancel?"
             var formattedLines: [String] = []
             for task in pending {
                 let shortId = String(task.id.uuidString.prefix(8)).lowercased()
-                var line = "- **\(shortId)**: \(formatter.string(from: task.runAt))"
+                var line = "- **\(shortId)**: \(SchedulerFormatting.mediumDateShortTime.string(from: task.runAt))"
                 if !task.label.isEmpty { line += " — \(task.label)" }
                 formattedLines.append(line)
             }
@@ -218,17 +227,13 @@ struct ListTasksTool: Tool {
             return OutputItem(kind: .markdown, payload: "No pending tasks.")
         }
 
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-
         let spoken = "You have \(tasks.count) pending task\(tasks.count == 1 ? "" : "s")."
 
         var md = "| ID | Time | Label | Skill |\n"
         md += "|:---|:-----|:------|:------|\n"
         for task in tasks {
             let shortId = String(task.id.uuidString.prefix(8)).lowercased()
-            md += "| `\(shortId)` | \(formatter.string(from: task.runAt)) | \(task.label) | \(task.skillId) |\n"
+            md += "| `\(shortId)` | \(SchedulerFormatting.mediumDateShortTime.string(from: task.runAt)) | \(task.label) | \(task.skillId) |\n"
         }
         md += "\n*\(tasks.count) pending task\(tasks.count == 1 ? "" : "s").*"
 

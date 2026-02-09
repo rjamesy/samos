@@ -18,6 +18,14 @@ final class ToolRegistry {
     private init() {
         register(ShowTextTool())
         register(ShowImageTool())
+        register(DescribeCameraViewTool())
+        register(CameraObjectFinderTool())
+        register(CameraFacePresenceTool())
+        register(EnrollCameraFaceTool())
+        register(RecognizeCameraFacesTool())
+        register(CameraVisualQATool())
+        register(CameraInventorySnapshotTool())
+        register(SaveCameraMemoryNoteTool())
         register(CapabilityGapToClaudePromptTool())
         register(SaveMemoryTool())
         register(ListMemoriesTool())
@@ -26,6 +34,10 @@ final class ToolRegistry {
         register(ScheduleTaskTool())
         register(CancelTaskTool())
         register(ListTasksTool())
+        register(LearnWebsiteTool())
+        register(AutonomousLearnTool())
+        register(StopAutonomousLearnTool())
+        register(GetWeatherTool())
         register(GetTimeTool())
         register(StartSkillForgeTool())
         register(ForgeQueueStatusTool())
@@ -121,6 +133,621 @@ struct ShowImageTool: Tool {
     }
 }
 
+struct DescribeCameraViewTool: Tool {
+    let name = "describe_camera_view"
+    let description = "Describes what Sam currently sees through the live laptop camera. Use when the user asks what Sam can see or asks for a visual scene description. Camera must be enabled in Audio/Visual settings."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        _ = args
+        guard camera.isRunning else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "Camera is off. Turn on Camera in `Settings > Audio/Visual`, then ask again."
+            )
+        }
+
+        guard let scene = camera.describeCurrentScene() else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "Camera is on, but I don't have a frame yet. Try again in a second."
+            )
+        }
+
+        return OutputItem(kind: .markdown, payload: scene.markdown())
+    }
+}
+
+struct CameraObjectFinderTool: Tool {
+    let name = "find_camera_objects"
+    let description = "Finds objects in the current live camera frame by keyword. Args: 'query' (required). Example: find_camera_objects(query:\"bottle\")."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let query = (args["query"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return cameraPromptPayload(
+                slot: "query",
+                spoken: "What object should I look for?",
+                formatted: "Provide a query, for example `bottle`, `phone`, or `keys`."
+            )
+        }
+
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then ask me to find an object.")
+        }
+        guard let analysis = camera.currentAnalysis() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        let queryTokens = cameraTokens(from: query)
+        let queryTokenSet = Set(queryTokens)
+        let queryLower = query.lowercased()
+
+        let labelMatches = analysis.labels.compactMap { label -> (String, Float)? in
+            let labelTokens = cameraTokens(from: label.label)
+            let overlap = Set(labelTokens).intersection(queryTokenSet).count
+            let phraseHit = label.label.contains(queryLower)
+            guard overlap > 0 || phraseHit else { return nil }
+            let score = label.confidence + Float(overlap) * 0.2 + (phraseHit ? 0.35 : 0)
+            return (label.label, score)
+        }
+        .sorted { $0.1 > $1.1 }
+
+        let textMatches = analysis.recognizedText.filter { line in
+            let lower = line.lowercased()
+            if lower.contains(queryLower) { return true }
+            let lineTokens = Set(cameraTokens(from: lower))
+            return !lineTokens.intersection(queryTokenSet).isEmpty
+        }
+
+        let spoken: String
+        var lines: [String] = [
+            "# Object Finder",
+            "",
+            "- Query: \(query)",
+            "- Captured: \(DateFormatter.localizedString(from: analysis.capturedAt, dateStyle: .none, timeStyle: .medium))"
+        ]
+
+        if labelMatches.isEmpty && textMatches.isEmpty {
+            spoken = "I couldn't confidently find \(query) in the current view."
+            lines.append("")
+            lines.append("## Result")
+            lines.append("No strong match found for `\(query)` in this frame.")
+            if !analysis.labels.isEmpty {
+                lines.append("")
+                lines.append("## Top Visible Objects")
+                for label in analysis.labels.prefix(5) {
+                    lines.append("- \(label.label) (\(Int((label.confidence * 100).rounded()))%)")
+                }
+            }
+        } else {
+            spoken = "I found likely matches for \(query)."
+            if !labelMatches.isEmpty {
+                lines.append("")
+                lines.append("## Object Matches")
+                for (label, score) in labelMatches.prefix(5) {
+                    lines.append("- \(label) (match score \(String(format: "%.2f", score)))")
+                }
+            }
+            if !textMatches.isEmpty {
+                lines.append("")
+                lines.append("## Text Matches")
+                for match in textMatches.prefix(5) {
+                    lines.append("- \(match)")
+                }
+            }
+        }
+
+        return cameraStructuredPayload(
+            kind: "camera_object_finder",
+            spoken: spoken,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+struct CameraFacePresenceTool: Tool {
+    let name = "get_camera_face_presence"
+    let description = "Detects face presence in the live camera frame. Use for questions like 'do you see a face?' or 'how many faces are there?'."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        _ = args
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then ask about face presence.")
+        }
+        guard let analysis = camera.currentAnalysis() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        let count = analysis.faces.count
+        let noun = count == 1 ? "face" : "faces"
+        let spoken = count == 0
+            ? "I do not see a face in the current frame."
+            : "I can detect \(count) \(noun) right now."
+
+        var lines: [String] = [
+            "# Face Presence",
+            "",
+            "- Captured: \(DateFormatter.localizedString(from: analysis.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            "- Faces detected: \(count)"
+        ]
+
+        if !analysis.labels.isEmpty {
+            lines.append("")
+            lines.append("## Frame Context")
+            for label in analysis.labels.prefix(4) {
+                lines.append("- \(label.label) (\(Int((label.confidence * 100).rounded()))%)")
+            }
+        }
+
+        return cameraStructuredPayload(
+            kind: "camera_face_presence",
+            spoken: spoken,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+struct EnrollCameraFaceTool: Tool {
+    let name = "enroll_camera_face"
+    let description = "Enrolls a person's face in the local camera recognizer. Args: 'name' (required). Example: enroll_camera_face(name:\"Ricky\")."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let requestedName = (args["name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedName.isEmpty else {
+            return cameraPromptPayload(
+                slot: "name",
+                spoken: "What name should I use for this face?",
+                formatted: "Provide `name`, for example `enroll_camera_face(name:\"Ricky\")`."
+            )
+        }
+
+        let result = camera.enrollFace(name: requestedName)
+        switch result.status {
+        case .unsupported:
+            return OutputItem(kind: .markdown, payload: "Face enrollment is not available in the current camera provider.")
+        case .cameraOff:
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then enroll a face.")
+        case .noFrame:
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        case .invalidName:
+            return cameraPromptPayload(
+                slot: "name",
+                spoken: "I need a valid name to enroll this face.",
+                formatted: "Provide a non-empty `name`."
+            )
+        case .noFaceDetected:
+            let spoken = "I couldn't find a clear face in the current frame."
+            let formatted = [
+                "# Face Enrollment",
+                "",
+                "- Name: \(requestedName)",
+                "- Result: no face detected",
+                "",
+                "Make sure one face is clearly visible, then run enrollment again."
+            ].joined(separator: "\n")
+            return cameraStructuredPayload(kind: "camera_face_enrollment", spoken: spoken, formatted: formatted)
+        case .success:
+            let enrolledName = result.enrolledName ?? requestedName
+            let captured = result.capturedAt.map {
+                DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .medium)
+            } ?? "unknown"
+            let spoken = "I learned \(enrolledName)'s face."
+            let formatted = [
+                "# Face Enrollment",
+                "",
+                "- Name: \(enrolledName)",
+                "- Captured: \(captured)",
+                "- Samples for this name: \(result.samplesForName)",
+                "- Total enrolled identities: \(result.totalKnownNames)",
+                "",
+                "I can now try to recognize this person in future camera frames."
+            ].joined(separator: "\n")
+            return cameraStructuredPayload(kind: "camera_face_enrollment", spoken: spoken, formatted: formatted)
+        }
+    }
+}
+
+struct RecognizeCameraFacesTool: Tool {
+    let name = "recognize_camera_faces"
+    let description = "Recognizes previously enrolled faces from the live camera frame and reports matches with confidence."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        _ = args
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then ask me to recognize faces.")
+        }
+        guard let result = camera.recognizeKnownFaces() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        let spoken: String
+        if result.enrolledNames.isEmpty {
+            spoken = "I don't have any enrolled faces yet."
+        } else if result.detectedFaces == 0 {
+            spoken = "I don't currently see a face in the frame."
+        } else if result.matches.isEmpty {
+            spoken = "I can see faces, but none match my enrolled identities yet."
+        } else {
+            let names = result.matches.map { $0.name }
+            let uniqueNames = Array(NSOrderedSet(array: names)) as? [String] ?? names
+            spoken = "I recognize \(uniqueNames.joined(separator: ", "))."
+        }
+
+        var lines: [String] = [
+            "# Face Recognition",
+            "",
+            "- Captured: \(DateFormatter.localizedString(from: result.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            "- Faces detected: \(result.detectedFaces)",
+            "- Matches: \(result.matches.count)",
+            "- Unknown faces: \(result.unknownFaces)"
+        ]
+
+        if !result.matches.isEmpty {
+            lines.append("")
+            lines.append("## Recognized")
+            for match in result.matches {
+                let confidence = Int((match.confidence * 100).rounded())
+                lines.append("- \(match.name) (\(confidence)% confidence, distance \(String(format: "%.3f", match.distance)))")
+            }
+        }
+
+        if !result.enrolledNames.isEmpty {
+            lines.append("")
+            lines.append("## Enrolled Identities")
+            for name in result.enrolledNames {
+                lines.append("- \(name)")
+            }
+        } else {
+            lines.append("")
+            lines.append("No identities enrolled yet. Use `enroll_camera_face(name:\"...\")` first.")
+        }
+
+        return cameraStructuredPayload(
+            kind: "camera_face_recognition",
+            spoken: spoken,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+struct CameraVisualQATool: Tool {
+    let name = "camera_visual_qa"
+    let description = "Answers a question about the current camera frame. Args: 'question' (required). Generic visual Q&A over detected objects, visible text, and face presence."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let question = (args["question"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else {
+            return cameraPromptPayload(
+                slot: "question",
+                spoken: "What do you want to know about the camera view?",
+                formatted: "Ask one question about what is visible right now."
+            )
+        }
+
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then ask a visual question.")
+        }
+        guard let analysis = camera.currentAnalysis() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        let lower = question.lowercased()
+        let qTokens = Set(cameraTokens(from: lower))
+        let isYesNo = lower.hasPrefix("is ") || lower.hasPrefix("are ") || lower.hasPrefix("do ") || lower.hasPrefix("does ") || lower.hasPrefix("can ")
+        let asksFaceCount = lower.contains("how many") && (lower.contains("face") || lower.contains("person") || lower.contains("people"))
+        let asksText = lower.contains("text") || lower.contains("read") || lower.contains("word")
+
+        var spoken = ""
+        var evidence: [String] = []
+
+        if asksFaceCount {
+            spoken = "I can detect \(analysis.faces.count) \(analysis.faces.count == 1 ? "face" : "faces") right now."
+            evidence.append("Faces detected: \(analysis.faces.count)")
+        } else if asksText {
+            if analysis.recognizedText.isEmpty {
+                spoken = "I do not see readable text in the current frame."
+            } else {
+                spoken = "I can read: \(analysis.recognizedText.prefix(2).joined(separator: "; "))."
+                evidence.append(contentsOf: analysis.recognizedText.prefix(5).map { "Text: \($0)" })
+            }
+        } else {
+            let labelMatches = analysis.labels.filter { label in
+                let labelTokens = Set(cameraTokens(from: label.label))
+                return !labelTokens.intersection(qTokens).isEmpty
+            }
+            let textMatches = analysis.recognizedText.filter { text in
+                let textTokens = Set(cameraTokens(from: text))
+                return !textTokens.intersection(qTokens).isEmpty
+            }
+
+            if isYesNo {
+                let matchFound = !labelMatches.isEmpty || !textMatches.isEmpty
+                spoken = matchFound ? "Yes, that appears in the current camera view." : "No, I do not see that in the current frame."
+            } else if !labelMatches.isEmpty || !textMatches.isEmpty {
+                var parts: [String] = []
+                if !labelMatches.isEmpty {
+                    parts.append("Objects: \(labelMatches.prefix(3).map { $0.label }.joined(separator: ", "))")
+                }
+                if !textMatches.isEmpty {
+                    parts.append("Text: \(textMatches.prefix(2).joined(separator: "; "))")
+                }
+                spoken = parts.isEmpty ? "I can summarize what is visible right now." : parts.joined(separator: ". ") + "."
+            } else if let scene = camera.describeCurrentScene() {
+                spoken = scene.summary
+            } else {
+                spoken = "I can see the frame, but I cannot confidently answer that question yet."
+            }
+
+            evidence.append(contentsOf: labelMatches.prefix(5).map {
+                "Label: \($0.label) (\(Int(($0.confidence * 100).rounded()))%)"
+            })
+            evidence.append(contentsOf: textMatches.prefix(5).map { "Text: \($0)" })
+        }
+
+        var lines: [String] = [
+            "# Visual Q&A",
+            "",
+            "- Question: \(question)",
+            "- Captured: \(DateFormatter.localizedString(from: analysis.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            "",
+            "## Answer",
+            spoken
+        ]
+
+        if !evidence.isEmpty {
+            lines.append("")
+            lines.append("## Evidence")
+            for entry in evidence {
+                lines.append("- \(entry)")
+            }
+        }
+
+        return cameraStructuredPayload(
+            kind: "camera_visual_qa",
+            spoken: spoken,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+struct CameraInventorySnapshotTool: Tool {
+    let name = "camera_inventory_snapshot"
+    let description = "Captures an inventory snapshot from the live camera frame and reports changes since the previous snapshot."
+
+    private struct Snapshot {
+        let capturedAt: Date
+        let items: [String: Float]
+    }
+
+    private static let snapshotQueue = DispatchQueue(label: "com.samos.camera.inventory.snapshot")
+    private static var previousSnapshot: Snapshot?
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        _ = args
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then capture an inventory snapshot.")
+        }
+        guard let analysis = camera.currentAnalysis() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        var items: [String: Float] = [:]
+        for prediction in analysis.labels.prefix(12) {
+            let current = items[prediction.label] ?? 0
+            items[prediction.label] = max(current, prediction.confidence)
+        }
+
+        let nowSnapshot = Snapshot(capturedAt: analysis.capturedAt, items: items)
+        let previous = Self.snapshotQueue.sync { () -> Snapshot? in
+            let old = Self.previousSnapshot
+            Self.previousSnapshot = nowSnapshot
+            return old
+        }
+
+        let currentKeys = Set(items.keys)
+        let previousKeys = Set(previous?.items.keys.map { $0 } ?? [])
+        let added = currentKeys.subtracting(previousKeys).sorted()
+        let removed = previousKeys.subtracting(currentKeys).sorted()
+        let unchanged = currentKeys.intersection(previousKeys).sorted()
+
+        let spoken = previous == nil
+            ? "Inventory snapshot captured."
+            : "Inventory snapshot captured. I found \(added.count) new and \(removed.count) removed item types."
+
+        var lines: [String] = [
+            "# Camera Inventory Snapshot",
+            "",
+            "- Captured: \(DateFormatter.localizedString(from: analysis.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            "- Item types: \(items.count)"
+        ]
+
+        if !items.isEmpty {
+            lines.append("")
+            lines.append("## Items")
+            for key in items.keys.sorted() {
+                let confidence = Int(((items[key] ?? 0) * 100).rounded())
+                lines.append("- \(key) (\(confidence)%)")
+            }
+        }
+
+        if previous != nil {
+            lines.append("")
+            lines.append("## Changes Since Previous Snapshot")
+            lines.append("- Added: \(added.isEmpty ? "none" : added.joined(separator: ", "))")
+            lines.append("- Removed: \(removed.isEmpty ? "none" : removed.joined(separator: ", "))")
+            lines.append("- Unchanged: \(unchanged.isEmpty ? "none" : unchanged.joined(separator: ", "))")
+        }
+
+        return cameraStructuredPayload(
+            kind: "camera_inventory_snapshot",
+            spoken: spoken,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+struct SaveCameraMemoryNoteTool: Tool {
+    let name = "save_camera_memory_note"
+    let description = "Saves a timestamped memory note from the current camera view into local memory for later recall."
+
+    private let camera: CameraVisionProviding
+    private let memoryStore: MemoryStore
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared, memoryStore: MemoryStore = .shared) {
+        self.camera = camera
+        self.memoryStore = memoryStore
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        _ = args
+        guard memoryStore.isAvailable else {
+            return OutputItem(kind: .markdown, payload: "**Memory Error:** Memory store is not available.")
+        }
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first, then save a camera memory note.")
+        }
+        guard let scene = camera.describeCurrentScene(),
+              let analysis = camera.currentAnalysis() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on, but I don't have a frame yet. Try again in a second.")
+        }
+
+        let topLabels = analysis.labels.prefix(3).map { $0.label }
+        let labelFragment = topLabels.isEmpty ? "" : " Top objects: \(topLabels.joined(separator: ", "))."
+        let textFragment = analysis.recognizedText.isEmpty ? "" : " Visible text: \(analysis.recognizedText.prefix(2).joined(separator: "; "))."
+        var content = "Camera observation: \(scene.summary)\(labelFragment)\(textFragment)"
+        content = String(content.prefix(360))
+
+        let iso = ISO8601DateFormatter().string(from: analysis.capturedAt)
+        let tags = ["camera", "vision"] + topLabels.map { $0.replacingOccurrences(of: " ", with: "_") }
+        let result = memoryStore.upsertMemory(
+            type: .note,
+            content: content,
+            confidence: .medium,
+            ttlDays: 90,
+            source: "camera_vision",
+            sourceSnippet: iso,
+            tags: tags,
+            now: Date()
+        )
+
+        let spoken: String
+        let statusLine: String
+        switch result {
+        case .inserted(let row):
+            spoken = "Saved that camera note to memory."
+            statusLine = "Saved note `\(row.shortID)`."
+        case .updated(let row):
+            spoken = "Updated an existing camera memory note."
+            statusLine = "Updated note `\(row.shortID)`."
+        case .skippedDuplicate:
+            spoken = "That camera note is already saved."
+            statusLine = "Duplicate note detected, nothing new saved."
+        case .skippedLimit:
+            spoken = "I hit the memory save limit for now."
+            statusLine = "Memory limit reached, note was not saved."
+        }
+
+        let formatted = [
+            "# Camera Memory Note",
+            "",
+            "- \(statusLine)",
+            "- Captured: \(DateFormatter.localizedString(from: analysis.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            "",
+            "## Note",
+            content
+        ].joined(separator: "\n")
+
+        return cameraStructuredPayload(
+            kind: "camera_memory_note",
+            spoken: spoken,
+            formatted: formatted
+        )
+    }
+}
+
+private func cameraStructuredPayload(kind: String, spoken: String, formatted: String) -> OutputItem {
+    let payload: [String: Any] = [
+        "kind": kind,
+        "spoken": spoken,
+        "formatted": formatted
+    ]
+
+    if let data = try? JSONSerialization.data(withJSONObject: payload),
+       let json = String(data: data, encoding: .utf8) {
+        return OutputItem(kind: .markdown, payload: json)
+    }
+    return OutputItem(kind: .markdown, payload: formatted)
+}
+
+private func cameraPromptPayload(slot: String, spoken: String, formatted: String) -> OutputItem {
+    let payload: [String: Any] = [
+        "kind": "prompt",
+        "slot": slot,
+        "spoken": spoken,
+        "formatted": formatted
+    ]
+
+    if let data = try? JSONSerialization.data(withJSONObject: payload),
+       let json = String(data: data, encoding: .utf8) {
+        return OutputItem(kind: .markdown, payload: json)
+    }
+    return OutputItem(kind: .markdown, payload: spoken)
+}
+
+private func cameraTokens(from text: String) -> [String] {
+    return text.lowercased()
+        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        .filter { !$0.isEmpty && $0.count > 1 && !cameraTokenStopwords.contains($0) }
+}
+
+private let cameraTokenStopwords: Set<String> = [
+    "the", "a", "an", "is", "are", "do", "does", "can", "you", "see", "there", "any",
+    "right", "now", "in", "on", "at", "of", "to", "for", "with", "what", "which", "and",
+    "through", "camera", "frame", "view"
+]
+
 struct CapabilityGapToClaudePromptTool: Tool {
     let name = "capability_gap_to_claude_prompt"
     let description = "Generates a Claude-ready build prompt for a missing capability"
@@ -159,9 +786,398 @@ struct CapabilityGapToClaudePromptTool: Tool {
     }
 }
 
+struct LearnWebsiteTool: Tool {
+    let name = "learn_website"
+    let description = "Fetch and learn from a website URL for later Q&A. Use ONLY when user provides or asks about a specific webpage URL. Args: 'url' (required), optional 'focus' (what to focus on). Not for capability/skill building."
+
+    struct FetchResult {
+        let body: String
+        let contentType: String
+    }
+
+    typealias Fetcher = (URL) -> FetchResult?
+
+    private let fetcher: Fetcher
+    private let learningStore: WebsiteLearningStore
+    private let memoryStore: MemoryStore
+
+    init(fetcher: @escaping Fetcher = LearnWebsiteTool.defaultFetch,
+         learningStore: WebsiteLearningStore = .shared,
+         memoryStore: MemoryStore = .shared) {
+        self.fetcher = fetcher
+        self.learningStore = learningStore
+        self.memoryStore = memoryStore
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let rawURL = args["url"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawURL.isEmpty else {
+            return buildPromptPayload(
+                slot: "url",
+                spoken: "Which website should I learn from?",
+                formatted: "I need a URL like `https://example.com`."
+            )
+        }
+
+        guard let url = URL(string: rawURL),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            return OutputItem(kind: .markdown, payload: "I couldn't use that URL. Please send a full `http://` or `https://` link.")
+        }
+
+        guard let fetched = fetcher(url) else {
+            return OutputItem(kind: .markdown, payload: "I couldn't load that website right now. Please try again.")
+        }
+
+        let focus = args["focus"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxHighlights = parsePositiveInt(args["max_highlights"])
+        guard let learned = summarize(url: url, fetched: fetched, focus: focus) else {
+            return OutputItem(kind: .markdown, payload: "I loaded the page, but couldn't extract enough readable content to learn from it.")
+        }
+
+        let persistedHighlights: [String]
+        if let maxHighlights {
+            persistedHighlights = Array(learned.highlights.prefix(maxHighlights))
+        } else {
+            persistedHighlights = learned.highlights
+        }
+
+        let record = learningStore.saveLearnedPage(
+            url: url.absoluteString,
+            title: learned.title,
+            summary: learned.summary,
+            highlights: persistedHighlights
+        )
+
+        if memoryStore.isAvailable {
+            let note = "From \(record.host): \(record.summary)"
+            _ = memoryStore.upsertMemory(
+                type: .note,
+                content: note,
+                confidence: .medium,
+                ttlDays: 90,
+                source: "website_learning",
+                sourceSnippet: record.url,
+                tags: ["website", record.host],
+                now: Date()
+            )
+        }
+
+        let spoken = "Done. I learned that page and saved the key points."
+        let formatted = buildFormattedLearningReport(record: record)
+        let payload: [String: Any] = [
+            "kind": "website_learning",
+            "spoken": spoken,
+            "formatted": formatted
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func parsePositiveInt(_ value: String?) -> Int? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let parsed = Int(value),
+              parsed > 0 else { return nil }
+        return parsed
+    }
+
+    private func summarize(url: URL, fetched: FetchResult, focus: String?) -> (title: String, summary: String, highlights: [String])? {
+        let host = url.host ?? "website"
+        let contentType = fetched.contentType.lowercased()
+        let rawText: String
+
+        if contentType.contains("html") || contentType.isEmpty {
+            rawText = extractVisibleText(fromHTML: fetched.body)
+        } else {
+            rawText = normalizeText(fetched.body)
+        }
+
+        let lines = rawText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 20 }
+            .filter { !isBoilerplateLine($0) }
+
+        guard !lines.isEmpty else { return nil }
+
+        let title = extractTitle(fromHTML: fetched.body) ?? host
+        let highlights = selectHighlights(from: lines, focus: focus)
+        guard !highlights.isEmpty else { return nil }
+
+        var summary = highlights.prefix(2).joined(separator: " ")
+        if summary.count > 280 {
+            summary = String(summary.prefix(277)) + "..."
+        }
+
+        return (title: title, summary: summary, highlights: highlights)
+    }
+
+    private func buildFormattedLearningReport(record: WebsiteLearningRecord) -> String {
+        var lines: [String] = [
+            "# Learned From \(record.title)",
+            "",
+            "- URL: \(record.url)",
+            "- Source: \(record.host)",
+            "",
+            "## Summary",
+            record.summary
+        ]
+
+        if !record.highlights.isEmpty {
+            lines.append("")
+            lines.append("## Key Points")
+            for point in record.highlights {
+                lines.append("- \(point)")
+            }
+        }
+
+        lines.append("")
+        lines.append("_Saved for follow-up questions._")
+        return lines.joined(separator: "\n")
+    }
+
+    private func selectHighlights(from lines: [String], focus: String?) -> [String] {
+        let focusTokens = tokenize(focus ?? "")
+
+        let ranked: [(line: String, score: Int)] = lines.enumerated().map { idx, line in
+            var score = max(0, 6 - min(idx, 6)) // Prefer early, content-rich lines.
+            if line.count >= 40 { score += 2 }
+            if line.count <= 220 { score += 1 }
+
+            if !focusTokens.isEmpty {
+                let lineTokens = Set(tokenize(line))
+                let overlap = lineTokens.intersection(Set(focusTokens)).count
+                score += overlap * 3
+            }
+
+            return (line, score)
+        }
+        .sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.line.count < rhs.line.count
+        }
+
+        var selected: [String] = []
+        for candidate in ranked {
+            let line = candidate.line
+            guard !selected.contains(where: { $0.caseInsensitiveCompare(line) == .orderedSame }) else { continue }
+            selected.append(line)
+        }
+        return selected
+    }
+
+    private func isBoilerplateLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        let blocked = [
+            "cookie", "privacy policy", "terms of service", "all rights reserved",
+            "javascript", "sign in", "subscribe", "accept all", "manage preferences"
+        ]
+        return blocked.contains { lower.contains($0) }
+    }
+
+    private func tokenize(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && $0.count > 1 }
+    }
+
+    private func extractTitle(fromHTML html: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: "(?is)<title[^>]*>(.*?)</title>") else { return nil }
+        let range = NSRange(html.startIndex..., in: html)
+        guard let match = regex.firstMatch(in: html, range: range),
+              let titleRange = Range(match.range(at: 1), in: html) else { return nil }
+
+        let title = decodeHTMLEntities(String(html[titleRange]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return title.isEmpty ? nil : String(title.prefix(120))
+    }
+
+    private func extractVisibleText(fromHTML html: String) -> String {
+        var text = html
+        text = text.replacingOccurrences(of: "(?is)<script[^>]*>.*?</script>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?is)<style[^>]*>.*?</style>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?is)<noscript[^>]*>.*?</noscript>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?is)<!--.*?-->", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)</(p|div|section|article|li|h[1-6]|tr)>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?is)<[^>]+>", with: " ", options: .regularExpression)
+        text = decodeHTMLEntities(text)
+        return normalizeText(text)
+    }
+
+    private func normalizeText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "[ \t]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func decodeHTMLEntities(_ text: String) -> String {
+        var result = text
+        let entities: [String: String] = [
+            "&amp;": "&",
+            "&lt;": "<",
+            "&gt;": ">",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&nbsp;": " "
+        ]
+        for (entity, replacement) in entities {
+            result = result.replacingOccurrences(of: entity, with: replacement)
+        }
+        return result
+    }
+
+    private func buildPromptPayload(slot: String, spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: Any] = [
+            "kind": "prompt",
+            "slot": slot,
+            "spoken": spoken,
+            "formatted": formatted
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: spoken)
+    }
+
+    private static func defaultFetch(url: URL) -> FetchResult? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.httpMethod = "GET"
+        request.setValue("SamOS/1.0 (website-learning)", forHTTPHeaderField: "User-Agent")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var output: FetchResult?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data else { return }
+
+            let body = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1)
+            guard let body else { return }
+
+            let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+            output = FetchResult(body: body, contentType: contentType)
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 12)
+        return output
+    }
+
+}
+
+struct AutonomousLearnTool: Tool {
+    let name = "autonomous_learn"
+    let description = "Start a timed autonomous learning session. Sam researches across the internet, asks OpenAI for what to learn next, saves useful lessons, and reports what was learned when finished. Args: optional 'minutes' (default 5), optional 'topic'."
+
+    private let controller: AutonomousLearningControlling
+
+    init(controller: AutonomousLearningControlling = AutonomousLearningService.shared) {
+        self.controller = controller
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let minutes = max(1, Int(args["minutes"] ?? "5") ?? 5)
+        let topic = args["topic"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = controller.startSession(minutes: minutes, topic: topic)
+
+        let spoken: String
+        var lines: [String] = []
+
+        if result.started {
+            spoken = "Great, I will learn independently and report back when I finish."
+            lines.append("# Autonomous Learning Started")
+            lines.append("")
+            if let topic = topic, !topic.isEmpty {
+                lines.append("- Topic: \(topic)")
+            } else {
+                lines.append("- Topic: General high-value learning")
+            }
+            lines.append("- Duration: \(minutes) minute\(minutes == 1 ? "" : "s")")
+            if let finish = result.expectedFinishAt {
+                lines.append("- Expected finish: \(formatDate(finish))")
+            }
+            lines.append("")
+            lines.append("I will post a summary of what I learned as soon as the session completes.")
+        } else {
+            spoken = "I am already in an active learning session."
+            lines.append("# Autonomous Learning Already Running")
+            lines.append("")
+            lines.append("- Status: Active")
+            if let finish = result.expectedFinishAt {
+                lines.append("- Expected finish: \(formatDate(finish))")
+            }
+            lines.append("")
+            lines.append(result.message)
+        }
+
+        let payload: [String: Any] = [
+            "kind": "autonomous_learn",
+            "spoken": spoken,
+            "formatted": lines.joined(separator: "\n")
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: lines.joined(separator: "\n"))
+    }
+
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+struct StopAutonomousLearnTool: Tool {
+    let name = "stop_autonomous_learn"
+    let description = "Stop the currently active autonomous learning session immediately."
+
+    private let controller: AutonomousLearningControlling
+
+    init(controller: AutonomousLearningControlling = AutonomousLearningService.shared) {
+        self.controller = controller
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let result = controller.stopActiveSession()
+        let payload: [String: Any] = [
+            "kind": "autonomous_learn_stop",
+            "spoken": result.stopped
+                ? "Okay, I stopped autonomous learning."
+                : "There isn't an autonomous learning session running right now.",
+            "formatted": result.message,
+            "stopped": result.stopped,
+            "session_id": result.sessionID?.uuidString as Any
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: result.message)
+    }
+}
+
 struct GetTimeTool: Tool {
     let name = "get_time"
-    let description = "Returns the current date and time. Args: 'timezone' (IANA ID e.g. \"America/Chicago\"), 'place' (free text e.g. \"London\", \"Tokyo\", \"New York\"). Resolves international cities to IANA timezone internally. If place is ambiguous (country/region spanning multiple zones), returns a prompt asking to narrow down."
+    let description = "Use ONLY for current time/date/timezone conversions. NOT for weather, forecasts, or rain. Args: 'timezone' (IANA ID, e.g. \"America/Chicago\"), 'place' (city/state, e.g. \"London\"). Example: \"Time in London\" -> get_time(place:\"London\")."
 
     /// Injectable date provider for testability. Defaults to `Date()`.
     var dateProvider: () -> Date = { Date() }
@@ -284,5 +1300,319 @@ struct GetTimeTool: Tool {
               let formatted = dict["formatted"] as? String
         else { return nil }
         return (slot, spoken, formatted)
+    }
+}
+
+struct GetWeatherTool: Tool {
+    let name = "get_weather"
+    let description = "Use for weather and forecast questions: raining?, precipitation chance, temperature, wind, humidity, and warnings. Args: 'place' (required), optional 'days' (1-7), optional 'units' (C/F). Example: \"Is it raining in Melbourne?\" -> get_weather(place:\"Melbourne\"). Example: \"Weather in Greenbank today\" -> get_weather(place:\"Greenbank, QLD\")."
+
+    private enum UnitPreference {
+        case celsius
+        case fahrenheit
+
+        init(raw: String?) {
+            let normalized = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            self = normalized == "F" ? .fahrenheit : .celsius
+        }
+
+        var symbol: String {
+            switch self {
+            case .celsius: return "C"
+            case .fahrenheit: return "F"
+            }
+        }
+
+        var apiTemperatureUnit: String {
+            switch self {
+            case .celsius: return "celsius"
+            case .fahrenheit: return "fahrenheit"
+            }
+        }
+
+        var apiWindUnit: String {
+            switch self {
+            case .celsius: return "kmh"
+            case .fahrenheit: return "mph"
+            }
+        }
+
+        var windSuffix: String {
+            switch self {
+            case .celsius: return "km/h"
+            case .fahrenheit: return "mph"
+            }
+        }
+    }
+
+    private struct GeoLocation {
+        let name: String
+        let admin1: String?
+        let country: String?
+        let latitude: Double
+        let longitude: Double
+    }
+
+    private struct WeatherSnapshot {
+        let currentTemp: Double
+        let currentHumidity: Double
+        let currentPrecipitation: Double
+        let currentWind: Double
+        let currentCode: Int
+        let isDay: Bool
+        let dailyDates: [String]
+        let dailyCode: [Int]
+        let dailyTempMax: [Double]
+        let dailyTempMin: [Double]
+        let dailyRainChance: [Double]
+        let dailyWindMax: [Double]
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let rawPlace = args["place"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawPlace.isEmpty else {
+            return buildPromptPayload(
+                slot: "place",
+                spoken: "Which city should I check the weather for?",
+                formatted: "I need a city or town name to check weather."
+            )
+        }
+
+        let days = max(1, min(7, Int(args["days"] ?? "1") ?? 1))
+        let units = UnitPreference(raw: args["units"])
+
+        guard let location = geocode(rawPlace) else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "I couldn't find that place for weather. Try a specific city, like `Melbourne, AU`."
+            )
+        }
+
+        guard let weather = fetchWeather(for: location, days: days, units: units) else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "I couldn't fetch weather right now. Please try again in a moment."
+            )
+        }
+
+        let spoken = buildSpokenSummary(location: location, weather: weather)
+        let formatted = buildFormattedSummary(location: location, weather: weather, days: days, units: units)
+        let payload: [String: Any] = [
+            "kind": "weather",
+            "spoken": spoken,
+            "formatted": formatted,
+            "timestamp": Int(Date().timeIntervalSince1970)
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func geocode(_ place: String) -> GeoLocation? {
+        var comps = URLComponents(string: "https://geocoding-api.open-meteo.com/v1/search")
+        comps?.queryItems = [
+            URLQueryItem(name: "name", value: place),
+            URLQueryItem(name: "count", value: "1"),
+            URLQueryItem(name: "language", value: "en"),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        guard let url = comps?.url,
+              let json = requestJSON(url: url) as? [String: Any],
+              let results = json["results"] as? [[String: Any]],
+              let first = results.first,
+              let name = first["name"] as? String,
+              let latitude = first["latitude"] as? Double,
+              let longitude = first["longitude"] as? Double
+        else { return nil }
+
+        return GeoLocation(
+            name: name,
+            admin1: first["admin1"] as? String,
+            country: first["country"] as? String,
+            latitude: latitude,
+            longitude: longitude
+        )
+    }
+
+    private func fetchWeather(for location: GeoLocation, days: Int, units: UnitPreference) -> WeatherSnapshot? {
+        var comps = URLComponents(string: "https://api.open-meteo.com/v1/forecast")
+        comps?.queryItems = [
+            URLQueryItem(name: "latitude", value: String(location.latitude)),
+            URLQueryItem(name: "longitude", value: String(location.longitude)),
+            URLQueryItem(name: "timezone", value: "auto"),
+            URLQueryItem(name: "forecast_days", value: String(days)),
+            URLQueryItem(name: "temperature_unit", value: units.apiTemperatureUnit),
+            URLQueryItem(name: "wind_speed_unit", value: units.apiWindUnit),
+            URLQueryItem(name: "current", value: "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code,is_day"),
+            URLQueryItem(name: "daily", value: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max")
+        ]
+        guard let url = comps?.url,
+              let json = requestJSON(url: url) as? [String: Any],
+              let current = json["current"] as? [String: Any],
+              let daily = json["daily"] as? [String: Any],
+              let currentTemp = current["temperature_2m"] as? Double,
+              let currentHumidity = current["relative_humidity_2m"] as? Double,
+              let currentPrecipitation = current["precipitation"] as? Double,
+              let currentWind = current["wind_speed_10m"] as? Double,
+              let currentCode = current["weather_code"] as? Int,
+              let isDayInt = current["is_day"] as? Int
+        else { return nil }
+
+        let dailyDates = daily["time"] as? [String] ?? []
+        let dailyCode = daily["weather_code"] as? [Int] ?? []
+        let dailyTempMax = daily["temperature_2m_max"] as? [Double] ?? []
+        let dailyTempMin = daily["temperature_2m_min"] as? [Double] ?? []
+        let dailyRainChance = daily["precipitation_probability_max"] as? [Double] ?? []
+        let dailyWindMax = daily["wind_speed_10m_max"] as? [Double] ?? []
+
+        return WeatherSnapshot(
+            currentTemp: currentTemp,
+            currentHumidity: currentHumidity,
+            currentPrecipitation: currentPrecipitation,
+            currentWind: currentWind,
+            currentCode: currentCode,
+            isDay: isDayInt == 1,
+            dailyDates: dailyDates,
+            dailyCode: dailyCode,
+            dailyTempMax: dailyTempMax,
+            dailyTempMin: dailyTempMin,
+            dailyRainChance: dailyRainChance,
+            dailyWindMax: dailyWindMax
+        )
+    }
+
+    private func buildSpokenSummary(location: GeoLocation, weather: WeatherSnapshot) -> String {
+        let locationLabel = shortLocationLabel(location)
+        let rainCodes: Set<Int> = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]
+        let rainingNow = weather.currentPrecipitation > 0.1 || rainCodes.contains(weather.currentCode)
+        let chance = Int(weather.dailyRainChance.first ?? 0)
+
+        if rainingNow {
+            return "Yes — it's currently raining in \(locationLabel)."
+        }
+        if chance >= 50 {
+            return "Not right now in \(locationLabel), but rain is likely later today (\(chance)% chance)."
+        }
+        return "No — it's not raining right now in \(locationLabel)."
+    }
+
+    private func buildFormattedSummary(location: GeoLocation, weather: WeatherSnapshot, days: Int, units: UnitPreference) -> String {
+        let locationLabel = fullLocationLabel(location)
+        let rainNow = weather.currentPrecipitation > 0.1 ? "Yes" : "No"
+        let chanceToday = Int(weather.dailyRainChance.first ?? 0)
+        let conditionNow = weatherDescription(code: weather.currentCode, isDay: weather.isDay)
+
+        var lines: [String] = [
+            "# Weather in \(locationLabel)",
+            "",
+            "- Condition: \(conditionNow)",
+            String(format: "- Temperature: %.1f°%@", weather.currentTemp, units.symbol),
+            String(format: "- Humidity: %.0f%%", weather.currentHumidity),
+            String(format: "- Wind: %.1f %@", weather.currentWind, units.windSuffix),
+            String(format: "- Rain now: %@ (%.1f mm)", rainNow, weather.currentPrecipitation),
+            "- Rain chance today: \(chanceToday)%"
+        ]
+
+        let dayCount = min(days, weather.dailyDates.count)
+        if dayCount > 0 {
+            lines.append("")
+            lines.append("## Forecast")
+            for i in 0..<dayCount {
+                let date = weather.dailyDates[safe: i] ?? "Day \(i + 1)"
+                let code = weather.dailyCode[safe: i] ?? weather.currentCode
+                let minTemp = weather.dailyTempMin[safe: i] ?? weather.currentTemp
+                let maxTemp = weather.dailyTempMax[safe: i] ?? weather.currentTemp
+                let rain = Int(weather.dailyRainChance[safe: i] ?? 0)
+                let wind = weather.dailyWindMax[safe: i] ?? weather.currentWind
+                let desc = weatherDescription(code: code, isDay: true)
+                lines.append(String(
+                    format: "- %@: %@, %.1f°%@ to %.1f°%@, rain %d%%, wind %.1f %@",
+                    date, desc, minTemp, units.symbol, maxTemp, units.symbol, rain, wind, units.windSuffix
+                ))
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func weatherDescription(code: Int, isDay: Bool) -> String {
+        switch code {
+        case 0: return isDay ? "Clear" : "Clear night"
+        case 1, 2: return "Partly cloudy"
+        case 3: return "Overcast"
+        case 45, 48: return "Fog"
+        case 51, 53, 55: return "Drizzle"
+        case 56, 57: return "Freezing drizzle"
+        case 61, 63, 65: return "Rain"
+        case 66, 67: return "Freezing rain"
+        case 71, 73, 75: return "Snow"
+        case 77: return "Snow grains"
+        case 80, 81, 82: return "Rain showers"
+        case 85, 86: return "Snow showers"
+        case 95: return "Thunderstorm"
+        case 96, 99: return "Thunderstorm with hail"
+        default: return "Unknown conditions"
+        }
+    }
+
+    private func shortLocationLabel(_ location: GeoLocation) -> String {
+        if let admin = location.admin1, !admin.isEmpty {
+            return "\(location.name), \(admin)"
+        }
+        return location.name
+    }
+
+    private func fullLocationLabel(_ location: GeoLocation) -> String {
+        var parts = [location.name]
+        if let admin = location.admin1, !admin.isEmpty { parts.append(admin) }
+        if let country = location.country, !country.isEmpty { parts.append(country) }
+        return parts.joined(separator: ", ")
+    }
+
+    private func requestJSON(url: URL) -> Any? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("SamOS/1.0 (weather)", forHTTPHeaderField: "User-Agent")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultData: Data?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data else { return }
+            resultData = data
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 10)
+        guard let data = resultData else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    private func buildPromptPayload(slot: String, spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: Any] = [
+            "kind": "prompt",
+            "slot": slot,
+            "spoken": spoken,
+            "formatted": formatted
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: spoken)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard indices.contains(index) else { return nil }
+        return self[index]
     }
 }

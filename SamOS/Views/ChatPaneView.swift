@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 struct ChatPaneView: View {
     @EnvironmentObject var appState: AppState
@@ -15,14 +16,25 @@ struct ChatPaneView: View {
                             ChatBubble(message: message)
                                 .id(message.id)
                         }
+
+                        if appState.isThinkingIndicatorVisible {
+                            ThinkingIndicatorRow()
+                                .id("thinking-indicator")
+                        }
                     }
                     .padding(12)
                 }
-                .onChange(of: appState.chatMessages.count) { _ in
+                .onChange(of: appState.chatMessages.count) { _, _ in
                     if let last = appState.chatMessages.last {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
+                    }
+                }
+                .onChange(of: appState.isThinkingIndicatorVisible) { _, visible in
+                    guard visible else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("thinking-indicator", anchor: .bottom)
                     }
                 }
             }
@@ -70,6 +82,24 @@ struct ChatPaneView: View {
     }
 }
 
+struct ThinkingIndicatorRow: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Thinking…")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .cornerRadius(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel("Thinking indicator")
+    }
+}
+
 // MARK: - Chat Bubble
 
 struct ChatBubble: View {
@@ -90,10 +120,38 @@ struct ChatBubble: View {
                     .background(bubbleColor)
                     .foregroundColor(textColor)
                     .cornerRadius(12)
+                    .opacity(message.isEphemeral ? 0.72 : 1.0)
                     .textSelection(.enabled)
 
                 if message.llmProvider == .openai {
-                    Text("OpenAI")
+                    if let mode = message.assistantResponseMode {
+                        Text(mode.shortLabel)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(mode.pipelineLabel)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("OpenAI")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if let latencyMs = message.latencyMs {
+                    Text(latencyLabel(latencyMs))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                if message.usedLocalKnowledge {
+                    Text("Local knowledge used")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                if message.usedMemory {
+                    Text("Memory used")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -115,6 +173,7 @@ struct ChatBubble: View {
         switch message.role {
         case .user: return .blue
         case .assistant:
+            if message.usedLocalKnowledge { return .blue.opacity(0.85) }
             if message.llmProvider == .openai { return .red.opacity(0.85) }
             return Color(nsColor: .controlBackgroundColor)
         case .system: return Color.yellow.opacity(0.2)
@@ -124,8 +183,14 @@ struct ChatBubble: View {
     private var textColor: Color {
         switch message.role {
         case .user: return .white
+        case .assistant where message.usedLocalKnowledge: return .white
         case .assistant where message.llmProvider == .openai: return .white
         default: return .primary
         }
+    }
+
+    private func latencyLabel(_ ms: Int) -> String {
+        let seconds = Double(ms) / 1000.0
+        return String(format: "%.3fs (%dms)", seconds, max(0, ms))
     }
 }

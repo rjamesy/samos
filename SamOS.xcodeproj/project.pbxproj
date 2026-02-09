@@ -84,6 +84,15 @@
 		F3A4B5C6D7E80001AA000065 /* KeychainStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */; };
 		F3A4B5C6D7E80001AA000067 /* OpenAIRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */; };
 		F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */; };
+		F3A4B5C6D7E80001AA000071 /* TextUnescaper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000070 /* TextUnescaper.swift */; };
+		F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */; };
+		F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */; };
+		F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */; };
+		F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */; };
+			F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */; };
+			F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */; };
+			F3A4B5C6D7E80001AA000087 /* FaceProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */; };
+			F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -177,6 +186,15 @@
 		F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStoreTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRouter.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterPipelineTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000070 /* TextUnescaper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUnescaper.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUnescaperTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevSecretsStore.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveService.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveTests.swift; sourceTree = "<group>"; };
+			F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAttributionScorer.swift; sourceTree = "<group>"; };
+			F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAttributionCalibrationTests.swift; sourceTree = "<group>"; };
+			F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceProfileStore.swift; sourceTree = "<group>"; };
+			F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceProfileStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -241,6 +259,7 @@
 				E0BE75350FC0A9D98E54750E /* Services */,
 				07F9AB5EC54B6D1E17DA1ADE /* Tools */,
 				B805BDA6772854EF14D6A1A2 /* Views */,
+				F3A4B5C6D7E80001AA000074 /* Utils */,
 				BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */,
 				D1E2F3A4B5C60001EEFF1002 /* capture_beep.wav */,
 				F3A4B5C6D7E80001AA001011 /* alarm_v1.json */,
@@ -278,8 +297,12 @@
 				A1B2C3D4E5F60001AABB1006 /* VoicePipelineCoordinator.swift */,
 				A1B2C3D4E5F60001AABB1007 /* OllamaRouter.swift */,
 				B1A2C3D4E5F60001CCDD1002 /* MemoryStore.swift */,
-				D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */,
+				F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */,
+					F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */,
+					F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */,
+					D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */,
 				E2F3A4B5C6D70001FF001001 /* KeychainStore.swift */,
+				F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */,
 				E2F3A4B5C6D70001FF001002 /* ElevenLabsSettings.swift */,
 				E2F3A4B5C6D70001FF001003 /* ElevenLabsClient.swift */,
 				E2F3A4B5C6D70001FF001004 /* TTSService.swift */,
@@ -325,6 +348,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		F3A4B5C6D7E80001AA000074 /* Utils */ = {
+			isa = PBXGroup;
+			children = (
+				F3A4B5C6D7E80001AA000070 /* TextUnescaper.swift */,
+			);
+			path = Utils;
+			sourceTree = "<group>";
+		};
 		CC000100000000000000A001 /* SamOSTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -349,7 +380,11 @@
 				F3A4B5C6D7E80001AA000062 /* OllamaRouterReliabilityTests.swift */,
 				F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */,
 				F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */,
-			);
+				F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */,
+				F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */,
+					F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */,
+					F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */,
+				);
 			path = SamOSTests;
 			sourceTree = "<group>";
 		};
@@ -485,7 +520,12 @@
 				F3A4B5C6D7E80001AA000053 /* SkillForgeQueueService.swift in Sources */,
 				F3A4B5C6D7E80001AA000055 /* SkillForgeTools.swift in Sources */,
 				F3A4B5C6D7E80001AA000067 /* OpenAIRouter.swift in Sources */,
-			);
+				F3A4B5C6D7E80001AA000071 /* TextUnescaper.swift in Sources */,
+				F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */,
+				F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */,
+					F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */,
+					F3A4B5C6D7E80001AA000087 /* FaceProfileStore.swift in Sources */,
+				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		CC000100000000000000A002 /* Sources */ = {
@@ -513,7 +553,11 @@
 				F3A4B5C6D7E80001AA000063 /* OllamaRouterReliabilityTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000065 /* KeychainStoreTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */,
-			);
+				F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */,
+					F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */,
+					F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */,
+				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -653,8 +697,9 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
+					INFOPLIST_KEY_NSHumanReadableCopyright = "";
+					INFOPLIST_KEY_NSCameraUsageDescription = "SamOS needs camera access for live visual description when camera mode is enabled.";
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -700,8 +745,9 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
+					INFOPLIST_KEY_NSHumanReadableCopyright = "";
+					INFOPLIST_KEY_NSCameraUsageDescription = "SamOS needs camera access for live visual description when camera mode is enabled.";
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "SamOS needs microphone access for wake word detection and voice commands.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

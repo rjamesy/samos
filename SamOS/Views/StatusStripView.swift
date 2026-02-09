@@ -55,6 +55,14 @@ struct StatusStripView: View {
                 .buttonStyle(.borderless)
             }
 
+            Button(action: { appState.toggleCamera() }) {
+                Label(appState.isCameraEnabled ? "Camera On" : "Camera Off",
+                      systemImage: appState.isCameraEnabled ? "video.fill" : "video.slash")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help(appState.isCameraEnabled ? "Turn Camera Off" : "Turn Camera On")
+
             // Mute toggle
             Button(action: { appState.toggleMute() }) {
                 Image(systemName: appState.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")

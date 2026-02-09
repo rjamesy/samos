@@ -82,8 +82,8 @@ final class SkillTests: XCTestCase {
         let store = SkillStore(directory: tempDir)
 
         let skill = SkillSpec(
-            id: "test_v1",
-            name: "Test",
+            id: "alarm_test_v1",
+            name: "Test Alarm",
             version: 1,
             triggerPhrases: ["test"],
             slots: [],
@@ -95,14 +95,30 @@ final class SkillTests: XCTestCase {
         XCTAssertTrue(store.install(skill))
         XCTAssertEqual(store.count, 1)
 
+        // Non-alarm IDs are also allowed for forged capabilities
+        let forged = SkillSpec(
+            id: "forged_junk",
+            name: "Junk",
+            version: 1,
+            triggerPhrases: ["junk"],
+            slots: [],
+            steps: [SkillSpec.StepDef(action: "talk", args: ["say": "hi"])],
+            onTrigger: nil
+        )
+        XCTAssertTrue(store.install(forged))
+        XCTAssertEqual(store.count, 2)
+
         // Load
-        XCTAssertNotNil(store.get(id: "test_v1"))
-        XCTAssertEqual(store.loadAll().count, 1)
+        XCTAssertNotNil(store.get(id: "alarm_test_v1"))
+        XCTAssertNotNil(store.get(id: "forged_junk"))
+        XCTAssertEqual(store.loadAll().count, 2)
 
         // Remove
-        XCTAssertTrue(store.remove(id: "test_v1"))
+        XCTAssertTrue(store.remove(id: "alarm_test_v1"))
+        XCTAssertTrue(store.remove(id: "forged_junk"))
         XCTAssertEqual(store.count, 0)
-        XCTAssertNil(store.get(id: "test_v1"))
+        XCTAssertNil(store.get(id: "alarm_test_v1"))
+        XCTAssertNil(store.get(id: "forged_junk"))
 
         // Cleanup
         try? FileManager.default.removeItem(at: tempDir)

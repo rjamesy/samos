@@ -13,6 +13,9 @@ final class TTSService {
     private var player: AVAudioPlayer?
     private var speakTask: Task<Void, Never>?
     private var speechQueue: [(text: String, mode: SpeechMode)] = []
+    private var audioCache: [String: Data] = [:]
+    private var audioCacheOrder: [String] = []
+    private let maxAudioCacheEntries = 40
 
     private init() {}
 
@@ -32,11 +35,14 @@ final class TTSService {
     ///   - interrupt: If true (default), stops any current speech first.
     func speak(_ text: String, mode: SpeechMode = .answer, interrupt: Bool = true) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pacing = ResponsePolish.ttsPacing(for: trimmed, mode: mode)
+        let ttsText = pacing.ttsText
+        let cacheKey = makeAudioCacheKey(text: ttsText, mode: mode)
 
         // Respect mute and empty text
-        guard !ElevenLabsSettings.isMuted, !trimmed.isEmpty else { return }
+        guard !ElevenLabsSettings.isMuted, !ttsText.isEmpty else { return }
         guard ElevenLabsSettings.isConfigured else {
-            print("[TTSService] Not configured — skipping speech")
+            print("[TTSService] ElevenLabs not configured — skipping speech")
             return
         }
 
@@ -46,19 +52,34 @@ final class TTSService {
 
         speakTask = Task { [weak self] in
             do {
+                if pacing.preSpeakDelayNs > 0 {
+                    try await Task.sleep(nanoseconds: pacing.preSpeakDelayNs)
+                    guard !Task.isCancelled else { return }
+                }
+
+                if let cachedAudio = self?.cachedAudio(forKey: cacheKey) {
+                    guard !Task.isCancelled else { return }
+                    self?.playAudio(cachedAudio)
+                    return
+                }
+
                 if ElevenLabsSettings.useStreaming {
                     // Streaming: download via streaming endpoint, then play
-                    let fileURL = try await ElevenLabsClient.streamSynthesizeToFile(trimmed, mode: mode)
+                    let fileURL = try await ElevenLabsClient.streamSynthesizeToFile(ttsText, mode: mode)
                     guard !Task.isCancelled else {
                         try? FileManager.default.removeItem(at: fileURL)
                         return
                     }
-                    await self?.playAudioFile(fileURL)
+                    if let data = try? Data(contentsOf: fileURL) {
+                        self?.storeAudioInCache(data, forKey: cacheKey)
+                    }
+                    self?.playAudioFile(fileURL)
                 } else {
                     // Non-streaming: download complete MP3 data, write to temp file, then play
-                    let audioData = try await ElevenLabsClient.synthesize(trimmed, mode: mode)
+                    let audioData = try await ElevenLabsClient.synthesize(ttsText, mode: mode)
                     guard !Task.isCancelled else { return }
-                    await self?.playAudio(audioData)
+                    self?.storeAudioInCache(audioData, forKey: cacheKey)
+                    self?.playAudio(audioData)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -66,9 +87,10 @@ final class TTSService {
                     // Fallback: retry with non-streaming
                     print("[TTSService] Streaming failed, falling back: \(error.localizedDescription)")
                     do {
-                        let audioData = try await ElevenLabsClient.synthesize(trimmed, mode: mode)
+                        let audioData = try await ElevenLabsClient.synthesize(ttsText, mode: mode)
                         guard !Task.isCancelled else { return }
-                        await self?.playAudio(audioData)
+                        self?.storeAudioInCache(audioData, forKey: cacheKey)
+                        self?.playAudio(audioData)
                     } catch {
                         guard !Task.isCancelled else { return }
                         print("[TTSService] Fallback also failed: \(error.localizedDescription)")
@@ -95,10 +117,11 @@ final class TTSService {
 
     private var tempFileURL: URL?
 
-    /// Plays audio from raw MP3 data (non-streaming path).
+    /// Plays audio from raw audio data (MP3/WAV) by inferring a suitable temp file extension.
     private func playAudio(_ data: Data) {
+        let fileExtension = Self.inferredAudioFileExtension(for: data)
         let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("samos_tts_\(UUID().uuidString).mp3")
+            .appendingPathComponent("samos_tts_\(UUID().uuidString).\(fileExtension)")
         do {
             try data.write(to: tempURL)
         } catch {
@@ -138,6 +161,48 @@ final class TTSService {
         if let url = tempFileURL {
             try? FileManager.default.removeItem(at: url)
             tempFileURL = nil
+        }
+    }
+
+    private func makeAudioCacheKey(text: String, mode: SpeechMode) -> String {
+        let modeKey: String
+        switch mode {
+        case .confirm: modeKey = "confirm"
+        case .answer: modeKey = "answer"
+        }
+        return "elevenlabs|\(modeKey)|\(text)"
+    }
+
+    static func inferredAudioFileExtension(for data: Data) -> String {
+        guard data.count >= 12 else { return "mp3" }
+        if data.starts(with: [0x52, 0x49, 0x46, 0x46]) { // "RIFF"
+            return "wav"
+        }
+        if data.starts(with: [0x49, 0x44, 0x33]) { // "ID3"
+            return "mp3"
+        }
+        if data[0] == 0xFF, (data[1] & 0xE0) == 0xE0 { // MPEG frame sync
+            return "mp3"
+        }
+        return "mp3"
+    }
+
+    private func cachedAudio(forKey key: String) -> Data? {
+        audioCache[key]
+    }
+
+    private func storeAudioInCache(_ data: Data, forKey key: String) {
+        guard !key.isEmpty, !data.isEmpty else { return }
+
+        if let existingIndex = audioCacheOrder.firstIndex(of: key) {
+            audioCacheOrder.remove(at: existingIndex)
+        }
+        audioCacheOrder.append(key)
+        audioCache[key] = data
+
+        while audioCacheOrder.count > maxAudioCacheEntries {
+            let evicted = audioCacheOrder.removeFirst()
+            audioCache.removeValue(forKey: evicted)
         }
     }
 

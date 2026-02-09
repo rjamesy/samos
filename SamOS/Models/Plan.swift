@@ -124,7 +124,10 @@ struct Plan: Decodable, Equatable {
             return Plan(steps: [.talk(say: talk.say)])
         case .tool(let toolAction):
             let args = toolAction.args.mapValues { CodableValue.string($0) }
-            return Plan(steps: [.tool(name: toolAction.name, args: args, say: toolAction.say)])
+            return Plan(
+                steps: [.tool(name: toolAction.name, args: args, say: nil)],
+                say: toolAction.say
+            )
         case .delegateOpenAI(let d):
             return Plan(steps: [.delegate(task: d.task, context: d.context, say: d.say)])
         case .capabilityGap(let gap):

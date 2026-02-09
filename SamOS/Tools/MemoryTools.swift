@@ -1,14 +1,23 @@
 import Foundation
 
+private enum MemoryToolFormatting {
+    static let mediumDateShortTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
 // MARK: - Save Memory Tool
 
 struct SaveMemoryTool: Tool {
     let name = "save_memory"
-    let description = "Save a persistent memory (fact, preference, or note)"
+    let description = "Save a persistent memory (fact, preference, note, or checkin)"
 
     func execute(args: [String: String]) -> OutputItem {
         guard let typeStr = args["type"], let type = MemoryType(rawValue: typeStr.lowercased()) else {
-            return OutputItem(kind: .markdown, payload: "**Memory Error:** Invalid type. Use `fact`, `preference`, or `note`.")
+            return OutputItem(kind: .markdown, payload: "**Memory Error:** Invalid type. Use `fact`, `preference`, `note`, or `checkin`.")
         }
 
         let rawContent = (args["content"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,15 +192,11 @@ struct ListMemoriesTool: Tool {
             return OutputItem(kind: .markdown, payload: "No memories saved yet\(typeLabel).")
         }
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateStyle = .medium
-        dateFormatter.timeStyle = .short
-
         var md = "# Memories\n\n"
         md += "| ID | Type | Content | Date |\n"
         md += "|:---|:-----|:--------|:-----|\n"
         for mem in memories {
-            md += "| `\(mem.shortID)` | \(mem.type.rawValue) | \(mem.content) | \(dateFormatter.string(from: mem.createdAt)) |\n"
+            md += "| `\(mem.shortID)` | \(mem.type.rawValue) | \(mem.content) | \(MemoryToolFormatting.mediumDateShortTime.string(from: mem.createdAt)) |\n"
         }
         md += "\n*\(memories.count) memor\(memories.count == 1 ? "y" : "ies") total.*"
 

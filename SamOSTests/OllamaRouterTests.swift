@@ -313,6 +313,25 @@ final class OllamaRouterTests: XCTestCase {
         XCTAssertEqual(result["say"] as? String, "hello")
     }
 
+    func testNormalizeSayMovedFromArgsToTopLevel() {
+        let input: [String: Any] = [
+            "action": "TOOL",
+            "name": "show_text",
+            "args": [
+                "markdown": "# Banana Bread\nMix flour, sugar, and bananas.",
+                "say": "Here's a tasty banana bread recipe."
+            ] as [String: Any]
+        ]
+        let result = router.normalizeActionJSON(input)
+        // "say" should be at the top level
+        XCTAssertEqual(result["say"] as? String, "Here's a tasty banana bread recipe.")
+        // "say" should NOT remain inside args
+        let args = result["args"] as? [String: Any]
+        XCTAssertNil(args?["say"])
+        // "markdown" should be untouched inside args
+        XCTAssertEqual(args?["markdown"] as? String, "# Banana Bread\nMix flour, sugar, and bananas.")
+    }
+
     func testNormalizeFlatArgsForTool() {
         let input: [String: Any] = [
             "action": "TOOL",
@@ -681,6 +700,21 @@ final class OllamaRouterTransportTests: XCTestCase {
                       "Messages should include [REMINDER] block")
     }
 
+    func testSystemPromptIncludesCoTDirective() async throws {
+        let fake = FakeTransport(responses: [
+            #"{"action":"TALK","say":"hi"}"#
+        ])
+        let router = OllamaRouter(transport: fake)
+
+        _ = try await router.routePlan("Solve a tricky logic puzzle")
+
+        guard let system = fake.chatCallLog.first?.first(where: { $0["role"] == "system" })?["content"] else {
+            return XCTFail("Expected system prompt in first chat call")
+        }
+        XCTAssertTrue(system.contains("think step by step internally"),
+                      "System prompt should include CoT directive")
+    }
+
     // MARK: - Valid responses still work
 
     func testValidTalkPassesThrough() async throws {
@@ -795,10 +829,10 @@ final class MockToolsRuntime: ToolsRuntimeProtocol {
     }
 }
 
-// MARK: - PlanExecutor Forge Tool Safety Gate Tests
+// MARK: - PlanExecutor Forge Tool Execution Tests
 
 @MainActor
-final class PlanExecutorForgeGateTests: XCTestCase {
+final class PlanExecutorForgeExecutionTests: XCTestCase {
 
     private func makeExecutor() -> (PlanExecutor, MockToolsRuntime) {
         let mock = MockToolsRuntime()
@@ -806,68 +840,68 @@ final class PlanExecutorForgeGateTests: XCTestCase {
         return (executor, mock)
     }
 
-    // MARK: - Blocking (no learn slot)
+    // MARK: - start_skillforge execution
 
-    func testForgeToolBlockedWithoutLearnSlot() async {
+    func testForgeToolExecutesWithoutLearnSlot() async {
         let (executor, mock) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "start_skillforge", args: ["goal": .string("convert currencies")], say: "On it.")
         ])
         let result = await executor.execute(plan, originalInput: "time in london", pendingSlotName: nil)
 
-        XCTAssertTrue(result.executedToolSteps.isEmpty,
-                      "start_skillforge must NOT execute without learn slot")
-        XCTAssertTrue(mock.executedActions.isEmpty,
-                      "MockToolsRuntime should NOT have been called")
-        XCTAssertEqual(result.pendingSlotRequest?.slot, "learn_confirm")
-        XCTAssertTrue(result.stoppedAtAsk,
-                      "Blocked forge tool should set stoppedAtAsk")
-        XCTAssertTrue(result.triggerFollowUpCapture,
-                      "Blocked forge tool should trigger follow-up capture")
+        XCTAssertEqual(result.executedToolSteps.count, 1,
+                      "start_skillforge should execute directly")
+        XCTAssertEqual(result.executedToolSteps.first?.name, "start_skillforge")
+        XCTAssertEqual(mock.executedActions.count, 1,
+                      "MockToolsRuntime should be called once")
+        XCTAssertNil(result.pendingSlotRequest)
+        XCTAssertFalse(result.stoppedAtAsk)
+        XCTAssertFalse(result.triggerFollowUpCapture)
     }
 
-    func testForgeToolBlockedEvenWithLearnKeywordInInput() async {
-        // Keywords in user text do NOT grant permission — only the slot does
+    func testForgeToolExecutesForLearnInputWithoutSlot() async {
         let (executor, mock) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "start_skillforge", args: ["goal": .string("convert currencies")], say: "On it.")
         ])
         let result = await executor.execute(plan, originalInput: "learn to convert currencies", pendingSlotName: nil)
 
-        XCTAssertTrue(result.executedToolSteps.isEmpty,
-                      "start_skillforge must NOT execute even with 'learn' keyword but no slot")
-        XCTAssertTrue(mock.executedActions.isEmpty)
-        XCTAssertEqual(result.pendingSlotRequest?.slot, "learn_confirm")
-        XCTAssertTrue(result.stoppedAtAsk)
+        XCTAssertEqual(result.executedToolSteps.count, 1,
+                      "start_skillforge should execute without requiring a learn slot")
+        XCTAssertEqual(mock.executedActions.count, 1)
+        XCTAssertNil(result.pendingSlotRequest)
+        XCTAssertFalse(result.stoppedAtAsk)
     }
 
-    func testForgeClearBlockedWithoutLearnSlot() async {
+    func testForgeClearAllowedWithoutLearnSlot() async {
         let (executor, mock) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "forge_queue_clear", args: [:], say: "Clearing.")
         ])
         let result = await executor.execute(plan, originalInput: "hello", pendingSlotName: nil)
 
-        XCTAssertTrue(result.executedToolSteps.isEmpty,
-                      "forge_queue_clear must NOT execute without learn slot")
-        XCTAssertTrue(mock.executedActions.isEmpty)
-        XCTAssertEqual(result.pendingSlotRequest?.slot, "learn_confirm")
-        XCTAssertTrue(result.stoppedAtAsk)
+        XCTAssertFalse(result.executedToolSteps.isEmpty,
+                      "forge_queue_clear should execute immediately without learn slot")
+        XCTAssertEqual(result.executedToolSteps.first?.name, "forge_queue_clear")
+        XCTAssertEqual(mock.executedActions.count, 1)
+        XCTAssertEqual(mock.executedActions.first?.name, "forge_queue_clear")
+        XCTAssertNil(result.pendingSlotRequest)
+        XCTAssertFalse(result.stoppedAtAsk)
     }
 
-    func testForgeToolBlockedForGeneralQuestion() async {
+    func testForgeToolExecutesWhenPlanRequestsIt() async {
         let (executor, _) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "start_skillforge", args: ["goal": .string("weather")], say: "Learning.")
         ])
         let result = await executor.execute(plan, originalInput: "what is the weather today", pendingSlotName: nil)
 
-        XCTAssertTrue(result.executedToolSteps.isEmpty)
-        XCTAssertEqual(result.pendingSlotRequest?.slot, "learn_confirm")
-        XCTAssertTrue(result.stoppedAtAsk)
+        XCTAssertEqual(result.executedToolSteps.count, 1)
+        XCTAssertNil(result.pendingSlotRequest)
+        XCTAssertFalse(result.stoppedAtAsk)
     }
 
-    // MARK: - Allowed (with learn slot)
+    // MARK: - Also works with legacy learn/batch slots
 
     func testForgeToolAllowedWithLearnConfirmSlot() async {
         let (executor, mock) = makeExecutor()
@@ -927,21 +961,19 @@ final class PlanExecutorForgeGateTests: XCTestCase {
         XCTAssertEqual(mock.executedActions.count, 1)
     }
 
-    // MARK: - Blocked response shape
+    // MARK: - Response shape
 
-    func testBlockedResponseHasNoExecutedSteps() async {
+    func testForgeResponseHasExecutedStepWithoutPrompting() async {
         let (executor, _) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "start_skillforge", args: ["goal": .string("x")], say: nil)
         ])
         let result = await executor.execute(plan, originalInput: "hello", pendingSlotName: nil)
 
-        XCTAssertTrue(result.executedToolSteps.isEmpty)
-        XCTAssertEqual(result.pendingSlotRequest?.slot, "learn_confirm")
-        XCTAssertTrue(result.stoppedAtAsk)
-        XCTAssertTrue(result.triggerFollowUpCapture)
-        XCTAssertFalse(result.spokenLines.isEmpty, "Should speak the learn_confirm prompt")
-        XCTAssertFalse(result.chatMessages.isEmpty, "Should have a chat message for the prompt")
+        XCTAssertEqual(result.executedToolSteps.count, 1)
+        XCTAssertNil(result.pendingSlotRequest)
+        XCTAssertFalse(result.stoppedAtAsk)
+        XCTAssertFalse(result.triggerFollowUpCapture)
     }
 }
 
@@ -956,26 +988,34 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
         return (executor, mock)
     }
 
-    /// When a tool step has `say`, Sam speaks say first, then the tool result.
-    func testStepSaySpokenFirstThenToolResult() async {
+    func testToolStepsAreSilent() async {
         let (executor, _) = makeExecutor()
         let plan = Plan(steps: [
             .tool(name: "get_time", args: ["place": .string("Sydney")], say: "Let me check the time in Sydney.")
         ])
         let result = await executor.execute(plan, originalInput: "what time is it in sydney")
 
-        // MockToolsRuntime returns {"spoken":"mock result","formatted":"mock"}
-        // Should speak say first, then the tool's spoken result
-        XCTAssertEqual(result.spokenLines.count, 2, "Should have 2 spoken lines: say + tool result")
-        XCTAssertEqual(result.spokenLines[0], "Let me check the time in Sydney.",
-                       "First spoken line should be the step say")
-        XCTAssertEqual(result.spokenLines[1], "mock result",
-                       "Second spoken line should be the tool's structured spoken")
-        XCTAssertEqual(result.chatMessages.count, 2)
-        XCTAssertEqual(result.chatMessages[0].text, "Let me check the time in Sydney.")
-        XCTAssertEqual(result.chatMessages[1].text, "mock result")
+        // MockToolsRuntime returns {"spoken":"mock result","formatted":"mock"}.
+        // Tool-step say must stay silent; only the tool result is user-visible.
+        XCTAssertEqual(result.spokenLines.count, 1, "Tool step say should be silent")
+        XCTAssertEqual(result.spokenLines.first, "mock result")
+        XCTAssertEqual(result.chatMessages.count, 1)
+        XCTAssertEqual(result.chatMessages.first?.text, "mock result")
         XCTAssertEqual(result.outputItems.first?.kind, .markdown,
                        "Structured formatted should still go to output canvas")
+    }
+
+    func testTopLevelToolSayIsSpokenOnce() async {
+        let (executor, _) = makeExecutor()
+        let plan = Plan(
+            steps: [.tool(name: "get_time", args: ["place": .string("Sydney")], say: nil)],
+            say: "I'll check that."
+        )
+        let result = await executor.execute(plan, originalInput: "time in sydney")
+
+        XCTAssertEqual(result.spokenLines, ["I'll check that."])
+        XCTAssertEqual(result.chatMessages.map(\.text), ["I'll check that."])
+        XCTAssertEqual(result.outputItems.count, 1, "Tool output should still be shown on canvas")
     }
 
     /// When a tool step has no `say`, Sam speaks only the tool result.

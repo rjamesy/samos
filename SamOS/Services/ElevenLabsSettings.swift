@@ -69,17 +69,25 @@ enum ElevenLabsSettings {
             return _cachedApiKey ?? ""
         }
         set {
-            // Write-through: update Keychain + cache
+            // Write-through: update store + cache
             if newValue.isEmpty {
+                #if DEBUG
+                DevSecretsStore.shared.delete("dev.elevenlabs.apiKey")
+                #else
                 if useKeychain {
                     KeychainStore.delete(forKey: keychainAccount, service: keychainService)
                 }
+                #endif
                 _cachedApiKey = ""
                 defaults.removeObject(forKey: Key.keySavedAt)
             } else {
+                #if DEBUG
+                DevSecretsStore.shared.set("dev.elevenlabs.apiKey", newValue)
+                #else
                 if useKeychain {
                     KeychainStore.set(newValue, forKey: keychainAccount, service: keychainService)
                 }
+                #endif
                 _cachedApiKey = newValue
                 defaults.set(Date(), forKey: Key.keySavedAt)
             }
@@ -90,12 +98,18 @@ enum ElevenLabsSettings {
     /// Whether to persist keys in Keychain (delegates to KeychainStore.useKeychain).
     static var useKeychain: Bool { KeychainStore.useKeychain }
 
-    /// Reads the API key from Keychain once. Migrates from legacy location if needed.
-    /// In DEBUG builds, falls back to `ELEVENLABS_API_KEY` env var if Keychain is empty.
-    /// Skips Keychain entirely if useKeychain is false.
+    /// Reads the API key once. DEBUG → DevSecretsStore (UserDefaults), RELEASE → Keychain.
+    /// Falls back to `ELEVENLABS_API_KEY` env var if the primary store is empty.
     private static func loadApiKeyCache() {
         defer { _cacheLoaded = true }
 
+        #if DEBUG
+        if let key = DevSecretsStore.shared.get("dev.elevenlabs.apiKey") {
+            _cachedApiKey = key
+            return
+        }
+        _cachedApiKey = envFallback
+        #else
         guard useKeychain else {
             _cachedApiKey = envFallback
             return
@@ -117,6 +131,7 @@ enum ElevenLabsSettings {
 
         // No key found — try env var fallback
         _cachedApiKey = envFallback
+        #endif
     }
 
     /// In DEBUG builds, returns the `ELEVENLABS_API_KEY` env var if set. Empty string otherwise.

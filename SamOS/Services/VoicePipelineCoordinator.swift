@@ -8,6 +8,18 @@ enum VoicePipelineStatus: Equatable {
     case transcribing
 }
 
+@MainActor
+protocol VoicePipelineCoordinating: AnyObject {
+    var onStatusChange: ((VoicePipelineStatus) -> Void)? { get set }
+    var onTranscript: ((String) -> Void)? { get set }
+    var onError: ((Error) -> Void)? { get set }
+
+    func startListening() throws
+    func stopListening()
+    func startFollowUpCapture(noSpeechTimeoutMs: Int?)
+    func cancelFollowUpCapture()
+}
+
 /// Orchestrates WakeWordService → AudioCaptureService → STTService in a linear state machine.
 ///
 /// Hard rule: when state == `.transcribing`, NO AVAudioEngine and NO Porcupine should be active.
@@ -34,6 +46,8 @@ final class VoicePipelineCoordinator {
     private let stt = STTService()
 
     private var sttTask: Task<Void, Never>?
+    private var noSpeechTimeoutTask: Task<Void, Never>?
+    private var followUpSpeechDetected = false
 
     // MARK: - Start / Stop
 
@@ -41,8 +55,12 @@ final class VoicePipelineCoordinator {
         guard status == .off else { return }
         listeningEnabled = true
 
-        // Load Whisper model eagerly (reuses if already loaded)
-        try stt.loadModel()
+        // Preload Whisper when classic STT is active.
+        // Realtime mode can still opt into classic STT for lower latency.
+        let useRealtimeSTT = OpenAISettings.realtimeModeEnabled && !OpenAISettings.realtimeUseClassicSTT
+        if !useRealtimeSTT {
+            try stt.loadModel()
+        }
 
         // Wire callbacks
         wakeWord.onWakeWordDetected = { [weak self] in
@@ -53,6 +71,10 @@ final class VoicePipelineCoordinator {
             Task { @MainActor in
                 self?.handleCaptureComplete(wavURL: url)
             }
+        }
+
+        capture.onSpeechDetected = { [weak self] in
+            self?.followUpSpeechDetected = true
         }
 
         capture.onError = { [weak self] error in
@@ -72,6 +94,9 @@ final class VoicePipelineCoordinator {
         // Cancel any in-flight STT
         sttTask?.cancel()
         sttTask = nil
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
+        followUpSpeechDetected = false
 
         // Stop capture (discard partial audio)
         capture.stopCapture(discard: true)
@@ -87,17 +112,19 @@ final class VoicePipelineCoordinator {
 
     /// Starts a follow-up capture without requiring wake word.
     /// Used when Sam asks a question and we expect a spoken reply.
-    func startFollowUpCapture() {
+    func startFollowUpCapture(noSpeechTimeoutMs: Int? = nil) {
         guard listeningEnabled, status == .listeningForWakeWord else { return }
 
         // Stop wake word's audio engine before starting capture
         wakeWord.stop()
 
+        followUpSpeechDetected = false
         setStatus(.capturingAudio)
         SoundCuePlayer.shared.playCaptureBeep()
 
         do {
             try capture.startCapture()
+            scheduleNoSpeechTimeoutIfNeeded(noSpeechTimeoutMs)
         } catch {
             handleError(error)
         }
@@ -106,8 +133,11 @@ final class VoicePipelineCoordinator {
     /// Cancels an in-progress follow-up capture and resumes wake word listening.
     func cancelFollowUpCapture() {
         guard status == .capturingAudio else { return }
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
         capture.stopCapture(discard: true)
         capture.stopEngineHard()
+        followUpSpeechDetected = false
         resumeWakeWord()
     }
 
@@ -124,6 +154,7 @@ final class VoicePipelineCoordinator {
 
         setStatus(.capturingAudio)
         SoundCuePlayer.shared.playCaptureBeep()
+        followUpSpeechDetected = false
 
         do {
             try capture.startCapture()
@@ -134,6 +165,9 @@ final class VoicePipelineCoordinator {
 
     private func handleCaptureComplete(wavURL: URL) {
         guard listeningEnabled else { return }
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
+        followUpSpeechDetected = false
 
         // Ensure audio engine is fully stopped (belt + suspenders — AudioCaptureService
         // already stops in finishCapture, but we enforce it here too)
@@ -141,11 +175,11 @@ final class VoicePipelineCoordinator {
 
         setStatus(.transcribing)
 
-        sttTask = Task { [weak self] in
-            // Debounce: let CoreAudio settle after engine teardown
-            try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
+        sttTask = Task(priority: .userInitiated) { [weak self] in
+            defer {
+                self?.sttTask = nil
+            }
             guard !Task.isCancelled else { return }
-
             do {
                 let text = try await self?.stt.transcribe(wavURL: wavURL) ?? ""
                 guard !Task.isCancelled else { return }
@@ -165,6 +199,9 @@ final class VoicePipelineCoordinator {
     }
 
     private func resumeWakeWord() {
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
+        followUpSpeechDetected = false
         guard listeningEnabled else {
             setStatus(.off)
             return
@@ -179,6 +216,9 @@ final class VoicePipelineCoordinator {
 
     private func handleError(_ error: Error) {
         // Ensure everything is stopped
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
+        followUpSpeechDetected = false
         capture.stopCapture(discard: true)
         capture.stopEngineHard()
         wakeWord.stop()
@@ -202,4 +242,19 @@ final class VoicePipelineCoordinator {
         status = newStatus
         onStatusChange?(newStatus)
     }
+
+    private func scheduleNoSpeechTimeoutIfNeeded(_ noSpeechTimeoutMs: Int?) {
+        noSpeechTimeoutTask?.cancel()
+        noSpeechTimeoutTask = nil
+
+        guard let timeoutMs = noSpeechTimeoutMs, timeoutMs > 0 else { return }
+        noSpeechTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard self.status == .capturingAudio, !self.followUpSpeechDetected else { return }
+            self.cancelFollowUpCapture()
+        }
+    }
 }
+
+extension VoicePipelineCoordinator: VoicePipelineCoordinating {}

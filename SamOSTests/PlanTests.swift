@@ -148,10 +148,11 @@ final class PlanTests: XCTestCase {
         let action = Action.tool(ToolAction(name: "get_time", args: ["timezone": "UTC"], say: "Checking."))
         let plan = Plan.fromAction(action)
         XCTAssertEqual(plan.steps.count, 1)
+        XCTAssertEqual(plan.say, "Checking.")
         if case .tool(let name, let args, let say) = plan.steps[0] {
             XCTAssertEqual(name, "get_time")
             XCTAssertEqual(args["timezone"], .string("UTC"))
-            XCTAssertEqual(say, "Checking.")
+            XCTAssertNil(say)
         } else {
             XCTFail("Expected tool step")
         }

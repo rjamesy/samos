@@ -15,10 +15,11 @@ final class MemoryTests: XCTestCase {
         XCTAssertEqual(MemoryType.fact.rawValue, "fact")
         XCTAssertEqual(MemoryType.preference.rawValue, "preference")
         XCTAssertEqual(MemoryType.note.rawValue, "note")
+        XCTAssertEqual(MemoryType.checkin.rawValue, "checkin")
     }
 
     func testMemoryTypeCaseIterable() {
-        XCTAssertEqual(MemoryType.allCases.count, 3)
+        XCTAssertEqual(MemoryType.allCases.count, 4)
     }
 
     // MARK: - MemoryStore CRUD
@@ -165,6 +166,20 @@ final class MemoryTests: XCTestCase {
         if results.count >= 2 {
             XCTAssertTrue(results[0].content.contains("Whiskers"))
         }
+    }
+
+    func testSearchMatchesStemmedQueryTerms() {
+        let row = MemoryStore.shared.addMemory(
+            type: .note,
+            content: "Fermentation temperature control improves homemade beer consistency."
+        )
+        defer { if let id = row?.id { MemoryStore.shared.deleteMemory(idOrPrefix: id.uuidString) } }
+
+        let results = MemoryStore.shared.searchMemories(query: "tips for fermenting beer temp control")
+        XCTAssertTrue(
+            results.contains(where: { $0.content.lowercased().contains("fermentation temperature control") }),
+            "Retriever should match stemmed/variant query terms"
+        )
     }
 
     func testTokenizeStripsStopwords() {

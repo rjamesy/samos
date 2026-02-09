@@ -24,6 +24,48 @@ enum ImageProber {
         return URLSession(configuration: config)
     }()
 
+    /// Per-URL probe result with failure reason.
+    struct ProbeDetail {
+        let url: String
+        let passed: Bool
+        let reason: String // e.g. "HTTP 404", "text/html", "timeout"
+    }
+
+    /// Probes URLs and returns per-URL pass/fail details including HTTP status.
+    static func probeDetailed(urls: [String]) async -> [ProbeDetail] {
+        var details: [ProbeDetail] = []
+        for urlString in urls {
+            guard let url = URL(string: urlString) else {
+                details.append(ProbeDetail(url: urlString, passed: false, reason: "invalid URL"))
+                continue
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5
+
+            do {
+                let (_, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    details.append(ProbeDetail(url: urlString, passed: false, reason: "no HTTP response"))
+                    continue
+                }
+                if !(200...299).contains(http.statusCode) {
+                    details.append(ProbeDetail(url: urlString, passed: false, reason: "HTTP \(http.statusCode)"))
+                    continue
+                }
+                let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+                if contentType.hasPrefix("text/html") {
+                    details.append(ProbeDetail(url: urlString, passed: false, reason: "text/html (web page)"))
+                } else {
+                    details.append(ProbeDetail(url: urlString, passed: true, reason: "OK"))
+                }
+            } catch {
+                details.append(ProbeDetail(url: urlString, passed: false, reason: "network error"))
+            }
+        }
+        return details
+    }
+
     /// Probes a list of URLs with HEAD requests.
     /// Returns the subset that respond with HTTP 200 and Content-Type starting with "image/".
     static func probe(urls: [String]) async -> [String] {
@@ -73,17 +115,6 @@ final class PlanExecutor {
     static let shared = PlanExecutor()
     private let toolsRuntime: ToolsRuntimeProtocol
 
-    /// Mutating forge tools that require an active learn-confirm/batch-confirm slot.
-    /// Read-only tools (forge_queue_status) are NOT blocked.
-    static let forgeToolNames: Set<String> = [
-        "start_skillforge", "forge_queue_clear"
-    ]
-
-    /// PendingSlot names that grant permission to execute forge tools.
-    static let learnSlotNames: Set<String> = [
-        "learn_confirm", "batch_confirm"
-    ]
-
     private init() {
         self.toolsRuntime = ToolsRuntime.shared
     }
@@ -95,6 +126,13 @@ final class PlanExecutor {
 
     func execute(_ plan: Plan, originalInput: String, pendingSlotName: String? = nil) async -> PlanExecutionResult {
         var result = PlanExecutionResult()
+        let _ = pendingSlotName // Retained for API compatibility with existing call sites/tests.
+        let topLevelToolSay = singleToolPlanSay(in: plan)
+
+        if let topLevelToolSay {
+            result.chatMessages.append(ChatMessage(role: .assistant, text: topLevelToolSay))
+            result.spokenLines.append(topLevelToolSay)
+        }
 
         for step in plan.steps {
             switch step {
@@ -103,20 +141,6 @@ final class PlanExecutor {
                 result.spokenLines.append(say)
 
             case .tool(let name, _, let say):
-                // Safety gate: block mutating forge tools unless active learn slot
-                if Self.forgeToolNames.contains(name) && !Self.learnSlotNames.contains(pendingSlotName ?? "") {
-                    #if DEBUG
-                    print("[PlanExecutor] Blocked forge tool \(name) — no learn slot active (slot=\(pendingSlotName ?? "nil"))")
-                    #endif
-                    let prompt = "I can learn that as a new skill — do you want me to?"
-                    result.chatMessages.append(ChatMessage(role: .assistant, text: prompt))
-                    result.spokenLines.append(prompt)
-                    result.pendingSlotRequest = (slot: "learn_confirm", prompt: prompt)
-                    result.triggerFollowUpCapture = true
-                    result.stoppedAtAsk = true
-                    return result
-                }
-
                 let toolAction = ToolAction(name: name, args: step.toolArgsAsStrings, say: say)
                 let output = toolsRuntime.execute(toolAction)
 
@@ -162,26 +186,18 @@ final class PlanExecutor {
                         }
                         return result // Stop further steps
                     } else if let structured = parseStructuredPayload(output.payload) {
-                        if let say = say {
-                            result.chatMessages.append(ChatMessage(role: .assistant, text: say))
-                            result.spokenLines.append(say)
+                        // For top-level TOOL actions with say, speak the provided say only once.
+                        if topLevelToolSay == nil {
+                            result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
+                            result.spokenLines.append(structured.spoken)
                         }
-                        // Always speak the tool result so the user hears the answer
-                        result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
-                        result.spokenLines.append(structured.spoken)
+                        // Tool window must display raw markdown exactly as provided.
                         result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
                     } else {
-                        if let say = say {
-                            result.chatMessages.append(ChatMessage(role: .assistant, text: say))
-                            result.spokenLines.append(say)
-                        }
                         result.outputItems.append(output)
                     }
                 } else {
-                    if let say = say {
-                        result.chatMessages.append(ChatMessage(role: .assistant, text: say))
-                        result.spokenLines.append(say)
-                    }
+                    _ = say // tool step say is intentionally silent (debug/log only)
                 }
 
             case .ask(let slot, let prompt):
@@ -201,6 +217,27 @@ final class PlanExecutor {
                     role: .system,
                     text: "Delegating: \(task)"
                 ))
+
+                if let goal = capabilityGapGoal(from: task) {
+                    var args: [String: String] = ["goal": goal]
+                    if let missing = capabilityGapMissing(from: step), !missing.isEmpty {
+                        args["constraints"] = missing
+                    }
+
+                    let forgeAction = ToolAction(name: "start_skillforge", args: args, say: nil)
+                    let forgeOutput = toolsRuntime.execute(forgeAction)
+                    result.executedToolSteps.append((name: forgeAction.name, args: forgeAction.args))
+
+                    if let forgeOutput {
+                        if let structured = parseStructuredPayload(forgeOutput.payload) {
+                            result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
+                            result.spokenLines.append(structured.spoken)
+                            result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
+                        } else {
+                            result.outputItems.append(forgeOutput)
+                        }
+                    }
+                }
             }
         }
 
@@ -217,12 +254,18 @@ final class PlanExecutor {
               let urls = dict["urls"] as? [String], !urls.isEmpty
         else { return nil }
 
-        let verified = await ImageProber.probe(urls: urls)
-        if verified.isEmpty {
+        let details = await ImageProber.probeDetailed(urls: urls)
+        let allFailed = details.allSatisfy { !$0.passed }
+
+        if allFailed {
+            // Build per-URL failure reasons for the repair prompt
+            let failureLines = details.map { "\($0.url.prefix(80)) → \($0.reason)" }
+            let failureSummary = failureLines.joined(separator: "; ")
+
             return (
                 slot: "image_url",
                 spoken: "I couldn't load that image — the URL seems broken.",
-                formatted: "All \(urls.count) image URL(s) failed the download probe (non-200 or non-image content-type). Provide different direct image URLs ending in .jpg, .png, .gif, or .webp."
+                formatted: "All \(urls.count) image URL(s) failed probe: \(failureSummary). Return 3 NEW direct image URLs from upload.wikimedia.org (preferred), images.unsplash.com, or images.pexels.com. URLs must end in .jpg, .png, .gif, or .webp."
             )
         }
 
@@ -254,6 +297,34 @@ final class PlanExecutor {
               let formatted = dict["formatted"] as? String
         else { return nil }
         return (slot, spoken, formatted)
+    }
+
+    /// Returns plan-level say when this is a single-tool plan (legacy TOOL action shape).
+    private func singleToolPlanSay(in plan: Plan) -> String? {
+        guard plan.steps.count == 1 else { return nil }
+        guard case .tool = plan.steps[0] else { return nil }
+        let trimmed = plan.say?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func capabilityGapGoal(from task: String) -> String? {
+        let marker = "capability_gap:"
+        guard task.lowercased().hasPrefix(marker) else { return nil }
+        let start = task.index(task.startIndex, offsetBy: marker.count)
+        let goal = String(task[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return goal.isEmpty ? nil : goal
+    }
+
+    private func capabilityGapMissing(from step: PlanStep) -> String? {
+        guard case .delegate(_, let context, _) = step else { return nil }
+        guard var context = context?.trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty else {
+            return nil
+        }
+        let prefix = "missing:"
+        if context.lowercased().hasPrefix(prefix) {
+            context = String(context.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return context.isEmpty ? nil : context
     }
 
 }

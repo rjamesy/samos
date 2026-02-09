@@ -122,8 +122,19 @@ enum ElevenLabsClient {
         // Buffer all streamed chunks into Data, then write once
         var audioData = Data()
         audioData.reserveCapacity(64 * 1024) // 64KB typical for short speech
-        for try await byte in bytes {
-            audioData.append(byte)
+        var iterator = bytes.makeAsyncIterator()
+        var chunk: [UInt8] = []
+        chunk.reserveCapacity(4096)
+
+        while let byte = try await iterator.next() {
+            chunk.append(byte)
+            if chunk.count >= 4096 {
+                audioData.append(contentsOf: chunk)
+                chunk.removeAll(keepingCapacity: true)
+            }
+        }
+        if !chunk.isEmpty {
+            audioData.append(contentsOf: chunk)
         }
 
         guard !audioData.isEmpty else {

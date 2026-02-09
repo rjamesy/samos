@@ -77,6 +77,35 @@ enum ActionValidator {
                 reasons.append("save_memory requires non-empty 'content' argument.")
             }
 
+        case "get_weather":
+            let place = toolAction.args["place"] ?? ""
+            if place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reasons.append("get_weather requires non-empty 'place' argument.")
+            }
+
+        case "enroll_camera_face":
+            let name = toolAction.args["name"] ?? ""
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reasons.append("enroll_camera_face requires non-empty 'name' argument.")
+            }
+
+        case "learn_website":
+            let url = toolAction.args["url"] ?? ""
+            if url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reasons.append("learn_website requires non-empty 'url' argument.")
+            } else if !isValidAbsoluteURL(url) {
+                reasons.append("learn_website requires a valid http/https URL.")
+            }
+
+        case "autonomous_learn":
+            if let minutesRaw = toolAction.args["minutes"], !minutesRaw.isEmpty {
+                guard let minutes = Int(minutesRaw), minutes >= 1 else {
+                    reasons.append("autonomous_learn optional 'minutes' must be an integer greater than or equal to 1.")
+                    break
+                }
+                _ = minutes
+            }
+
         default:
             break
         }
@@ -192,4 +221,5 @@ enum ActionValidator {
         else { return false }
         return true
     }
+
 }

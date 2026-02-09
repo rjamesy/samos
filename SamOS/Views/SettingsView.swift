@@ -4,6 +4,18 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
 
+    private enum SettingsTab: String, CaseIterable, Identifiable {
+        case general = "General"
+        case audioVisual = "Audio/Visual"
+        case aiLearning = "AI Learning"
+        case skills = "Skills"
+        case memory = "Memory"
+
+        var id: String { rawValue }
+    }
+
+    @State private var selectedTab: SettingsTab = .general
+
     // Wake Word
     @State private var porcupineAccessKey: String = M2Settings.porcupineAccessKey
     @State private var porcupineKeywordPath: String = M2Settings.porcupineKeywordDisplayPath
@@ -31,9 +43,13 @@ struct SettingsView: View {
     @State private var elevenLabsStreaming: Bool = ElevenLabsSettings.useStreaming
     @State private var testVoiceInProgress: Bool = false
 
-    // OpenAI (SkillForge)
+    // OpenAI
     @State private var openaiApiKey: String = OpenAISettings.apiKey
     @State private var openaiModel: String = OpenAISettings.model
+    @State private var openaiRealtimeModeEnabled: Bool = OpenAISettings.realtimeModeEnabled
+    @State private var openaiRealtimeUseClassicSTT: Bool = OpenAISettings.realtimeUseClassicSTT
+    @State private var openaiRealtimeModel: String = OpenAISettings.realtimeModel
+    @State private var openaiRealtimeVoice: String = OpenAISettings.realtimeVoice
 
     // Memory
     @State private var memories: [MemoryRow] = []
@@ -65,8 +81,17 @@ struct SettingsView: View {
 
             Divider()
 
+            Picker("Settings Tab", selection: $selectedTab) {
+                ForEach(SettingsTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
             Form {
-                // Show banner if listening was paused
                 if appState.wasListeningPausedForSettings {
                     HStack(spacing: 6) {
                         Image(systemName: "mic.slash")
@@ -78,414 +103,40 @@ struct SettingsView: View {
                     .padding(.vertical, 6)
                 }
 
-                // MARK: - General
+                switch selectedTab {
+                case .general:
+                    generalSection
+                    securitySection
 
-                Section("General") {
-                    TextField("Your name", text: $userName, prompt: Text("Used in alarm greetings"))
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: userName) { _, newValue in
-                            M2Settings.userName = newValue
-                        }
-                }
+                case .audioVisual:
+                    wakeWordSection
+                    sttSection
+                    audioCaptureSection
+                    voiceOutputSection
+                    cameraVisionSection
 
-                // MARK: - Wake Word
+                case .aiLearning:
+                    routingSection
+                    openAISection
+                    aiLearningSection
 
-                Section("Wake Word (Porcupine)") {
-                    SecureField("AccessKey", text: $porcupineAccessKey)
-                        .onChange(of: porcupineAccessKey) { _, newValue in
-                            M2Settings.porcupineAccessKey = newValue
-                        }
+                case .skills:
+                    installedSkillsSection
+                    capabilitiesSection
 
-                    HStack {
-                        TextField("Keyword (.ppn) file", text: $porcupineKeywordPath)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(true)
-                        Button("Browse...") {
-                            selectFile(title: "Select Porcupine Keyword File", types: [UTType(filenameExtension: "ppn")].compactMap { $0 }) { url in
-                                M2Settings.setPorcupineKeywordURL(url)
-                                porcupineKeywordPath = url.path
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Text("Sensitivity: \(porcupineSensitivity, specifier: "%.2f")")
-                        Slider(value: $porcupineSensitivity, in: 0...1, step: 0.05)
-                            .onChange(of: porcupineSensitivity) { _, newValue in
-                                M2Settings.porcupineSensitivity = newValue
-                            }
-                    }
-
-                    LabeledContent("Status") {
-                        if !porcupineAccessKey.isEmpty && !porcupineKeywordPath.isEmpty
-                            && FileManager.default.fileExists(atPath: porcupineKeywordPath)
-                        {
-                            Text("Configured")
-                                .foregroundColor(.green)
-                        } else {
-                            Text("Not configured")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - STT
-
-                Section("Speech-to-Text (Whisper)") {
-                    HStack {
-                        TextField("Whisper model (.bin) file", text: $whisperModelPath)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(true)
-                        Button("Browse...") {
-                            selectFile(title: "Select Whisper Model File", types: [UTType(filenameExtension: "bin")].compactMap { $0 }) { url in
-                                M2Settings.setWhisperModelURL(url)
-                                whisperModelPath = url.path
-                            }
-                        }
-                    }
-
-                    LabeledContent("Status") {
-                        if !whisperModelPath.isEmpty
-                            && FileManager.default.fileExists(atPath: whisperModelPath)
-                        {
-                            Text("Configured")
-                                .foregroundColor(.green)
-                        } else {
-                            Text("Not configured")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - Audio Capture
-
-                Section("Audio Capture") {
-                    HStack {
-                        Text("Silence threshold: \(Int(silenceThresholdDB)) dB")
-                        Slider(value: $silenceThresholdDB, in: -60...(-20), step: 1)
-                            .onChange(of: silenceThresholdDB) { _, newValue in
-                                M2Settings.silenceThresholdDB = newValue
-                            }
-                    }
-
-                    HStack {
-                        Text("Silence duration: \(Int(silenceDurationMs)) ms")
-                        Slider(value: $silenceDurationMs, in: 500...5000, step: 100)
-                            .onChange(of: silenceDurationMs) { _, newValue in
-                                M2Settings.silenceDurationMs = Int(newValue)
-                            }
-                    }
-
-                    Toggle("Play capture beep", isOn: $captureBeepEnabled)
-                        .onChange(of: captureBeepEnabled) { _, newValue in
-                            M2Settings.captureBeepEnabled = newValue
-                        }
-
-                    LabeledContent("Microphone") {
-                        switch MicrophonePermission.currentStatus {
-                        case .granted:
-                            Text("Granted")
-                                .foregroundColor(.green)
-                        case .denied:
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("Denied")
-                                    .foregroundColor(.red)
-                                Button("Open System Settings") {
-                                    MicrophonePermission.openSystemSettings()
-                                }
-                                .font(.caption)
-                            }
-                        case .undetermined:
-                            Text("Not yet requested")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - Routing
-
-                Section("Routing") {
-                    Toggle("Use Ollama", isOn: $useOllama)
-                        .onChange(of: useOllama) { _, newValue in
-                            M2Settings.useOllama = newValue
-                        }
-
-                    TextField("Endpoint", text: $ollamaEndpoint)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(!useOllama)
-                        .onChange(of: ollamaEndpoint) { _, newValue in
-                            M2Settings.ollamaEndpoint = newValue
-                        }
-
-                    TextField("Model", text: $ollamaModel)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(!useOllama)
-                        .onChange(of: ollamaModel) { _, newValue in
-                            M2Settings.ollamaModel = newValue
-                        }
-
-                    LabeledContent("Status") {
-                        if useOllama {
-                            Text("Ollama (active)")
-                                .foregroundColor(.green)
-                        } else {
-                            Text("Mock (active)")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - Voice Output
-
-                Section("Voice Output (ElevenLabs)") {
-                    SecureField("API Key", text: $elevenLabsApiKey)
-                        .onChange(of: elevenLabsApiKey) { _, newValue in
-                            ElevenLabsSettings.apiKey = newValue
-                        }
-
-                    TextField("Voice ID", text: $elevenLabsVoiceId)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: elevenLabsVoiceId) { _, newValue in
-                            ElevenLabsSettings.voiceId = newValue
-                        }
-
-                    Toggle("Mute voice", isOn: $elevenLabsMuted)
-                        .onChange(of: elevenLabsMuted) { _, newValue in
-                            ElevenLabsSettings.isMuted = newValue
-                            appState.isMuted = newValue
-                            if newValue {
-                                TTSService.shared.stopSpeaking()
-                            }
-                        }
-
-                    Toggle("Use streaming voice", isOn: $elevenLabsStreaming)
-                        .onChange(of: elevenLabsStreaming) { _, newValue in
-                            ElevenLabsSettings.useStreaming = newValue
-                        }
-
-                    HStack {
-                        Button("Test Voice") {
-                            testVoiceInProgress = true
-                            TTSService.shared.speak("Hi Richard, voice is working.")
-                            // Reset after a few seconds
-                            Task {
-                                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                                testVoiceInProgress = false
-                            }
-                        }
-                        .disabled(!ElevenLabsSettings.isConfigured || testVoiceInProgress)
-
-                        if testVoiceInProgress {
-                            ProgressView()
-                                .scaleEffect(0.5)
-                        }
-                    }
-
-                    LabeledContent("Status") {
-                        if ElevenLabsSettings.isConfigured {
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text("Configured")
-                                    .foregroundColor(.green)
-                                if let savedAt = ElevenLabsSettings.keySavedAt {
-                                    Text("Key saved \(savedAt, style: .relative) ago")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        } else {
-                            Text("API key required")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - OpenAI (SkillForge)
-
-                Section("OpenAI (SkillForge)") {
-                    SecureField("API Key", text: $openaiApiKey)
-                        .onChange(of: openaiApiKey) { _, newValue in
-                            OpenAISettings.apiKey = newValue
-                        }
-
-                    TextField("Model", text: $openaiModel)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: openaiModel) { _, newValue in
-                            OpenAISettings.model = newValue
-                        }
-
-                    LabeledContent("Status") {
-                        if OpenAISettings.isConfigured {
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text("Configured")
-                                    .foregroundColor(.green)
-                                if let savedAt = OpenAISettings.keySavedAt {
-                                    Text("Key saved \(savedAt, style: .relative) ago")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        } else {
-                            Text("API key required")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                // MARK: - Security
-
-                Section("Security") {
-                    Toggle("Store API keys in Keychain (recommended)", isOn: $useKeychainStorage)
-                        .onChange(of: useKeychainStorage) { _, newValue in
-                            KeychainStore.useKeychain = newValue
-                        }
-
-                    Text(useKeychainStorage
-                         ? "API keys are stored securely in the macOS Keychain."
-                         : "API keys are kept in memory only and will be lost when the app quits.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                // MARK: - Forge Queue
-
-                Section("Forge Queue") {
-                    let jobs = SkillForgeQueueService.shared.allJobs()
-                    if jobs.isEmpty {
-                        Text("No forge jobs")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
-                    } else {
-                        ForEach(jobs) { job in
-                            LabeledContent(job.goal) {
-                                Text(job.status.rawValue)
-                                    .foregroundColor(forgeStatusColor(job.status))
-                                    .font(.caption)
-                            }
-                        }
-
-                        if jobs.contains(where: { $0.status == .completed || $0.status == .failed }) {
-                            Button("Clear Finished") {
-                                SkillForgeQueueService.shared.clearFinished()
-                            }
-                        }
-                    }
-
-                    LabeledContent("Status") {
-                        if SkillForgeQueueService.shared.isAvailable {
-                            Text("SQLite (active)")
-                                .foregroundColor(.green)
-                        } else {
-                            Text("Unavailable")
-                                .foregroundColor(.red)
-                        }
-                    }
-                }
-
-                // MARK: - Installed Skills
-
-                Section("Installed Skills") {
-                    if installedSkills.isEmpty {
-                        Text("No skills installed")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
-                    } else {
-                        ForEach(installedSkills) { skill in
-                            LabeledContent(skill.name) {
-                                Text(skill.triggerPhrases.prefix(3).joined(separator: ", "))
-                                    .foregroundColor(.secondary)
-                                    .font(.caption)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-
-                    LabeledContent("Count") {
-                        Text("\(installedSkills.count)")
-                    }
-                }
-
-                // MARK: - Memory
-
-                Section("Memory") {
-                    if memories.isEmpty {
-                        Text("No memories saved yet")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
-                    } else {
-                        ForEach(memories) { mem in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 4) {
-                                        Text(mem.type.rawValue)
-                                            .font(.caption2.bold())
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(memoryTypeColor(mem.type).opacity(0.15))
-                                            .foregroundColor(memoryTypeColor(mem.type))
-                                            .cornerRadius(4)
-                                        Text(mem.shortID)
-                                            .font(.caption2.monospaced())
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Text(mem.content)
-                                        .font(.callout)
-                                    Text(mem.createdAt, style: .date)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                Button(role: .destructive) {
-                                    MemoryStore.shared.deleteMemory(idOrPrefix: mem.id.uuidString)
-                                    reloadMemories()
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-
-                        Button("Clear All Memories", role: .destructive) {
-                            showClearConfirmation = true
-                        }
-                        .confirmationDialog("Clear all memories?", isPresented: $showClearConfirmation) {
-                            Button("Clear All", role: .destructive) {
-                                MemoryStore.shared.clearMemories()
-                                reloadMemories()
-                            }
-                            Button("Cancel", role: .cancel) {}
-                        } message: {
-                            Text("This will remove all saved memories. This cannot be undone.")
-                        }
-                    }
-
-                    LabeledContent("Storage") {
-                        Text(MemoryStore.shared.isAvailable ? "SQLite (active)" : "Unavailable")
-                            .foregroundColor(MemoryStore.shared.isAvailable ? .green : .red)
-                    }
-                }
-
-                // MARK: - Capabilities
-
-                Section("Capabilities") {
-                    LabeledContent("Registered Tools") {
-                        Text("\(ToolRegistry.shared.allTools.count)")
-                    }
-                    ForEach(ToolRegistry.shared.allTools, id: \.name) { tool in
-                        LabeledContent(tool.name) {
-                            Text(tool.description)
-                                .foregroundColor(.secondary)
-                                .font(.caption)
-                        }
-                    }
+                case .memory:
+                    memorySection
                 }
             }
             .formStyle(.grouped)
         }
-        .frame(minWidth: 450, minHeight: 500)
+        .frame(minWidth: 560, minHeight: 560)
         .onAppear {
             appState.pauseListeningForSettings()
             reloadMemories()
+            appState.refreshWebsiteLearningDebug()
+            appState.refreshAutonomousLearningDebug()
+            appState.refreshCameraDebug()
             installedSkills = SkillStore.shared.loadInstalled()
         }
         .onDisappear {
@@ -493,30 +144,507 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Memory Helpers
+    private var generalSection: some View {
+        Section("General") {
+            TextField("Your name", text: $userName, prompt: Text("Used in alarm greetings"))
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: userName) { _, newValue in
+                    M2Settings.userName = newValue
+                }
+        }
+    }
+
+    private var wakeWordSection: some View {
+        Section("Wake Word (Porcupine)") {
+            SecureField("AccessKey", text: $porcupineAccessKey)
+                .onChange(of: porcupineAccessKey) { _, newValue in
+                    M2Settings.porcupineAccessKey = newValue
+                }
+
+            HStack {
+                TextField("Keyword (.ppn) file", text: $porcupineKeywordPath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+                Button("Browse...") {
+                    selectFile(title: "Select Porcupine Keyword File", types: [UTType(filenameExtension: "ppn")].compactMap { $0 }) { url in
+                        M2Settings.setPorcupineKeywordURL(url)
+                        porcupineKeywordPath = url.path
+                    }
+                }
+            }
+
+            HStack {
+                Text("Sensitivity: \(porcupineSensitivity, specifier: "%.2f")")
+                Slider(value: $porcupineSensitivity, in: 0...1, step: 0.05)
+                    .onChange(of: porcupineSensitivity) { _, newValue in
+                        M2Settings.porcupineSensitivity = newValue
+                    }
+            }
+
+            LabeledContent("Status") {
+                if !porcupineAccessKey.isEmpty && !porcupineKeywordPath.isEmpty
+                    && FileManager.default.fileExists(atPath: porcupineKeywordPath) {
+                    Text("Configured").foregroundColor(.green)
+                } else {
+                    Text("Not configured").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var sttSection: some View {
+        Section("Speech-to-Text (Whisper)") {
+            HStack {
+                TextField("Whisper model (.bin) file", text: $whisperModelPath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+                Button("Browse...") {
+                    selectFile(title: "Select Whisper Model File", types: [UTType(filenameExtension: "bin")].compactMap { $0 }) { url in
+                        M2Settings.setWhisperModelURL(url)
+                        whisperModelPath = url.path
+                    }
+                }
+            }
+
+            LabeledContent("Status") {
+                if !whisperModelPath.isEmpty && FileManager.default.fileExists(atPath: whisperModelPath) {
+                    Text("Configured").foregroundColor(.green)
+                } else {
+                    Text("Not configured").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var audioCaptureSection: some View {
+        Section("Audio Capture") {
+            HStack {
+                Text("Silence threshold: \(Int(silenceThresholdDB)) dB")
+                Slider(value: $silenceThresholdDB, in: -60...(-20), step: 1)
+                    .onChange(of: silenceThresholdDB) { _, newValue in
+                        M2Settings.silenceThresholdDB = newValue
+                    }
+            }
+
+            HStack {
+                Text("Silence duration: \(Int(silenceDurationMs)) ms")
+                Slider(value: $silenceDurationMs, in: 500...5000, step: 100)
+                    .onChange(of: silenceDurationMs) { _, newValue in
+                        M2Settings.silenceDurationMs = Int(newValue)
+                    }
+            }
+
+            Toggle("Play capture beep", isOn: $captureBeepEnabled)
+                .onChange(of: captureBeepEnabled) { _, newValue in
+                    M2Settings.captureBeepEnabled = newValue
+                }
+
+            LabeledContent("Microphone") {
+                switch MicrophonePermission.currentStatus {
+                case .granted:
+                    Text("Granted").foregroundColor(.green)
+                case .denied:
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Denied").foregroundColor(.red)
+                        Button("Open System Settings") {
+                            MicrophonePermission.openSystemSettings()
+                        }
+                        .font(.caption)
+                    }
+                case .undetermined:
+                    Text("Not yet requested").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var routingSection: some View {
+        Section("Routing") {
+            Toggle("Use Ollama", isOn: $useOllama)
+                .onChange(of: useOllama) { _, newValue in
+                    M2Settings.useOllama = newValue
+                }
+
+            TextField("Endpoint", text: $ollamaEndpoint)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!useOllama)
+                .onChange(of: ollamaEndpoint) { _, newValue in
+                    M2Settings.ollamaEndpoint = newValue
+                }
+
+            TextField("Model", text: $ollamaModel)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!useOllama)
+                .onChange(of: ollamaModel) { _, newValue in
+                    M2Settings.ollamaModel = newValue
+                }
+
+            LabeledContent("Status") {
+                if useOllama {
+                    Text("Ollama (active)").foregroundColor(.green)
+                } else {
+                    Text("Mock (active)").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var voiceOutputSection: some View {
+        Section("Voice Output (ElevenLabs)") {
+            SecureField("API Key", text: $elevenLabsApiKey)
+                .onChange(of: elevenLabsApiKey) { _, newValue in
+                    ElevenLabsSettings.apiKey = newValue
+                }
+
+            TextField("Voice ID", text: $elevenLabsVoiceId)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: elevenLabsVoiceId) { _, newValue in
+                    ElevenLabsSettings.voiceId = newValue
+                }
+
+            Toggle("Mute voice", isOn: $elevenLabsMuted)
+                .onChange(of: elevenLabsMuted) { _, newValue in
+                    ElevenLabsSettings.isMuted = newValue
+                    appState.isMuted = newValue
+                    if newValue {
+                        TTSService.shared.stopSpeaking()
+                    }
+                }
+
+            Toggle("Use streaming voice", isOn: $elevenLabsStreaming)
+                .onChange(of: elevenLabsStreaming) { _, newValue in
+                    ElevenLabsSettings.useStreaming = newValue
+                }
+
+            HStack {
+                Button("Test Voice") {
+                    testVoiceInProgress = true
+                    TTSService.shared.speak("Hi Richard, voice is working.")
+                    Task {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        testVoiceInProgress = false
+                    }
+                }
+                .disabled(!ElevenLabsSettings.isConfigured || testVoiceInProgress)
+
+                if testVoiceInProgress {
+                    ProgressView().scaleEffect(0.5)
+                }
+            }
+
+            LabeledContent("Status") {
+                if ElevenLabsSettings.isConfigured {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Configured").foregroundColor(.green)
+                        if let savedAt = ElevenLabsSettings.keySavedAt {
+                            Text("Key saved \(savedAt, style: .relative) ago")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    Text("API key required").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var cameraVisionSection: some View {
+        Section("Camera Vision") {
+            Toggle("Enable camera", isOn: Binding(
+                get: { appState.isCameraEnabled },
+                set: { appState.setCameraEnabled($0) }
+            ))
+
+            LabeledContent("Permission") {
+                switch appState.cameraPermissionStatus {
+                case .granted:
+                    Text("Granted").foregroundColor(.green)
+                case .denied:
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Denied").foregroundColor(.red)
+                        Button("Open System Settings") {
+                            CameraPermission.openSystemSettings()
+                        }
+                        .font(.caption)
+                    }
+                case .undetermined:
+                    Text("Not yet requested").foregroundColor(.secondary)
+                }
+            }
+
+            if let frameAt = appState.cameraLastFrameAt {
+                LabeledContent("Last frame") {
+                    Text(frameAt, style: .relative)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text("No camera frame yet.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let preview = appState.cameraPreviewImage {
+                Image(nsImage: preview)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 180)
+                    .cornerRadius(8)
+            }
+
+            if let cameraError = appState.cameraErrorMessage, !cameraError.isEmpty {
+                Text(cameraError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            HStack {
+                Button("Describe Current View") {
+                    appState.describeCurrentCameraView()
+                }
+                .disabled(!appState.isCameraEnabled)
+
+                Spacer()
+
+                Button("Refresh Status") {
+                    appState.refreshCameraDebug()
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Text("When camera is enabled, Sam can describe the scene, find objects, detect face presence, enroll and recognize named faces, answer visual questions, capture inventory snapshots, and save camera memory notes. Face profiles are persisted locally in encrypted storage.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var openAISection: some View {
+        Section("OpenAI") {
+            SecureField("API Key", text: $openaiApiKey)
+                .onChange(of: openaiApiKey) { _, newValue in
+                    OpenAISettings.apiKey = newValue
+                }
+
+            TextField("Model", text: $openaiModel)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: openaiModel) { _, newValue in
+                    OpenAISettings.model = newValue
+                }
+
+            Toggle("Realtime Mode (WebSocket transcription)", isOn: $openaiRealtimeModeEnabled)
+                .onChange(of: openaiRealtimeModeEnabled) { _, newValue in
+                    OpenAISettings.realtimeModeEnabled = newValue
+                    appState.reconfigureVoicePipelineForCurrentMode()
+                }
+
+            Toggle("Classic STT in Realtime Mode (faster)", isOn: $openaiRealtimeUseClassicSTT)
+                .disabled(!openaiRealtimeModeEnabled)
+                .onChange(of: openaiRealtimeUseClassicSTT) { _, newValue in
+                    OpenAISettings.realtimeUseClassicSTT = newValue
+                    appState.reconfigureVoicePipelineForCurrentMode()
+                }
+
+            TextField("Realtime Model", text: $openaiRealtimeModel)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!openaiRealtimeModeEnabled)
+                .onChange(of: openaiRealtimeModel) { _, newValue in
+                    OpenAISettings.realtimeModel = newValue
+                }
+
+            TextField("Realtime Voice", text: $openaiRealtimeVoice)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!openaiRealtimeModeEnabled)
+                .onChange(of: openaiRealtimeVoice) { _, newValue in
+                    OpenAISettings.realtimeVoice = newValue
+                }
+
+            LabeledContent("Status") {
+                if OpenAISettings.isConfigured {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        if openaiRealtimeModeEnabled {
+                            let sttMode = openaiRealtimeUseClassicSTT ? "Classic STT" : "Realtime STT"
+                            Text("Configured (\(sttMode) + ElevenLabs TTS)")
+                                .foregroundColor(.green)
+                        } else {
+                            Text("Configured (Classic STT + ElevenLabs TTS)")
+                                .foregroundColor(.green)
+                        }
+                        if let savedAt = OpenAISettings.keySavedAt {
+                            Text("Key saved \(savedAt, style: .relative) ago")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    Text("API key required").foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var aiLearningSection: some View {
+        Section("AI Learning") {
+            LabeledContent("Websites Learned") {
+                Text("\(appState.learnedWebsiteCount)")
+                    .font(.body.monospacedDigit())
+            }
+
+            LabeledContent("Learning Sessions") {
+                Text("\(appState.autonomousLearningReportCount)")
+                    .font(.body.monospacedDigit())
+            }
+
+            if let active = appState.activeAutonomousLearningSession {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Active session")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.orange)
+                    Text("Topic: \(active.topic)")
+                        .font(.caption)
+                    Text("Duration: \(active.requestedMinutes) minute\(active.requestedMinutes == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("Expected finish: \(active.expectedFinishAt, style: .time)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text("No active autonomous learning session")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Text("Settings only shows learning counts and status. Full learning logs stay out of Settings, but Sam still uses learned data in future answers.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Button("Refresh Learning Status") {
+                appState.refreshWebsiteLearningDebug()
+                appState.refreshAutonomousLearningDebug()
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    private var installedSkillsSection: some View {
+        Section("Installed Skills") {
+            if installedSkills.isEmpty {
+                Text("No skills installed")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+            } else {
+                ForEach(installedSkills) { skill in
+                    LabeledContent(skill.name) {
+                        Text(skill.triggerPhrases.prefix(3).joined(separator: ", "))
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            LabeledContent("Count") {
+                Text("\(installedSkills.count)")
+            }
+        }
+    }
+
+    private var capabilitiesSection: some View {
+        Section("Capabilities") {
+            LabeledContent("Registered Tools") {
+                Text("\(ToolRegistry.shared.allTools.count)")
+            }
+            ForEach(ToolRegistry.shared.allTools, id: \.name) { tool in
+                LabeledContent(tool.name) {
+                    Text(tool.description)
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private var memorySection: some View {
+        Section("Memory") {
+            let facts = memories.filter { $0.type == .fact }.count
+            let preferences = memories.filter { $0.type == .preference }.count
+            let notes = memories.filter { $0.type == .note }.count
+            let checkins = memories.filter { $0.type == .checkin }.count
+
+            LabeledContent("Total") {
+                Text("\(memories.count)")
+                    .font(.body.monospacedDigit())
+            }
+            LabeledContent("Facts") {
+                Text("\(facts)")
+                    .font(.body.monospacedDigit())
+            }
+            LabeledContent("Preferences") {
+                Text("\(preferences)")
+                    .font(.body.monospacedDigit())
+            }
+            LabeledContent("Notes") {
+                Text("\(notes)")
+                    .font(.body.monospacedDigit())
+            }
+            LabeledContent("Check-ins") {
+                Text("\(checkins)")
+                    .font(.body.monospacedDigit())
+            }
+
+            LabeledContent("Storage") {
+                Text(MemoryStore.shared.isAvailable ? "SQLite (active)" : "Unavailable")
+                    .foregroundColor(MemoryStore.shared.isAvailable ? .green : .red)
+            }
+
+            HStack {
+                Button("Refresh") {
+                    reloadMemories()
+                }
+                .buttonStyle(.borderless)
+
+                Spacer()
+
+                Button("Clear All Memories", role: .destructive) {
+                    showClearConfirmation = true
+                }
+                .confirmationDialog("Clear all memories?", isPresented: $showClearConfirmation) {
+                    Button("Clear All", role: .destructive) {
+                        MemoryStore.shared.clearMemories()
+                        reloadMemories()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will remove all saved memories. This cannot be undone.")
+                }
+            }
+        }
+    }
+
+    private var securitySection: some View {
+        Section("Security") {
+            #if DEBUG
+            Text("Dev mode: keys stored locally (UserDefaults). No Keychain prompts.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            #else
+            Toggle("Store API keys in Keychain (recommended)", isOn: $useKeychainStorage)
+                .onChange(of: useKeychainStorage) { _, newValue in
+                    KeychainStore.useKeychain = newValue
+                }
+
+            Text(useKeychainStorage
+                 ? "API keys are stored securely in the macOS Keychain."
+                 : "API keys are kept in memory only and will be lost when the app quits.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            #endif
+        }
+    }
 
     private func reloadMemories() {
         memories = MemoryStore.shared.listMemories()
     }
-
-    private func forgeStatusColor(_ status: ForgeQueueJob.Status) -> Color {
-        switch status {
-        case .queued: return .secondary
-        case .running: return .orange
-        case .completed: return .green
-        case .failed: return .red
-        }
-    }
-
-    private func memoryTypeColor(_ type: MemoryType) -> Color {
-        switch type {
-        case .fact: return .blue
-        case .preference: return .purple
-        case .note: return .orange
-        }
-    }
-
-    // MARK: - File Picker
 
     private func selectFile(title: String, types: [UTType], completion: @escaping (URL) -> Void) {
         let panel = NSOpenPanel()

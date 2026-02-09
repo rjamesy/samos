@@ -249,6 +249,18 @@ final class TTSTests: XCTestCase {
     }
 
     @MainActor
+    func testInferredAudioFileExtensionDetectsWav() {
+        let wavHeader = Data([0x52, 0x49, 0x46, 0x46, 0x24, 0x80, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45])
+        XCTAssertEqual(TTSService.inferredAudioFileExtension(for: wavHeader), "wav")
+    }
+
+    @MainActor
+    func testInferredAudioFileExtensionDefaultsToMp3() {
+        let mp3Header = Data([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x54, 0x41])
+        XCTAssertEqual(TTSService.inferredAudioFileExtension(for: mp3Header), "mp3")
+    }
+
+    @MainActor
     func testSpeakWithConfirmModeDoesNotCrash() {
         let original = ElevenLabsSettings.isMuted
         defer { ElevenLabsSettings.isMuted = original }
@@ -321,6 +333,36 @@ final class TTSTests: XCTestCase {
         XCTAssertTrue(OpenAISettings.isConfigured)
     }
 
+    func testOpenAIRealtimeModeDefaultsToClassicOff() {
+        let original = OpenAISettings.realtimeModeEnabled
+        defer { OpenAISettings.realtimeModeEnabled = original }
+
+        OpenAISettings.realtimeModeEnabled = false
+        XCTAssertFalse(OpenAISettings.realtimeModeEnabled)
+    }
+
+    func testOpenAIRealtimeModePersistence() {
+        let original = OpenAISettings.realtimeModeEnabled
+        defer { OpenAISettings.realtimeModeEnabled = original }
+
+        OpenAISettings.realtimeModeEnabled = true
+        XCTAssertTrue(OpenAISettings.realtimeModeEnabled)
+
+        OpenAISettings.realtimeModeEnabled = false
+        XCTAssertFalse(OpenAISettings.realtimeModeEnabled)
+    }
+
+    func testOpenAIRealtimeClassicSTTPersistence() {
+        let original = OpenAISettings.realtimeUseClassicSTT
+        defer { OpenAISettings.realtimeUseClassicSTT = original }
+
+        OpenAISettings.realtimeUseClassicSTT = true
+        XCTAssertTrue(OpenAISettings.realtimeUseClassicSTT)
+
+        OpenAISettings.realtimeUseClassicSTT = false
+        XCTAssertFalse(OpenAISettings.realtimeUseClassicSTT)
+    }
+
     // MARK: - Listening Persistence
 
     @MainActor
@@ -345,5 +387,56 @@ final class TTSTests: XCTestCase {
         // with an empty message (which should be a no-op)
         appState.send("")
         XCTAssertTrue(appState.chatMessages.isEmpty, "Empty send should be a no-op")
+    }
+
+    // MARK: - Response Polish (Confidence + TTS Pacing)
+
+    func testConfidenceModulationAddsHedgeWhenUncertain() {
+        let input = "The arrival time is approximately 5 PM."
+        let output = ResponsePolish.applyConfidenceModulation(to: input)
+        XCTAssertTrue(output.hasSuffix("(If you want, I can double-check.)"))
+    }
+
+    func testConfidenceModulationNoChangeWhenCertain() {
+        let input = "It's 5 PM in London."
+        let output = ResponsePolish.applyConfidenceModulation(to: input)
+        XCTAssertEqual(output, input)
+    }
+
+    func testConfidenceModulationNoDoubleHedge() {
+        let input = "I'm not 100% sure, but it might be around 5 PM."
+        let output = ResponsePolish.applyConfidenceModulation(to: input)
+        XCTAssertEqual(output, input)
+    }
+
+    func testQuickDetailedPromptIsStripped() {
+        let input = "The capital of Australia is Canberra. Want the quick version or more detail?"
+        let output = ResponsePolish.stripQuickDetailedPrompt(from: input)
+        XCTAssertEqual(output, "The capital of Australia is Canberra.")
+    }
+
+    func testTTSPacingAppliesOnlyToLongResponses() {
+        let shortText = "Sounds good."
+        let shortPacing = ResponsePolish.ttsPacing(for: shortText, mode: .answer)
+        XCTAssertEqual(shortPacing.preSpeakDelayMs, 0)
+        XCTAssertEqual(shortPacing.ttsText, shortText)
+
+        let longText = "First sentence gives context. Second sentence adds details. Third sentence wraps up."
+        let longPacing = ResponsePolish.ttsPacing(for: longText, mode: .answer)
+        XCTAssertEqual(longPacing.preSpeakDelayMs, 250)
+        XCTAssertTrue(longPacing.ttsText.contains(".\nSecond sentence"))
+
+        let confirmPacing = ResponsePolish.ttsPacing(for: longText, mode: .confirm)
+        XCTAssertEqual(confirmPacing.preSpeakDelayMs, 0, "Confirm mode should stay snappy")
+        XCTAssertEqual(confirmPacing.ttsText, longText)
+    }
+
+    func testTTSPacingDoesNotMutateVisibleText() {
+        let visibleText = "This is a longer response. It has multiple sentences. It should be paced in TTS."
+        let original = visibleText
+        let pacing = ResponsePolish.ttsPacing(for: visibleText, mode: .answer)
+
+        XCTAssertEqual(visibleText, original, "Visible chat text must remain unchanged")
+        XCTAssertNotEqual(pacing.ttsText, original, "Only TTS text should receive pacing markers")
     }
 }
