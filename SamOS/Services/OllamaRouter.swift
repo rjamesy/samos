@@ -21,8 +21,6 @@ protocol OllamaTransport {
 
 /// Real transport that hits the Ollama /api/chat endpoint.
 struct RealOllamaTransport: OllamaTransport {
-
-    /// Inference options for JSON schema reliability.
     static let inferenceOptions: [String: Any] = [
         "temperature": 0.1,
         "top_p": 0.9,
@@ -46,12 +44,17 @@ struct RealOllamaTransport: OllamaTransport {
             throw OllamaRouter.OllamaError.unreachable("Invalid endpoint URL")
         }
 
+        let numPredict = Self.adaptiveNumPredict(for: messages)
         let requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
             "stream": false,
             "format": "json",
-            "options": Self.inferenceOptions
+            "options": [
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_predict": numPredict
+            ]
         ]
 
         var request = URLRequest(url: url)
@@ -80,7 +83,39 @@ struct RealOllamaTransport: OllamaTransport {
             throw OllamaRouter.OllamaError.invalidResponse
         }
 
-        return responseText
+        let trimmed = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw OllamaRouter.OllamaError.invalidResponse
+        }
+
+        return trimmed
+    }
+
+    private static func adaptiveNumPredict(for messages: [[String: String]]) -> Int {
+        let userText = messages.last(where: { ($0["role"] ?? "").lowercased() == "user" })?["content"] ?? ""
+        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 512 }
+
+        let lower = trimmed.lowercased()
+        let wordCount = lower.split(whereSeparator: \.isWhitespace).count
+        let sentenceCount = max(1, lower.split(separator: ".").count)
+        let complexityMarkers = [
+            "step by step", "detailed", "explain", "why", "how", "analyze",
+            "compare", "implement", "architecture", "debug", "code", "plan"
+        ]
+        let markerHits = complexityMarkers.reduce(0) { partial, marker in
+            partial + (lower.contains(marker) ? 1 : 0)
+        }
+        if lower.contains("\n") || lower.contains("```") {
+            return 1200
+        }
+        if trimmed.count > 260 || wordCount > 45 || markerHits >= 2 || sentenceCount >= 4 {
+            return 900
+        }
+        if trimmed.count < 50 && wordCount <= 8 {
+            return 220
+        }
+        return 420
     }
 }
 
@@ -217,8 +252,23 @@ final class OllamaRouter {
             ["role": "system", "content": systemPrompt]
         ]
 
+        let historyWindow = 12
         let nonSystem = history.filter { $0.role != .system }
-        for msg in nonSystem.suffix(12) {
+        if nonSystem.count > historyWindow {
+            let older = Array(nonSystem.dropLast(historyWindow))
+            let summary = summarizeConversation(older)
+            if !summary.isEmpty {
+                messages.append([
+                    "role": "system",
+                    "content": """
+                    [CONVERSATION_SUMMARY]
+                    \(summary)
+                    Use this summary as earlier context before the recent turns below.
+                    """
+                ])
+            }
+        }
+        for msg in nonSystem.suffix(historyWindow) {
             messages.append([
                 "role": msg.role == .user ? "user" : "assistant",
                 "content": msg.text
@@ -230,10 +280,10 @@ final class OllamaRouter {
             [PENDING_SLOT]
             Original user request: "\(slot.originalUserText)"
             Sam asked: "\(slot.prompt)"
-            Slot name: "\(slot.slotName)"
+            Slot names: "\(slot.slotName)"
             User reply: "\(input)"
 
-            Decide: (A) fill the slot and complete the original intent, OR (B) treat the reply as a new unrelated request.
+            Decide: (A) fill the missing field(s) and complete the original intent, OR (B) treat the reply as a new unrelated request.
             Output a PLAN either way.
             """
             messages.append(["role": "system", "content": contextBlock])
@@ -292,6 +342,26 @@ final class OllamaRouter {
         return messages
     }
 
+    private func summarizeConversation(_ messages: [ChatMessage]) -> String {
+        guard !messages.isEmpty else { return "" }
+        let clipped = messages.suffix(40)
+        var lines: [String] = []
+        lines.reserveCapacity(6)
+
+        for message in clipped {
+            guard lines.count < 6 else { break }
+            let text = message.text
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let prefix = message.role == .user ? "User:" : "Sam:"
+            let snippet = text.count > 120 ? String(text.prefix(117)) + "..." : text
+            lines.append("- \(prefix) \(snippet)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Text Sanitisation
 
     /// Strips known LLM token garbage before JSON parsing.
@@ -326,9 +396,18 @@ final class OllamaRouter {
         }
 
         // Try PLAN decode first
-        if let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-           let actionField = dict["action"] as? String,
-           actionField.uppercased() == "PLAN" {
+        if let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            guard let actionField = dict["action"] as? String else {
+                throw OllamaError.schemaMismatch(raw: jsonString, reasons: diagnoseSchemaMismatch(dict))
+            }
+
+            if actionField.uppercased() != "PLAN" {
+                do {
+                    return Plan.fromAction(try parseAction(from: text))
+                } catch {
+                    throw OllamaError.schemaMismatch(raw: jsonString, reasons: diagnoseSchemaMismatch(dict))
+                }
+            }
 
             // Validate steps structure before attempting decode
             if let steps = dict["steps"] as? [Any] {
@@ -336,6 +415,14 @@ final class OllamaRouter {
                 if !nonObjects.isEmpty {
                     throw OllamaError.schemaMismatch(raw: jsonString, reasons: [
                         "PLAN.steps must be an array of step objects like {\"step\":\"tool\",...}, not strings or primitives."
+                    ])
+                }
+                let malformed = steps.compactMap { $0 as? [String: Any] }.filter { step in
+                    step["step"] == nil && step["type"] == nil
+                }
+                if !malformed.isEmpty {
+                    throw OllamaError.schemaMismatch(raw: jsonString, reasons: [
+                        "Each PLAN step object must include a \"step\" key (or \"type\" alias) with talk/tool/ask/delegate."
                     ])
                 }
             }
@@ -352,17 +439,7 @@ final class OllamaRouter {
         }
 
         // Fallback: decode legacy Action, wrap in synthetic Plan
-        do {
-            return Plan.fromAction(try parseAction(from: text))
-        } catch {
-            // If parseAction failed and the raw JSON was a valid dictionary,
-            // throw schemaMismatch with diagnostic reasons for repair retry
-            if let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                let reasons = diagnoseSchemaMismatch(dict)
-                throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
-            }
-            throw error
-        }
+        return Plan.fromAction(try parseAction(from: text))
     }
 
     /// Produces explicit repair reasons for a valid-JSON-but-wrong-schema response.
@@ -573,6 +650,18 @@ final class OllamaRouter {
             step["step"] = "tool"
         }
 
+        if (step["step"] as? String ?? "").lowercased() == "ask",
+           step["slot"] == nil,
+           let slots = step["slots"] as? [Any] {
+            let normalized = slots
+                .compactMap { $0 as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !normalized.isEmpty {
+                step["slot"] = normalized.joined(separator: ",")
+            }
+        }
+
         let stepType = (step["step"] as? String ?? "").lowercased()
 
         // Some model outputs misuse delegate for tool execution (name/args shape).
@@ -662,7 +751,8 @@ final class OllamaRouter {
         }
 
         // Build compact memory context to avoid prompt bloat.
-        let relevantMemories = MemoryStore.shared.memoryContext(query: input, maxItems: 3, maxChars: 300)
+        let relevantMemories = MemoryStore.shared.memoryContext(query: input, maxItems: 6, maxChars: 900)
+        let graphHints = MemoryStore.shared.graphContext(query: input, maxItems: 4, maxChars: 320)
 
         var memoryBlock = ""
         if !relevantMemories.isEmpty {
@@ -671,8 +761,14 @@ final class OllamaRouter {
                 memoryBlock += "- [\(mem.type.rawValue)]: \(mem.content)\n"
             }
         }
+        if !graphHints.isEmpty {
+            memoryBlock += "\n## Memory Graph Hints\n"
+            for edge in graphHints {
+                memoryBlock += "- \(edge)\n"
+            }
+        }
 
-        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 3, maxChars: 260)
+        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 4, maxChars: 480)
         var selfLearningBlock = ""
         if !selfLessons.isEmpty {
             selfLearningBlock += "\n## Self-Improvement Lessons (private)\n"
@@ -779,6 +875,12 @@ final class OllamaRouter {
         For finding images by topic:
         {"action": "TOOL", "name": "find_image", "args": {"query": "frog"}, "say": "I'll find an image for that."}
 
+        For finding videos by topic:
+        {"action": "TOOL", "name": "find_video", "args": {"query": "race car"}, "say": "I'll find a video for that."}
+
+        For searching files in Downloads/Documents:
+        {"action": "TOOL", "name": "find_files", "args": {"query": "find all pdfs in downloads"}, "say": "I'll search your files."}
+
         For showing text/info/recipes:
         {"action": "TOOL", "name": "show_text", "args": {"markdown": "# Title\\nContent here"}, "say": "Brief response"}
 
@@ -854,6 +956,8 @@ final class OllamaRouter {
         - If user asks to list alarms or tasks → use list_tasks tool.
         - If user asks something that an installed skill handles → use the appropriate TOOL call.
         - For image topic requests ("find/show/search image of ..."), prefer find_image with query.
+        - For video topic requests ("find/show/search video of ...", "YouTube clip"), prefer find_video with query.
+        - For Downloads/Documents file lookup ("find file", "all pdfs", "word document", "named bestreport"), prefer find_files with query.
         - If user asks to read/learn/study a website URL → use learn_website with the url and optional focus.
         - If user asks what Sam can see right now through the laptop camera → use describe_camera_view.
         - If user asks to find a specific object in camera view → use find_camera_objects with query.
@@ -870,6 +974,7 @@ final class OllamaRouter {
         - After learn_website, use learned website notes for follow-up questions.
         - If user asks to stop/abort capability learning, use forge_queue_clear.
         - If user asks to remember something → use save_memory. If they ask what you remember → use list_memories.
+        - If multiple required fields are missing, use one combined ask step (single prompt, comma-separated slot names) instead of serial single-slot asks.
         - If no tool/skill exists for the request → use CAPABILITY_GAP.
         - For general conversation, greetings, opinions, jokes, factual questions → use TALK.
 
@@ -883,6 +988,8 @@ final class OllamaRouter {
         - For long or structured content (multi-line, headings, lists, or >240 chars), prefer TOOL show_text with markdown.
         - If user asks for a recipe, instructions, how-to, list, or structured content → MUST use TOOL show_text with markdown in args.
         - If user asks for a picture, photo, or image by topic → use TOOL find_image with args.query.
+        - If user asks for a video by topic → use TOOL find_video with args.query.
+        - If user asks to search files in Downloads/Documents, find all PDFs/Word files, or partial names, use TOOL find_files with args.query.
         - If user provided direct image URL(s), use TOOL show_image with those URL(s).
         - NEVER put recipes, instructions, or long content in the "say" field of TALK.
         - The "say" field is for SHORT spoken responses only (one sentence).

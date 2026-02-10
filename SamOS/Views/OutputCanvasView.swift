@@ -21,8 +21,51 @@ private enum OutputCanvasAutoScroll {
     }
 }
 
+private enum OutputCanvasCopy {
+    static func copyAllText(_ items: [OutputItem]) -> Bool {
+        let text = combinedText(from: items).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        return pasteboard.setString(text, forType: .string)
+    }
+
+    static func combinedText(from items: [OutputItem]) -> String {
+        items.compactMap(itemText).joined(separator: "\n\n")
+    }
+
+    private static func itemText(_ item: OutputItem) -> String? {
+        switch item.kind {
+        case .markdown:
+            return OutputCanvasMarkdown.toolDisplayString(item.payload)
+        case .card:
+            return item.payload
+        case .image:
+            return imageText(item.payload)
+        }
+    }
+
+    private static func imageText(_ payload: String) -> String? {
+        guard let data = payload.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(ImagePayload.self, from: data) else {
+            return nil
+        }
+
+        var lines: [String] = ["[Image]"]
+        if let alt = decoded.alt?.trimmingCharacters(in: .whitespacesAndNewlines), !alt.isEmpty {
+            lines.append("Alt: \(alt)")
+        }
+        for url in decoded.resolvedUrls {
+            lines.append("URL: \(url)")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 struct OutputCanvasView: View {
     @EnvironmentObject var appState: AppState
+    @State private var didCopyAll = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +76,20 @@ struct OutputCanvasView: View {
                     .foregroundColor(.secondary)
                 Spacer()
                 if !appState.outputItems.isEmpty {
+                    Button {
+                        if OutputCanvasCopy.copyAllText(appState.outputItems) {
+                            didCopyAll = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                                didCopyAll = false
+                            }
+                        }
+                    } label: {
+                        Image(systemName: didCopyAll ? "checkmark" : "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy all output text")
+
                     Button("Clear") {
                         appState.clearOutputCanvas()
                     }

@@ -59,7 +59,7 @@ struct ScheduleTaskTool: Tool {
             }
 
             // Reject dates in the past
-            if runAt.timeIntervalSinceNow < -5 {
+            if runAt.timeIntervalSinceNow < 0 {
                 return OutputItem(kind: .markdown, payload: "That time is in the past. What future time should I set it for?")
             }
         }

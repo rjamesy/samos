@@ -142,7 +142,7 @@ enum M2Settings {
     static var silenceThresholdDB: Float {
         get {
             let val = defaults.float(forKey: Key.silenceThresholdDB)
-            return val == 0 ? -40 : val
+            return val == 0 ? -34 : val
         }
         set { defaults.set(newValue, forKey: Key.silenceThresholdDB) }
     }
@@ -150,7 +150,7 @@ enum M2Settings {
     static var silenceDurationMs: Int {
         get {
             let val = defaults.integer(forKey: Key.silenceDurationMs)
-            return val == 0 ? 1500 : val
+            return val == 0 ? 700 : val
         }
         set { defaults.set(newValue, forKey: Key.silenceDurationMs) }
     }

@@ -79,6 +79,18 @@ final class PlanTests: XCTestCase {
         XCTAssertEqual(step, .ask(slot: "time", prompt: "What time should I set the alarm for?"))
     }
 
+    func testDecodeAskStepWithSlotsArray() throws {
+        let json = #"{"step":"ask","slots":["time","timezone"],"prompt":"What time and timezone?"}"#
+        let step = try JSONDecoder().decode(PlanStep.self, from: Data(json.utf8))
+        XCTAssertEqual(step, .ask(slot: "time,timezone", prompt: "What time and timezone?"))
+    }
+
+    func testDecodeAskStepNormalizesCommaSeparatedSlot() throws {
+        let json = #"{"step":"ask","slot":" time, timezone ","prompt":"Need details"}"#
+        let step = try JSONDecoder().decode(PlanStep.self, from: Data(json.utf8))
+        XCTAssertEqual(step, .ask(slot: "time,timezone", prompt: "Need details"))
+    }
+
     func testDecodeDelegateStep() throws {
         let json = #"{"step":"delegate","task":"complex analysis","context":"user data","say":"Let me hand this off."}"#
         let step = try JSONDecoder().decode(PlanStep.self, from: Data(json.utf8))

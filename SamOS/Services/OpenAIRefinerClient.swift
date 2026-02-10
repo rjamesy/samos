@@ -67,13 +67,14 @@ final class OpenAIRefinerClient {
         encoder.outputFormatting = .prettyPrinted
         let draftJSON = (try? encoder.encode(draft)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let requirementsJSON = formatRequirementsJSON(requirements)
-        let tools = toolList.joined(separator: ", ")
+        let tools = formattedToolList(toolList)
 
         let systemMessage = """
         You are a skill specification generator for SamOS, a macOS voice assistant.
         Your job is to refine a draft skill spec into a valid, complete SkillSpec JSON.
 
-        Available tools that can be used in steps: \(tools)
+        Available tools that can be used in steps:
+        \(tools)
 
         The spec must include: id, name, version, triggerPhrases, slots, steps, and optionally onTrigger.
         Slot types: "date", "string", "number".
@@ -236,6 +237,210 @@ final class OpenAIRefinerClient {
         }
     }
 
+    /// Asks OpenAI to repair a rejected skill spec using reviewer blockers, then returns a corrected SkillSpec JSON.
+    func repairSkillSpecAfterReview(goal: String,
+                                    missing: String,
+                                    draft: SkillSpec,
+                                    requirements: CapabilityRequirements,
+                                    review: ImplementationReview,
+                                    toolList: [String],
+                                    onDebugExchange: ((DebugExchange) -> Void)? = nil) async throws -> SkillSpec {
+        guard OpenAISettings.isConfigured else {
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: OpenAISettings.model,
+                reason: "OpenAI API key not configured",
+                payload: ["goal": goal, "missing": missing]
+            )
+            throw RefinerError.notConfigured
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        let draftJSON = (try? encoder.encode(draft)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let requirementsJSON = formatRequirementsJSON(requirements)
+        let tools = formattedToolList(toolList)
+        let blockerText = review.blockers.isEmpty ? "(none provided)" : review.blockers.joined(separator: "\n- ")
+        let reviewSummary = review.summary.isEmpty ? "(none provided)" : review.summary
+
+        let systemMessage = """
+        You are a skill specification repair planner for SamOS.
+        A previous spec was rejected by review. Repair it so it becomes executable and concrete.
+
+        Available tools that can be used in steps:
+        \(tools)
+
+        Return ONLY a valid SkillSpec JSON object with:
+        - id, name, version, triggerPhrases, slots, steps (and optional onTrigger)
+        - step actions must be either "talk" or one of the available tools
+        - args must be concrete and runnable
+
+        Rules:
+        - Fix every reviewer blocker explicitly.
+        - Include concrete implementation behavior (not just status talk).
+        - Ensure at least one non-talk executable tool step exists.
+        - Use placeholders ONLY for declared slot names.
+        - For show_text use arg "markdown".
+        - For show_image use arg "url" or "urls".
+        - Do NOT require external APIs/services that are not available as tools.
+        - If the ideal goal is beyond available tools, implement the closest feasible capability and make that concrete.
+        - No markdown, no prose, no code fences.
+        """
+
+        let userMessage = """
+        Goal: \(goal)
+        Missing capability details: \(missing)
+
+        Capability requirements:
+        \(requirementsJSON)
+
+        Review summary:
+        \(reviewSummary)
+
+        Review blockers:
+        - \(blockerText)
+
+        Rejected spec:
+        \(draftJSON)
+
+        Please return a repaired, installable SkillSpec JSON.
+        """
+
+        onDebugExchange?(DebugExchange(
+            phase: .request,
+            content: """
+            [Skill Repair]
+            SYSTEM:
+            \(systemMessage)
+
+            USER:
+            \(userMessage)
+            """
+        ))
+
+        let requestBody: [String: Any] = [
+            "model": OpenAISettings.model,
+            "messages": [
+                ["role": "system", "content": systemMessage],
+                ["role": "user", "content": userMessage]
+            ],
+            "temperature": 0.2
+        ]
+
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            throw RefinerError.requestFailed("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(OpenAISettings.apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        let requestID = OpenAIAPILogStore.shared.logHTTPRequest(
+            service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.model,
+            timeoutSeconds: request.timeoutInterval,
+            payload: requestBody
+        )
+        let startedAt = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: OpenAISettings.model,
+                statusCode: nil,
+                latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                error: error.localizedDescription,
+                responseData: nil
+            )
+            throw error
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            onDebugExchange?(DebugExchange(phase: .error, content: "[Skill Repair] Invalid response object from OpenAI."))
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: OpenAISettings.model,
+                statusCode: nil,
+                latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                error: "Invalid response object",
+                responseData: data
+            )
+            throw RefinerError.requestFailed("Invalid response")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            onDebugExchange?(DebugExchange(
+                phase: .error,
+                content: "[Skill Repair] HTTP \(http.statusCode)\(body.isEmpty ? "" : "\n\(body)")"
+            ))
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: OpenAISettings.model,
+                statusCode: http.statusCode,
+                latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                error: "HTTP \(http.statusCode)",
+                responseData: data
+            )
+            throw RefinerError.badResponse(http.statusCode)
+        }
+        OpenAIAPILogStore.shared.logHTTPResponse(
+            requestID: requestID,
+            service: "OpenAIRefinerClient.repairSkillSpecAfterReview",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.model,
+            statusCode: http.statusCode,
+            latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+            responseData: data
+        )
+
+        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = envelope["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            onDebugExchange?(DebugExchange(
+                phase: .error,
+                content: "[Skill Repair] Could not extract message content from OpenAI envelope."
+            ))
+            throw RefinerError.parseFailed("Could not extract content from OpenAI response")
+        }
+
+        onDebugExchange?(DebugExchange(phase: .response, content: "[Skill Repair]\n\(content)"))
+
+        let jsonString = extractJSON(from: content)
+        guard let jsonData = jsonString.data(using: .utf8) else {
+            throw RefinerError.parseFailed("Invalid UTF-8 in response")
+        }
+
+        do {
+            return try JSONDecoder().decode(SkillSpec.self, from: jsonData)
+        } catch let error as DecodingError {
+            throw RefinerError.parseFailed(describeDecodingError(error))
+        } catch {
+            throw RefinerError.parseFailed(error.localizedDescription)
+        }
+    }
+
     /// Ask OpenAI what the specific requirements are for a requested capability.
     func fetchCapabilityRequirements(goal: String,
                                      missing: String,
@@ -253,10 +458,11 @@ final class OpenAIRefinerClient {
             throw RefinerError.notConfigured
         }
 
-        let tools = toolList.joined(separator: ", ")
+        let tools = formattedToolList(toolList)
         let systemMessage = """
         You are defining implementation requirements for a SamOS capability.
-        Available tools: \(tools)
+        Available tools:
+        \(tools)
 
         Return STRICT JSON ONLY:
         {
@@ -427,12 +633,13 @@ final class OpenAIRefinerClient {
         encoder.outputFormatting = .prettyPrinted
         let specJSON = (try? encoder.encode(spec)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let requirementsJSON = formatRequirementsJSON(requirements)
-        let tools = toolList.joined(separator: ", ")
+        let tools = formattedToolList(toolList)
 
         let systemMessage = """
         You are auditing a SamOS capability spec before install.
         Decide whether this spec actually implements the requested capability.
-        Available tools: \(tools)
+        Available tools:
+        \(tools)
 
         Return STRICT JSON ONLY:
         {
@@ -447,6 +654,7 @@ final class OpenAIRefinerClient {
         - Reject placeholder-only specs.
         - Reject self-referential learning loops (e.g. start_skillforge as skill behavior).
         - implementation_steps must be actionable and specific.
+        - If a specialized tool already encapsulates required behavior (for example internal dedupe/no-repeat), treat that as concrete when the step is explicit.
         - Do NOT require external APIs/services that are not available as tools.
         - Evaluate the best feasible implementation for the goal using available tools.
         - No markdown, no prose outside JSON.
@@ -635,6 +843,13 @@ final class OpenAIRefinerClient {
             risks: risks,
             openQuestions: openQuestions
         )
+    }
+
+    private func formattedToolList(_ toolList: [String]) -> String {
+        guard !toolList.isEmpty else { return "- (none)" }
+        return toolList
+            .map { "- \($0)" }
+            .joined(separator: "\n")
     }
 
     private func formatRequirementsJSON(_ requirements: CapabilityRequirements) -> String {

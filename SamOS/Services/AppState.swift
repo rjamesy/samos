@@ -52,6 +52,24 @@ enum InputClassifier {
 @MainActor
 final class AppState: ObservableObject {
     typealias ThinkingFillerSpeaker = (String) -> Void
+    private struct TurnLatencyTrace {
+        let id: Int
+        let inputMode: String
+        let userChars: Int
+        var routerMs: Int?
+        var captureStartedAt: Date?
+        var transcribeStartedAt: Date?
+        var transcriptReadyAt: Date?
+        var routeStartedAt: Date
+        var routeFinishedAt: Date?
+        var applyFinishedAt: Date?
+        var ttsStartedAt: Date?
+        var ttsFinishedAt: Date?
+        var expectsTTS: Bool
+        var provider: LLMProvider
+        var toolSteps: Int
+        var assistantChars: Int
+    }
 
     @Published var chatMessages: [ChatMessage] = []
     @Published var outputItems: [OutputItem] = []
@@ -101,6 +119,12 @@ final class AppState: ObservableObject {
     private var forgeLogItemByJobID: [UUID: UUID] = [:]
     private var forgeLogMarkdownByJobID: [UUID: String] = [:]
     private var activeTurnLatencyStartAt: Date?
+    private var pendingCaptureStartedAt: Date?
+    private var pendingTranscribeStartedAt: Date?
+    private var pendingTranscriptReadyAt: Date?
+    private var turnLatencyTrace: TurnLatencyTrace?
+    private var turnLatencyTraceSequence: Int = 0
+    private var turnLatencyFinalizeTask: Task<Void, Never>?
 
     /// Tracks whether listening was active before Settings was opened, to auto-resume on close.
     private(set) var wasListeningBeforeSettings = false
@@ -234,9 +258,12 @@ final class AppState: ObservableObject {
                 self.status = .listening
             case .capturingAudio:
                 self.status = .capturing
+                self.pendingCaptureStartedAt = Date()
             case .transcribing:
                 self.status = .thinking
                 self.activeTurnLatencyStartAt = Date()
+                self.isThinkingIndicatorVisible = true
+                self.pendingTranscribeStartedAt = Date()
             }
         }
 
@@ -247,8 +274,10 @@ final class AppState: ObservableObject {
                 print("[AppState] Dropped non-speech transcript artifact: \(text)")
                 #endif
                 self.activeTurnLatencyStartAt = nil
+                self.pendingTranscriptReadyAt = nil
                 return
             }
+            self.pendingTranscriptReadyAt = Date()
             self.send(sanitized)
         }
 
@@ -273,6 +302,11 @@ final class AppState: ObservableObject {
         ttsObserver = Task { [weak self] in
             for await isSpeaking in TTSService.shared.$isSpeaking.values {
                 guard let self else { return }
+                if isSpeaking {
+                    self.markTurnTTSStartedIfNeeded()
+                } else {
+                    self.markTurnTTSFinishedIfNeeded()
+                }
                 if isSpeaking {
                     if self.status == .idle || self.status == .listening {
                         self.status = .speaking
@@ -475,9 +509,15 @@ final class AppState: ObservableObject {
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let turnStart = activeTurnLatencyStartAt ?? Date()
+        let existingTurnStart = activeTurnLatencyStartAt
+        let turnStart = existingTurnStart ?? Date()
         activeTurnLatencyStartAt = turnStart
         let userLatencyMs = Self.elapsedMs(since: turnStart)
+        let preserveThinkingIndicator = existingTurnStart != nil && isThinkingIndicatorVisible
+        beginTurnLatencyTrace(
+            userText: trimmed,
+            inputMode: existingTurnStart != nil ? "voice" : "text"
+        )
         let previousAssistantMessage = chatMessages.last(where: { $0.role == .assistant })?.text
         selfLearningService.observeIncomingUserReply(
             userMessage: trimmed,
@@ -488,7 +528,9 @@ final class AppState: ObservableObject {
         awaitingQuestionAutoListen = false
         thinkingFillerSpokenThisTurn = false
         cancelThinkingFiller()
-        clearThinkingFeedback()
+        if !preserveThinkingIndicator {
+            clearThinkingFeedback()
+        }
         followUpExpiryTask?.cancel()
         followUpExpiryTask = nil
 
@@ -511,6 +553,11 @@ final class AppState: ObservableObject {
         startThinkingFillerTimer(baseChatCount: baseChatCount, baseOutputCount: baseOutputCount)
         Task(priority: .userInitiated) {
             let result = await orchestrator.processTurn(trimmed, history: chatMessages)
+            markTurnRouteFinished(
+                provider: result.llmProvider,
+                toolSteps: result.executedToolSteps.count,
+                routerMs: result.routerMs
+            )
             cancelThinkingFiller()
             clearThinkingFeedback()
             applyResult(result)
@@ -539,6 +586,13 @@ final class AppState: ObservableObject {
     private func applyResult(_ result: TurnResult) {
         var appendedChat = result.appendedChat
         let assistantLatencyMs = activeTurnLatencyStartAt.map { Self.elapsedMs(since: $0) }
+        #if DEBUG
+        if let assistantLatencyMs {
+            let provider = result.llmProvider.rawValue
+            let toolCount = result.executedToolSteps.count
+            print("[Latency] assistant_total_ms=\(assistantLatencyMs) provider=\(provider) tool_steps=\(toolCount)")
+        }
+        #endif
         if let assistantLatencyMs {
             for idx in appendedChat.indices where appendedChat[idx].role == .assistant {
                 appendedChat[idx].latencyMs = assistantLatencyMs
@@ -571,6 +625,10 @@ final class AppState: ObservableObject {
         TTSService.shared.enqueue(result.spokenLines)
 
         let finalAssistantText = appendedChat.last(where: { $0.role == .assistant })?.text
+        finalizeTurnLatencyTraceIfReady(
+            spokenLines: result.spokenLines,
+            finalAssistantText: finalAssistantText
+        )
         let shouldAutoListenForQuestion = finalAssistantText.map(endsWithSingleQuestionMark(_:)) ?? false
 
         if shouldAutoListenForQuestion && isListeningEnabled {
@@ -582,6 +640,112 @@ final class AppState: ObservableObject {
         }
 
         activeTurnLatencyStartAt = nil
+    }
+
+    private func beginTurnLatencyTrace(userText: String, inputMode: String) {
+        if turnLatencyTrace != nil {
+            finalizeTurnLatencyTrace(reason: "replaced_by_new_turn")
+        }
+        turnLatencyFinalizeTask?.cancel()
+        turnLatencyTraceSequence += 1
+        turnLatencyTrace = TurnLatencyTrace(
+            id: turnLatencyTraceSequence,
+            inputMode: inputMode,
+            userChars: userText.count,
+            routerMs: nil,
+            captureStartedAt: pendingCaptureStartedAt,
+            transcribeStartedAt: pendingTranscribeStartedAt,
+            transcriptReadyAt: pendingTranscriptReadyAt,
+            routeStartedAt: Date(),
+            routeFinishedAt: nil,
+            applyFinishedAt: nil,
+            ttsStartedAt: nil,
+            ttsFinishedAt: nil,
+            expectsTTS: false,
+            provider: .none,
+            toolSteps: 0,
+            assistantChars: 0
+        )
+        pendingCaptureStartedAt = nil
+        pendingTranscribeStartedAt = nil
+        pendingTranscriptReadyAt = nil
+    }
+
+    private func markTurnRouteFinished(provider: LLMProvider, toolSteps: Int, routerMs: Int?) {
+        guard var trace = turnLatencyTrace else { return }
+        trace.routeFinishedAt = Date()
+        trace.provider = provider
+        trace.toolSteps = toolSteps
+        trace.routerMs = routerMs
+        turnLatencyTrace = trace
+    }
+
+    private func finalizeTurnLatencyTraceIfReady(spokenLines: [String], finalAssistantText: String?) {
+        guard var trace = turnLatencyTrace else { return }
+        trace.applyFinishedAt = Date()
+        trace.assistantChars = finalAssistantText?.count ?? 0
+        let expectsTTS = !spokenLines.isEmpty && !ElevenLabsSettings.isMuted && ElevenLabsSettings.isConfigured
+        trace.expectsTTS = expectsTTS
+        turnLatencyTrace = trace
+
+        if expectsTTS {
+            turnLatencyFinalizeTask?.cancel()
+            turnLatencyFinalizeTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard let self else { return }
+                guard let pending = self.turnLatencyTrace, pending.id == trace.id, pending.expectsTTS else { return }
+                self.finalizeTurnLatencyTrace(reason: "tts_timeout")
+            }
+            return
+        }
+
+        finalizeTurnLatencyTrace(reason: "no_tts")
+    }
+
+    private func markTurnTTSStartedIfNeeded() {
+        guard var trace = turnLatencyTrace, trace.expectsTTS else { return }
+        guard trace.ttsStartedAt == nil else { return }
+        trace.ttsStartedAt = Date()
+        turnLatencyTrace = trace
+    }
+
+    private func markTurnTTSFinishedIfNeeded() {
+        guard var trace = turnLatencyTrace, trace.expectsTTS else { return }
+        guard trace.ttsStartedAt != nil, trace.ttsFinishedAt == nil else { return }
+        trace.ttsFinishedAt = Date()
+        turnLatencyTrace = trace
+        finalizeTurnLatencyTrace(reason: "tts_finished")
+    }
+
+    private func finalizeTurnLatencyTrace(reason: String) {
+        guard let trace = turnLatencyTrace else { return }
+        turnLatencyTrace = nil
+        turnLatencyFinalizeTask?.cancel()
+        turnLatencyFinalizeTask = nil
+
+        #if DEBUG
+        func ms(_ start: Date?, _ end: Date?) -> Int? {
+            guard let start, let end else { return nil }
+            return max(0, Int(end.timeIntervalSince(start) * 1000))
+        }
+        func str(_ value: Int?) -> String {
+            guard let value else { return "n/a" }
+            return "\(value)"
+        }
+
+        let captureMs = ms(trace.captureStartedAt, trace.transcribeStartedAt)
+        let sttMs = ms(trace.transcribeStartedAt, trace.transcriptReadyAt)
+        let orchestratorMs = ms(trace.routeStartedAt, trace.routeFinishedAt)
+        let applyMs = ms(trace.routeFinishedAt, trace.applyFinishedAt)
+        let ttsQueueWaitMs = ms(trace.applyFinishedAt, trace.ttsStartedAt)
+        let ttsMs = ms(trace.ttsStartedAt, trace.ttsFinishedAt)
+        let end = trace.ttsFinishedAt ?? trace.applyFinishedAt ?? trace.routeFinishedAt
+        let start = trace.transcribeStartedAt ?? trace.routeStartedAt
+        let totalMs = ms(start, end)
+
+        let routerMs = trace.routerMs.map(String.init) ?? "n/a"
+        print("[LatencyBreakdown] turn=\(trace.id) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) router_ms=\(routerMs) orchestrator_ms=\(str(orchestratorMs)) apply_ms=\(str(applyMs)) tts_wait_ms=\(str(ttsQueueWaitMs)) tts_ms=\(str(ttsMs)) total_ms=\(str(totalMs)) provider=\(trace.provider.rawValue) tool_steps=\(trace.toolSteps) user_chars=\(trace.userChars) assistant_chars=\(trace.assistantChars) reason=\(reason)")
+        #endif
     }
 
     private func currentAssistantResponseMode() -> AssistantResponseMode {
@@ -964,7 +1128,8 @@ final class AppState: ObservableObject {
         followUpExpiryTask = Task {
             try? await Task.sleep(nanoseconds: Self.followUpSettleDelayNs)
             guard !Task.isCancelled else { return }
-            self.voicePipeline.startFollowUpCapture(noSpeechTimeoutMs: self.questionAutoListenNoSpeechTimeoutMs)
+            // Let AudioCaptureService endpoint speech naturally to avoid dropping short replies.
+            self.voicePipeline.startFollowUpCapture(noSpeechTimeoutMs: nil)
         }
     }
 

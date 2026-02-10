@@ -144,6 +144,14 @@ final class SchedulerTests: XCTestCase {
         }
     }
 
+    func testScheduleTaskToolRejectsPastEpoch() {
+        let tool = ScheduleTaskTool()
+        let past = Date().addingTimeInterval(-1)
+        let result = tool.execute(args: ["run_at": String(past.timeIntervalSince1970)])
+        XCTAssertTrue(result.payload.lowercased().contains("in the past"),
+                      "Past run_at should be rejected, got: \(result.payload)")
+    }
+
     func testCancelTaskToolMissingId() {
         let tool = CancelTaskTool()
         let result = tool.execute(args: [:])

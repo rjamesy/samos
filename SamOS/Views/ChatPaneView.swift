@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import AppKit
 
 struct ChatPaneView: View {
     @EnvironmentObject var appState: AppState
@@ -53,14 +54,28 @@ struct ChatPaneView: View {
 
             // Input bar
             HStack(spacing: 8) {
-                TextField("Ask Sam anything…", text: $inputText)
-                    .textFieldStyle(.plain)
+                TextEditor(text: $inputText)
                     .font(.body)
                     .focused($isInputFocused)
-                    .onSubmit { sendMessage() }
-                    .padding(8)
+                    .frame(minHeight: 72, maxHeight: 132)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 6)
                     .background(Color(nsColor: .controlBackgroundColor))
-                    .cornerRadius(8)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(alignment: .topLeading) {
+                        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("Ask Sam anything…")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .padding(.top, 14)
+                                .padding(.leading, 11)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+                    )
 
                 Button(action: sendMessage) {
                     Image(systemName: "paperplane.fill")
@@ -68,7 +83,7 @@ struct ChatPaneView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .keyboardShortcut(.return, modifiers: .command)
+                .keyboardShortcut(.return, modifiers: [.command])
             }
             .padding(12)
         }
@@ -104,6 +119,7 @@ struct ThinkingIndicatorRow: View {
 
 struct ChatBubble: View {
     let message: ChatMessage
+    @State private var copied = false
 
     var body: some View {
         HStack {
@@ -122,6 +138,21 @@ struct ChatBubble: View {
                     .cornerRadius(12)
                     .opacity(message.isEphemeral ? 0.72 : 1.0)
                     .textSelection(.enabled)
+
+                HStack(spacing: 6) {
+                    Button(action: copyMessageText) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .help(copied ? "Copied" : "Copy message")
+
+                    if copied {
+                        Text("Copied")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
 
                 if message.llmProvider == .openai {
                     if let mode = message.assistantResponseMode {
@@ -192,5 +223,15 @@ struct ChatBubble: View {
     private func latencyLabel(_ ms: Int) -> String {
         let seconds = Double(ms) / 1000.0
         return String(format: "%.3fs (%dms)", seconds, max(0, ms))
+    }
+
+    private func copyMessageText() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(message.text, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            copied = false
+        }
     }
 }

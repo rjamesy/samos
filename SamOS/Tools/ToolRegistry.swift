@@ -17,7 +17,10 @@ final class ToolRegistry {
 
     private init() {
         register(ShowTextTool())
+        register(FindRecipeTool())
         register(FindImageTool())
+        register(FindVideoTool())
+        register(FindFilesTool())
         register(ShowImageTool())
         register(DescribeCameraViewTool())
         register(CameraObjectFinderTool())
@@ -308,6 +311,1152 @@ struct FindImageTool: Tool {
             return nil
         }
         return trimmed
+    }
+}
+
+private struct FileSearchMatch {
+    let url: URL
+    let modifiedAt: Date?
+    let size: Int64?
+
+    var ext: String {
+        let value = url.pathExtension.lowercased()
+        return value.isEmpty ? "unknown" : value
+    }
+}
+
+struct FindFilesTool: Tool {
+    let name = "find_files"
+    let description = "Search files in Downloads/Documents with partial-name and document-type filters. Use for: 'find that I downloaded', 'what's in Downloads/Documents', 'find all PDFs', 'find Word document', or 'find document named bestreport'. Args: optional query/name/type/folder/limit."
+
+    private let fileManager: FileManager
+    private let directoryProvider: () -> [URL]
+
+    init(
+        fileManager: FileManager = .default,
+        directoryProvider: @escaping () -> [URL] = FindFilesTool.defaultSearchDirectories
+    ) {
+        self.fileManager = fileManager
+        self.directoryProvider = directoryProvider
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let request = buildRequest(args: args)
+        let roots = resolvedRoots(for: request.scope)
+
+        guard !roots.isEmpty else {
+            let formatted = """
+            # File Search
+
+            I couldn't locate Downloads/Documents directories for this user.
+            """
+            return structuredPayload(spoken: "I couldn't access Downloads or Documents.", formatted: formatted)
+        }
+
+        let matches = scanFiles(roots: roots, request: request)
+        let formatted = buildMarkdown(matches: matches, request: request, roots: roots)
+        let spoken = matches.isEmpty
+            ? "I couldn't find a matching file in Downloads or Documents."
+            : "I found \(matches.count) matching file\(matches.count == 1 ? "" : "s") in Downloads and Documents."
+        return structuredPayload(spoken: spoken, formatted: formatted)
+    }
+
+    private func buildRequest(args: [String: String]) -> FileSearchRequest {
+        let query = firstNonEmpty([
+            args["query"], args["name"], args["filename"], args["term"], args["search"],
+            args["q"], args["topic"], args["text"], args["input"]
+        ])
+
+        let folderHint = firstNonEmpty([args["folder"], args["scope"], args["directory"], args["path"], query])
+        let scope = parseScope(from: folderHint)
+
+        var extFilters = extensionsForType(firstNonEmpty([args["type"], args["kind"], args["extension"]]))
+        extFilters.formUnion(extensionsFromQuery(query))
+
+        let explicitName = firstNonEmpty([args["name"], args["filename"]])
+        let partialName = (explicitName.isEmpty ? partialNameFromQuery(query) : explicitName).lowercased()
+
+        let limitRaw = firstNonEmpty([args["limit"], args["max"], args["max_results"]])
+        let limit = max(1, min(Int(limitRaw) ?? 30, 120))
+
+        return FileSearchRequest(
+            originalQuery: query,
+            partialName: partialName,
+            extensions: extFilters,
+            scope: scope,
+            limit: limit
+        )
+    }
+
+    private func scanFiles(roots: [URL], request: FileSearchRequest) -> [FileSearchMatch] {
+        var results: [FileSearchMatch] = []
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
+
+        outer: for root in roots {
+            guard fileManager.fileExists(atPath: root.path) else { continue }
+            let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+            guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: keys, options: options) else {
+                continue
+            }
+
+            for case let fileURL as URL in enumerator {
+                guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true else {
+                    continue
+                }
+
+                if !request.extensions.isEmpty {
+                    let ext = fileURL.pathExtension.lowercased()
+                    if !request.extensions.contains(ext) { continue }
+                }
+
+                if !request.partialName.isEmpty {
+                    let filename = fileURL.lastPathComponent.lowercased()
+                    if !filename.contains(request.partialName) { continue }
+                }
+
+                let size = values.fileSize.map { Int64($0) }
+                results.append(FileSearchMatch(url: fileURL, modifiedAt: values.contentModificationDate, size: size))
+                if results.count >= request.limit { break outer }
+            }
+        }
+
+        return results.sorted { lhs, rhs in
+            (lhs.modifiedAt ?? .distantPast) > (rhs.modifiedAt ?? .distantPast)
+        }
+    }
+
+    private func buildMarkdown(matches: [FileSearchMatch], request: FileSearchRequest, roots: [URL]) -> String {
+        var lines: [String] = [
+            "# File Search",
+            "",
+            "- Scope: \(scopeLabel(for: request.scope, roots: roots))"
+        ]
+
+        if !request.originalQuery.isEmpty {
+            lines.append("- Query: \(request.originalQuery)")
+        }
+        if !request.extensions.isEmpty {
+            lines.append("- Type filter: \(request.extensions.sorted().joined(separator: ", "))")
+        }
+        if !request.partialName.isEmpty {
+            lines.append("- Name match: `\(request.partialName)`")
+        }
+
+        lines.append("")
+        if matches.isEmpty {
+            lines.append("No matching files found.")
+            lines.append("")
+            lines.append("Try examples:")
+            lines.append("- `find all pdfs`")
+            lines.append("- `find a word document`")
+            lines.append("- `find document named bestreport`")
+            return lines.joined(separator: "\n")
+        }
+
+        lines.append("## Matches")
+        for (index, match) in matches.enumerated() {
+            let fileURL = match.url.absoluteString
+            let path = match.url.path
+            lines.append("\(index + 1). [\(match.url.lastPathComponent)](\(fileURL))")
+            lines.append("   - Path: `\(path)`")
+            var detailParts: [String] = ["Type: `\(match.ext)`"]
+            if let size = match.size {
+                detailParts.append("Size: \(FindFilesTool.byteCountFormatter.string(fromByteCount: size))")
+            }
+            if let modified = match.modifiedAt {
+                detailParts.append("Modified: \(FindFilesTool.modifiedDateFormatter.string(from: modified))")
+            }
+            lines.append("   - " + detailParts.joined(separator: " · "))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func resolvedRoots(for scope: FileScope) -> [URL] {
+        let base = directoryProvider()
+        var downloads: URL?
+        var documents: URL?
+        for candidate in base {
+            let lowerPath = candidate.path.lowercased()
+            if lowerPath.hasSuffix("/downloads") {
+                downloads = candidate
+            } else if lowerPath.hasSuffix("/documents") {
+                documents = candidate
+            }
+        }
+
+        var roots: [URL] = []
+        switch scope {
+        case .downloads:
+            if let downloads { roots.append(downloads) }
+        case .documents:
+            if let documents { roots.append(documents) }
+        case .both:
+            if let downloads { roots.append(downloads) }
+            if let documents, !roots.contains(documents) { roots.append(documents) }
+            if roots.isEmpty {
+                roots = base
+            }
+        }
+        return roots
+    }
+
+    private func parseScope(from hint: String) -> FileScope {
+        let lowered = hint.lowercased()
+        let mentionsDownloads = lowered.contains("download")
+        let mentionsDocuments = lowered.contains("document")
+
+        if mentionsDownloads && !mentionsDocuments { return .downloads }
+        if mentionsDocuments && !mentionsDownloads { return .documents }
+        return .both
+    }
+
+    private func extensionsForType(_ rawType: String) -> Set<String> {
+        guard !rawType.isEmpty else { return [] }
+        let lowered = rawType.lowercased()
+        if lowered.hasPrefix(".") { return [String(lowered.dropFirst())] }
+        if lowered.count <= 5 && !lowered.contains(" ") {
+            return [lowered]
+        }
+        return mappedExtensions(for: lowered)
+    }
+
+    private func extensionsFromQuery(_ query: String) -> Set<String> {
+        guard !query.isEmpty else { return [] }
+        return mappedExtensions(for: query.lowercased())
+    }
+
+    private func mappedExtensions(for lowered: String) -> Set<String> {
+        let mappings: [(terms: [String], exts: [String])] = [
+            (["pdf", "pdfs"], ["pdf"]),
+            (["word", "doc", "docx", "word document"], ["doc", "docx"]),
+            (["excel", "spreadsheet", "xls", "xlsx"], ["xls", "xlsx", "csv"]),
+            (["powerpoint", "ppt", "pptx", "slides"], ["ppt", "pptx"]),
+            (["text", "txt", "md", "markdown"], ["txt", "md", "rtf"]),
+            (["image", "photo", "picture", "png", "jpg", "jpeg"], ["png", "jpg", "jpeg", "heic", "webp", "gif"]),
+            (["video", "movie", "clip"], ["mp4", "mov", "m4v", "mkv", "avi"]),
+            (["audio", "music", "sound"], ["mp3", "m4a", "wav", "aac", "flac"]),
+            (["zip", "archive", "compressed"], ["zip", "rar", "7z", "tar", "gz"])
+        ]
+
+        var result: Set<String> = []
+        for mapping in mappings where mapping.terms.contains(where: { lowered.contains($0) }) {
+            result.formUnion(mapping.exts)
+        }
+        return result
+    }
+
+    private func partialNameFromQuery(_ query: String) -> String {
+        let lowered = query.lowercased()
+        let markerPatterns = [
+            #"named\s+([a-z0-9._-]+)"#,
+            #"called\s+([a-z0-9._-]+)"#,
+            #"document\s+([a-z0-9._-]+)"#
+        ]
+        for pattern in markerPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: lowered, range: NSRange(lowered.startIndex..., in: lowered)),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: lowered) else {
+                continue
+            }
+            let value = String(lowered[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+
+        let stopwords: Set<String> = [
+            "find", "search", "look", "for", "file", "files", "document", "documents", "folder", "in", "my",
+            "downloads", "download", "docs", "all", "a", "an", "the", "named", "called", "show", "me",
+            "word", "pdf", "pdfs", "doc", "docx", "text", "type", "of", "and", "from", "with"
+        ]
+
+        let tokens = lowered
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && !stopwords.contains($0) }
+
+        return tokens.joined(separator: " ")
+    }
+
+    private func scopeLabel(for scope: FileScope, roots: [URL]) -> String {
+        switch scope {
+        case .downloads:
+            return roots.first?.path ?? "Downloads"
+        case .documents:
+            return roots.first?.path ?? "Documents"
+        case .both:
+            if roots.isEmpty { return "Downloads + Documents" }
+            return roots.map(\.path).joined(separator: " | ")
+        }
+    }
+
+    private func firstNonEmpty(_ values: [String?]) -> String {
+        for value in values {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    private func structuredPayload(spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: String] = [
+            "kind": "file_search",
+            "spoken": spoken,
+            "formatted": String(formatted.prefix(2_400))
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    static func defaultSearchDirectories() -> [URL] {
+        let fileManager = FileManager.default
+        let preferredHome = preferredHomeDirectory(for: fileManager.homeDirectoryForCurrentUser)
+
+        var dirs: [URL] = []
+        let preferredDownloads = preferredHome.appendingPathComponent("Downloads", isDirectory: true)
+        let preferredDocuments = preferredHome.appendingPathComponent("Documents", isDirectory: true)
+
+        if fileManager.fileExists(atPath: preferredDownloads.path) {
+            dirs.append(preferredDownloads.standardizedFileURL)
+        }
+        if fileManager.fileExists(atPath: preferredDocuments.path),
+           !dirs.contains(preferredDocuments.standardizedFileURL) {
+            dirs.append(preferredDocuments.standardizedFileURL)
+        }
+
+        // Fallback for environments where preferred home directories are unavailable.
+        if dirs.isEmpty, let downloads = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+            dirs.append(downloads.standardizedFileURL)
+        }
+        if dirs.isEmpty, let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first,
+           !dirs.contains(documents.standardizedFileURL) {
+            dirs.append(documents.standardizedFileURL)
+        }
+
+        return dirs
+    }
+
+    static func preferredHomeDirectory(for homeDirectory: URL) -> URL {
+        let marker = "/Library/Containers/com.samos.SamOS/Data"
+        let path = homeDirectory.path
+        guard let range = path.range(of: marker) else {
+            return homeDirectory.standardizedFileURL
+        }
+
+        let rootPath = String(path[..<range.lowerBound])
+        guard !rootPath.isEmpty else {
+            return homeDirectory.standardizedFileURL
+        }
+
+        return URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+    }
+
+    private static let byteCountFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    private static let modifiedDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct FileSearchRequest {
+    let originalQuery: String
+    let partialName: String
+    let extensions: Set<String>
+    let scope: FileScope
+    let limit: Int
+}
+
+private enum FileScope {
+    case downloads
+    case documents
+    case both
+}
+
+private struct VideoSearchResult {
+    let videoID: String
+    let title: String
+    let channel: String
+    let publishedAt: String
+    let thumbnailURL: String?
+
+    var watchURL: String {
+        "https://www.youtube.com/watch?v=\(videoID)"
+    }
+}
+
+private final class VideoHistoryStore {
+    static let shared = VideoHistoryStore()
+
+    private let queue = DispatchQueue(label: "com.samos.video-history")
+    private let maxTopics = 200
+    private let maxIDsPerTopic = 100
+    private var topicToVideoIDs: [String: [String]] = [:]
+    private let fileURL: URL?
+
+    private init() {
+        do {
+            let appSupport = try FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let dir = appSupport
+                .appendingPathComponent("SamOS", isDirectory: true)
+                .appendingPathComponent("state", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            fileURL = dir.appendingPathComponent("video_history.json", isDirectory: false)
+            loadFromDisk()
+        } catch {
+            fileURL = nil
+        }
+    }
+
+    func seenVideoIDs(for topic: String) -> Set<String> {
+        let normalized = normalizeTopic(topic)
+        return queue.sync {
+            Set(topicToVideoIDs[normalized] ?? [])
+        }
+    }
+
+    func markSeen(videoID: String, topic: String) {
+        guard !videoID.isEmpty else { return }
+        let normalized = normalizeTopic(topic)
+        queue.sync {
+            var ids = topicToVideoIDs[normalized] ?? []
+            if !ids.contains(videoID) {
+                ids.append(videoID)
+            }
+            if ids.count > maxIDsPerTopic {
+                ids.removeFirst(ids.count - maxIDsPerTopic)
+            }
+            topicToVideoIDs[normalized] = ids
+            pruneTopicsIfNeeded()
+            persistToDisk()
+        }
+    }
+
+    func reset(topic: String) {
+        let normalized = normalizeTopic(topic)
+        queue.sync {
+            topicToVideoIDs.removeValue(forKey: normalized)
+            persistToDisk()
+        }
+    }
+
+    private func normalizeTopic(_ topic: String) -> String {
+        topic.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
+    private func pruneTopicsIfNeeded() {
+        guard topicToVideoIDs.count > maxTopics else { return }
+        let overflow = topicToVideoIDs.count - maxTopics
+        let keysToDrop = topicToVideoIDs.keys.sorted().prefix(overflow)
+        for key in keysToDrop {
+            topicToVideoIDs.removeValue(forKey: key)
+        }
+    }
+
+    private func loadFromDisk() {
+        guard let fileURL,
+              let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+            return
+        }
+        topicToVideoIDs = decoded
+    }
+
+    private func persistToDisk() {
+        guard let fileURL,
+              let data = try? JSONEncoder().encode(topicToVideoIDs) else {
+            return
+        }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+}
+
+struct FindVideoTool: Tool {
+    let name = "find_video"
+    let description = "Find a YouTube video for a topic and show one result in Output Canvas with title/channel/date/videoId/clickable URL. Prevents repeats per topic automatically, so asking for 'another' returns a different video when available. Args: 'query' (required); also accepts 'topic', 'q', 'search'. Optional 'reset'='true' clears shown-video history for that topic."
+
+    private static let videoIDRegex = try! NSRegularExpression(
+        pattern: #""videoId":"([A-Za-z0-9_-]{11})""#,
+        options: []
+    )
+
+    private static let videoRendererRegex = try! NSRegularExpression(
+        pattern: #""videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})".*?"title":\{"runs":\[\{"text":"([^"]+)""#,
+        options: [.dotMatchesLineSeparators]
+    )
+
+    func execute(args: [String: String]) -> OutputItem {
+        let query = resolvedQuery(from: args)
+        guard !query.isEmpty else {
+            return cameraPromptPayload(
+                slot: "query",
+                spoken: "What video topic should I search for?",
+                formatted: "Provide a video query, for example `race car`, `fishing`, or `home brewing`."
+            )
+        }
+
+        let topicKey = normalizedTopic(query)
+        if isResetRequested(args["reset"]) {
+            VideoHistoryStore.shared.reset(topic: topicKey)
+        }
+
+        let candidates = searchVideos(query: query, maxCount: 12)
+        guard !candidates.isEmpty else {
+            let formatted = """
+            # Video Search
+
+            I couldn't fetch video results for **\(query)** right now.
+
+            - If you want official YouTube Data API results, set **YouTube Data API Key** in `Settings > AI Learning > OpenAI`.
+            - You can also try a slightly different query.
+            """
+            return structuredPayload(
+                spoken: "I couldn't fetch video results right now.",
+                formatted: formatted
+            )
+        }
+
+        let seen = VideoHistoryStore.shared.seenVideoIDs(for: topicKey)
+        guard let selected = pickNextVideo(from: candidates, seenIDs: seen) else {
+            let formatted = """
+            # Video Search
+
+            I already showed the current result set for **\(query)**.
+
+            - Ask for a different topic, or ask me to reset this topic's video history.
+            """
+            return structuredPayload(
+                spoken: "I've already shown the current results for that topic.",
+                formatted: formatted
+            )
+        }
+
+        VideoHistoryStore.shared.markSeen(videoID: selected.videoID, topic: topicKey)
+
+        let markdown = buildVideoMarkdown(query: query, selected: selected)
+        return structuredPayload(
+            spoken: "I found a video for \(query).",
+            formatted: markdown
+        )
+    }
+
+    private func resolvedQuery(from args: [String: String]) -> String {
+        let candidates = [
+            args["query"],
+            args["topic"],
+            args["q"],
+            args["search"],
+            args["search_term"],
+            args["searchTerm"],
+            args["text"],
+            args["input"]
+        ]
+
+        for value in candidates {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    private func isResetRequested(_ raw: String?) -> Bool {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return value == "1" || value == "true" || value == "yes" || value == "reset"
+    }
+
+    private func normalizedTopic(_ topic: String) -> String {
+        topic.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
+    private func searchVideos(query: String, maxCount: Int) -> [VideoSearchResult] {
+        let apiKey = OpenAISettings.youtubeAPIKey
+        if !apiKey.isEmpty {
+            let viaAPI = searchWithYouTubeAPI(query: query, apiKey: apiKey, maxCount: maxCount)
+            if !viaAPI.isEmpty { return viaAPI }
+        }
+        return searchWithYouTubeHTML(query: query, maxCount: maxCount)
+    }
+
+    private func searchWithYouTubeAPI(query: String, apiKey: String, maxCount: Int) -> [VideoSearchResult] {
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let endpoint = "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=\(max(1, min(maxCount, 25)))&q=\(encodedQuery)&key=\(apiKey)"
+        guard let url = URL(string: endpoint), let data = fetchData(url: url) else { return [] }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = root["items"] as? [[String: Any]] else {
+            return []
+        }
+
+        var results: [VideoSearchResult] = []
+        for item in items {
+            guard let id = item["id"] as? [String: Any],
+                  let videoID = id["videoId"] as? String,
+                  !videoID.isEmpty,
+                  let snippet = item["snippet"] as? [String: Any] else {
+                continue
+            }
+            let title = cleanText(snippet["title"] as? String) ?? "YouTube video"
+            let channel = cleanText(snippet["channelTitle"] as? String) ?? "Unknown channel"
+            let publishedAt = cleanText(snippet["publishedAt"] as? String) ?? "Unknown"
+
+            var thumbnailURL: String?
+            if let thumbnails = snippet["thumbnails"] as? [String: Any] {
+                if let high = thumbnails["high"] as? [String: Any], let url = high["url"] as? String {
+                    thumbnailURL = url
+                } else if let medium = thumbnails["medium"] as? [String: Any], let url = medium["url"] as? String {
+                    thumbnailURL = url
+                } else if let `default` = thumbnails["default"] as? [String: Any], let url = `default`["url"] as? String {
+                    thumbnailURL = url
+                }
+            }
+
+            results.append(
+                VideoSearchResult(
+                    videoID: videoID,
+                    title: title,
+                    channel: channel,
+                    publishedAt: publishedAt,
+                    thumbnailURL: thumbnailURL
+                )
+            )
+            if results.count >= maxCount { break }
+        }
+        return dedup(results)
+    }
+
+    private func searchWithYouTubeHTML(query: String, maxCount: Int) -> [VideoSearchResult] {
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        guard let url = URL(string: "https://www.youtube.com/results?search_query=\(encodedQuery)&sp=EgIQAQ%253D%253D"),
+              let html = fetchHTML(url: url) else {
+            return []
+        }
+
+        let decoded = html.replacingOccurrences(of: "\\u0026", with: "&")
+        let nsDecoded = decoded as NSString
+        let fullRange = NSRange(location: 0, length: nsDecoded.length)
+        var results: [VideoSearchResult] = []
+
+        let renderedMatches = Self.videoRendererRegex.matches(in: decoded, options: [], range: fullRange)
+        for match in renderedMatches {
+            guard match.numberOfRanges > 2,
+                  let idRange = Range(match.range(at: 1), in: decoded),
+                  let titleRange = Range(match.range(at: 2), in: decoded) else {
+                continue
+            }
+            let videoID = String(decoded[idRange])
+            let title = decodeYouTubeText(String(decoded[titleRange])) ?? "YouTube video"
+            results.append(
+                VideoSearchResult(
+                    videoID: videoID,
+                    title: title,
+                    channel: "YouTube",
+                    publishedAt: "Unknown",
+                    thumbnailURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg"
+                )
+            )
+            if results.count >= maxCount { break }
+        }
+
+        if results.isEmpty {
+            let idMatches = Self.videoIDRegex.matches(in: decoded, options: [], range: fullRange)
+            for match in idMatches {
+                guard match.numberOfRanges > 1,
+                      let idRange = Range(match.range(at: 1), in: decoded) else {
+                    continue
+                }
+                let videoID = String(decoded[idRange])
+                results.append(
+                    VideoSearchResult(
+                        videoID: videoID,
+                        title: "YouTube result for \(query)",
+                        channel: "YouTube",
+                        publishedAt: "Unknown",
+                        thumbnailURL: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg"
+                    )
+                )
+                if results.count >= maxCount { break }
+            }
+        }
+
+        return dedup(results)
+    }
+
+    private func pickNextVideo(from candidates: [VideoSearchResult], seenIDs: Set<String>) -> VideoSearchResult? {
+        if let unseen = candidates.first(where: { !seenIDs.contains($0.videoID) }) {
+            return unseen
+        }
+        return nil
+    }
+
+    private func buildVideoMarkdown(query: String, selected: VideoSearchResult) -> String {
+        var lines: [String] = [
+            "# Video Result",
+            "",
+            "- Query: \(escapeMarkdown(query))",
+            "- Title: [\(escapeMarkdown(selected.title))](\(selected.watchURL))",
+            "- Channel: \(escapeMarkdown(selected.channel))",
+            "- Published: \(escapeMarkdown(selected.publishedAt))",
+            "- Video ID: `\(selected.videoID)`",
+            "- Watch: [\(selected.watchURL)](\(selected.watchURL))"
+        ]
+
+        if let thumbnailURL = selected.thumbnailURL, !thumbnailURL.isEmpty {
+            lines.append("- Thumbnail: [\(thumbnailURL)](\(thumbnailURL))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func escapeMarkdown(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+    }
+
+    private func structuredPayload(spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: Any] = [
+            "kind": "video",
+            "spoken": spoken,
+            "formatted": String(formatted.prefix(1_180))
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func cleanText(_ value: String?) -> String? {
+        guard var text = value?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return text
+    }
+
+    private func decodeYouTubeText(_ text: String) -> String? {
+        let decoded = text
+            .replacingOccurrences(of: "\\u0026", with: "&")
+            .replacingOccurrences(of: "\\u003c", with: "<")
+            .replacingOccurrences(of: "\\u003e", with: ">")
+            .replacingOccurrences(of: "\\\"", with: "\"")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    private func dedup(_ results: [VideoSearchResult]) -> [VideoSearchResult] {
+        var seen: Set<String> = []
+        var deduped: [VideoSearchResult] = []
+        for result in results where seen.insert(result.videoID).inserted {
+            deduped.append(result)
+        }
+        return deduped
+    }
+
+    private func fetchHTML(url: URL) -> String? {
+        guard let data = fetchData(url: url) else { return nil }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    private func fetchData(url: URL) -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.httpMethod = "GET"
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var bodyData: Data?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data else {
+                return
+            }
+            bodyData = data
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 10)
+        return bodyData
+    }
+}
+
+struct FindRecipeTool: Tool {
+    let name = "find_recipe"
+    let description = "Find a recipe by dish/topic and return concise ingredients + steps in markdown. Use for recipe/how-to-cook/ingredients requests. Args: 'query' (preferred), also accepts 'dish', 'recipe', 'topic', or 'q'."
+
+    private static let searchURLTemplate = "https://duckduckgo.com/html/?q=%@"
+    private static let recipeHostHints: [String] = [
+        "allrecipes.", "foodnetwork.", "bbcgoodfood.", "seriouseats.", "taste.", "delish.",
+        "epicurious.", "simplyrecipes.", "recipetineats.", "bonappetit.", "cookieandkate.",
+        "sbs.com.au/food", "nytimes.com"
+    ]
+    private static let searchLinkRegex = try! NSRegularExpression(
+        pattern: #"href="([^"]+)""#,
+        options: [.caseInsensitive]
+    )
+    private static let titleRegex = try! NSRegularExpression(
+        pattern: #"(?is)<title[^>]*>(.*?)</title>"#,
+        options: []
+    )
+    private static let scriptRegex = try! NSRegularExpression(
+        pattern: #"(?is)<script[^>]*>.*?</script>"#,
+        options: []
+    )
+    private static let styleRegex = try! NSRegularExpression(
+        pattern: #"(?is)<style[^>]*>.*?</style>"#,
+        options: []
+    )
+    private static let noscriptRegex = try! NSRegularExpression(
+        pattern: #"(?is)<noscript[^>]*>.*?</noscript>"#,
+        options: []
+    )
+    private static let commentsRegex = try! NSRegularExpression(
+        pattern: #"(?is)<!--.*?-->"#,
+        options: []
+    )
+    private static let tagsRegex = try! NSRegularExpression(
+        pattern: #"(?is)<[^>]+>"#,
+        options: []
+    )
+    private static let whitespaceRegex = try! NSRegularExpression(
+        pattern: #"[ \t]+"#,
+        options: []
+    )
+    private static let multiNewlineRegex = try! NSRegularExpression(
+        pattern: #"\n{3,}"#,
+        options: []
+    )
+    private static let ingredientUnitRegex = try! NSRegularExpression(
+        pattern: #"\b(cup|cups|tbsp|tablespoon|tablespoons|tsp|teaspoon|teaspoons|g|kg|ml|l|oz|lb|pound|pounds|clove|cloves|pinch)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    func execute(args: [String: String]) -> OutputItem {
+        let query = resolvedQuery(from: args)
+        guard !query.isEmpty else {
+            return recipePromptPayload(
+                slot: "query",
+                spoken: "What recipe should I find?",
+                formatted: "Provide a recipe query, for example `caramel sauce`, `banana muffins`, or `butter chicken`."
+            )
+        }
+
+        let searchQuery = query.lowercased().contains("recipe") ? query : "\(query) recipe"
+        let encodedQuery = searchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchQuery
+        let candidateURLs = searchRecipeURLs(encodedQuery: encodedQuery)
+
+        if let found = firstRecipeMatch(query: query, urls: candidateURLs) {
+            let formatted = buildRecipeMarkdown(query: query, sourceTitle: found.title, sourceURL: found.url, ingredients: found.ingredients, steps: found.steps)
+            let spoken = "I found a \(query) recipe and put it up here."
+            return structuredMarkdownPayload(kind: "recipe", spoken: spoken, formatted: formatted)
+        }
+
+        let fallback = """
+        # Recipe Search
+
+        I couldn't fetch a reliable recipe page for **\(query)** right now.
+
+        Try again with a more specific dish name, or provide a direct recipe URL.
+        """
+        return structuredMarkdownPayload(
+            kind: "recipe",
+            spoken: "I couldn't fetch a reliable recipe page just now.",
+            formatted: fallback
+        )
+    }
+
+    private func resolvedQuery(from args: [String: String]) -> String {
+        let candidates = [
+            args["query"], args["dish"], args["recipe"], args["topic"], args["q"], args["text"], args["input"]
+        ]
+        for value in candidates {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    private func searchRecipeURLs(encodedQuery: String, limit: Int = 12) -> [URL] {
+        guard let searchURL = URL(string: String(format: Self.searchURLTemplate, encodedQuery)),
+              let html = fetchHTML(url: searchURL) else { return [] }
+
+        let source = html as NSString
+        let range = NSRange(location: 0, length: source.length)
+        let matches = Self.searchLinkRegex.matches(in: html, options: [], range: range)
+
+        var urls: [URL] = []
+        for match in matches {
+            guard let hrefRange = Range(match.range(at: 1), in: html) else { continue }
+            let href = String(html[hrefRange])
+            guard let url = normalizeSearchHref(href) else { continue }
+            let host = url.host?.lowercased() ?? ""
+            guard !host.contains("duckduckgo.com"),
+                  !host.contains("google."),
+                  !host.contains("bing."),
+                  !host.contains("yahoo.") else { continue }
+
+            if urls.contains(url) { continue }
+            urls.append(url)
+            if urls.count >= max(1, limit) { break }
+        }
+
+        let preferred = urls.sorted { lhs, rhs in
+            let l = preferredHostScore(lhs.host?.lowercased() ?? "")
+            let r = preferredHostScore(rhs.host?.lowercased() ?? "")
+            return l > r
+        }
+        return preferred
+    }
+
+    private func preferredHostScore(_ host: String) -> Int {
+        for (idx, hint) in Self.recipeHostHints.enumerated() where host.contains(hint) {
+            return (Self.recipeHostHints.count - idx) * 10
+        }
+        return 0
+    }
+
+    private func normalizeSearchHref(_ href: String) -> URL? {
+        let decoded = href
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if decoded.hasPrefix("/l/?"), let comps = URLComponents(string: "https://duckduckgo.com\(decoded)"),
+           let uddg = comps.queryItems?.first(where: { $0.name == "uddg" })?.value,
+           let resolved = URL(string: uddg) {
+            return resolved
+        }
+
+        if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") {
+            return URL(string: decoded)
+        }
+        return nil
+    }
+
+    private func firstRecipeMatch(query: String, urls: [URL]) -> (url: URL, title: String, ingredients: [String], steps: [String])? {
+        for url in urls.prefix(6) {
+            guard let html = fetchHTML(url: url) else { continue }
+            let title = extractTitle(fromHTML: html) ?? (url.host ?? "Recipe")
+            let text = extractVisibleText(fromHTML: html)
+            let lines = text
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.count >= 2 && $0.count <= 180 }
+
+            let ingredients = extractIngredients(from: lines)
+            let steps = extractSteps(from: lines)
+            if !ingredients.isEmpty && !steps.isEmpty {
+                return (url, title, ingredients, steps)
+            }
+        }
+        return nil
+    }
+
+    private func extractIngredients(from lines: [String]) -> [String] {
+        if let idx = lines.firstIndex(where: { $0.lowercased().contains("ingredients") }) {
+            let section = Array(lines.dropFirst(idx + 1).prefix(30))
+            let picked = section
+                .filter { isIngredientLine($0) }
+                .prefix(12)
+                .map { normalizeListLine($0) }
+            if !picked.isEmpty { return picked }
+        }
+
+        // Fallback: top ingredient-like lines anywhere on the page.
+        return lines
+            .filter { isIngredientLine($0) }
+            .prefix(10)
+            .map { normalizeListLine($0) }
+    }
+
+    private func extractSteps(from lines: [String]) -> [String] {
+        if let idx = lines.firstIndex(where: { line in
+            let lower = line.lowercased()
+            return lower.contains("instructions") || lower.contains("directions") || lower == "method" || lower.contains("steps")
+        }) {
+            let section = Array(lines.dropFirst(idx + 1).prefix(40))
+            let picked = section
+                .filter { isStepLine($0) }
+                .prefix(10)
+                .map { normalizeStepLine($0) }
+            if !picked.isEmpty { return picked }
+        }
+
+        // Fallback: numbered/bullet-like procedural lines.
+        return lines
+            .filter { isStepLine($0) }
+            .prefix(8)
+            .map { normalizeStepLine($0) }
+    }
+
+    private func isIngredientLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        if lower.contains("nutrition") || lower.contains("servings") || lower.contains("calories") { return false }
+        if lower.count < 3 || lower.count > 120 { return false }
+        if lower.hasPrefix("step ") || lower.hasPrefix("directions") { return false }
+        let nsRange = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+        if Self.ingredientUnitRegex.firstMatch(in: lower, options: [], range: nsRange) != nil { return true }
+        return lower.first == "-" || lower.first == "•"
+    }
+
+    private func isStepLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        if lower.count < 10 || lower.count > 220 { return false }
+        if lower.contains("ingredients") || lower.contains("nutrition") { return false }
+        if lower.range(of: #"^\d+[\.\)]\s+"#, options: .regularExpression) != nil { return true }
+        if lower.hasPrefix("- ") || lower.hasPrefix("•") { return true }
+        let verbs = ["mix", "stir", "cook", "bake", "simmer", "whisk", "heat", "add", "combine", "serve", "pour"]
+        return verbs.contains { lower.contains($0) }
+    }
+
+    private func normalizeListLine(_ line: String) -> String {
+        var output = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        output = output.replacingOccurrences(of: #"^[-•\s]+"#, with: "", options: .regularExpression)
+        output = output.replacingOccurrences(of: #"^\d+[\.\)]\s*"#, with: "", options: .regularExpression)
+        return output
+    }
+
+    private func normalizeStepLine(_ line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.replacingOccurrences(of: #"^\d+[\.\)]\s*"#, with: "", options: .regularExpression)
+    }
+
+    private func buildRecipeMarkdown(query: String, sourceTitle: String, sourceURL: URL, ingredients: [String], steps: [String]) -> String {
+        var lines: [String] = []
+        lines.append("# Recipe: \(query)")
+        lines.append("")
+        lines.append("- Source: [\(sourceTitle)](\(sourceURL.absoluteString))")
+        lines.append("")
+        lines.append("## Ingredients")
+        for ingredient in ingredients.prefix(12) {
+            lines.append("- \(ingredient)")
+        }
+        lines.append("")
+        lines.append("## Steps")
+        for (index, step) in steps.prefix(10).enumerated() {
+            lines.append("\(index + 1). \(step)")
+        }
+
+        let markdown = lines.joined(separator: "\n")
+        // Keep payload comfortably inside router/tool payload guidance.
+        return String(markdown.prefix(1_180))
+    }
+
+    private func extractTitle(fromHTML html: String) -> String? {
+        let range = NSRange(html.startIndex..., in: html)
+        guard let match = Self.titleRegex.firstMatch(in: html, options: [], range: range),
+              let titleRange = Range(match.range(at: 1), in: html) else { return nil }
+        let title = decodeHTMLEntities(String(html[titleRange]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return title.isEmpty ? nil : String(title.prefix(120))
+    }
+
+    private func extractVisibleText(fromHTML html: String) -> String {
+        var text = html
+        text = Self.scriptRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = Self.styleRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = Self.noscriptRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = Self.commentsRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = text.replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)</(p|div|section|article|li|h[1-6]|tr)>", with: "\n", options: .regularExpression)
+        text = Self.tagsRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = decodeHTMLEntities(text)
+        text = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        text = Self.whitespaceRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        text = Self.multiNewlineRegex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: "\n\n")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func decodeHTMLEntities(_ text: String) -> String {
+        var result = text
+        let entities: [String: String] = [
+            "&amp;": "&",
+            "&lt;": "<",
+            "&gt;": ">",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&nbsp;": " "
+        ]
+        for (entity, replacement) in entities {
+            result = result.replacingOccurrences(of: entity, with: replacement)
+        }
+        return result
+    }
+
+    private func fetchHTML(url: URL) -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.httpMethod = "GET"
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var body: String?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data else { return }
+            body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 10)
+        guard let body, !body.isEmpty else { return nil }
+        return body
+    }
+
+    private func recipePromptPayload(slot: String, spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: Any] = [
+            "kind": "prompt",
+            "slot": slot,
+            "spoken": spoken,
+            "formatted": formatted
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: spoken)
+    }
+
+    private func structuredMarkdownPayload(kind: String, spoken: String, formatted: String) -> OutputItem {
+        let payload: [String: Any] = [
+            "kind": kind,
+            "spoken": spoken,
+            "formatted": formatted
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
     }
 }
 
@@ -1025,7 +2174,8 @@ struct LearnWebsiteTool: Tool {
             url: url.absoluteString,
             title: learned.title,
             summary: learned.summary,
-            highlights: persistedHighlights
+            highlights: persistedHighlights,
+            chunks: learned.chunks
         )
 
         if memoryStore.isAvailable {
@@ -1065,7 +2215,7 @@ struct LearnWebsiteTool: Tool {
         return parsed
     }
 
-    private func summarize(url: URL, fetched: FetchResult, focus: String?) -> (title: String, summary: String, highlights: [String])? {
+    private func summarize(url: URL, fetched: FetchResult, focus: String?) -> (title: String, summary: String, highlights: [String], chunks: [String])? {
         let host = url.host ?? "website"
         let contentType = fetched.contentType.lowercased()
         let rawText: String
@@ -1086,13 +2236,14 @@ struct LearnWebsiteTool: Tool {
         let title = extractTitle(fromHTML: fetched.body) ?? host
         let highlights = selectHighlights(from: lines, focus: focus)
         guard !highlights.isEmpty else { return nil }
+        let chunks = buildChunks(from: lines, focus: focus)
 
         var summary = highlights.prefix(2).joined(separator: " ")
         if summary.count > 280 {
             summary = String(summary.prefix(277)) + "..."
         }
 
-        return (title: title, summary: summary, highlights: highlights)
+        return (title: title, summary: summary, highlights: highlights, chunks: chunks)
     }
 
     private func buildFormattedLearningReport(record: WebsiteLearningRecord) -> String {
@@ -1147,6 +2298,59 @@ struct LearnWebsiteTool: Tool {
             selected.append(line)
         }
         return selected
+    }
+
+    private func buildChunks(from lines: [String], focus: String?) -> [String] {
+        guard !lines.isEmpty else { return [] }
+        let focusTokens = Set(tokenize(focus ?? ""))
+        let maxChunkChars = 420
+        let maxChunks = 48
+        var chunks: [String] = []
+        var current = ""
+
+        func flushCurrent() {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            chunks.append(trimmed)
+            current = ""
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if current.isEmpty {
+                current = trimmed
+                continue
+            }
+            if current.count + 1 + trimmed.count <= maxChunkChars {
+                current += " " + trimmed
+            } else {
+                flushCurrent()
+                current = trimmed
+            }
+        }
+        flushCurrent()
+
+        var deduped: [String] = []
+        var seen: Set<String> = []
+        for chunk in chunks {
+            let key = chunk.lowercased()
+            if seen.insert(key).inserted {
+                deduped.append(chunk)
+            }
+        }
+
+        let ranked = deduped.map { chunk -> (String, Int) in
+            let tokens = Set(tokenize(chunk))
+            let overlap = focusTokens.isEmpty ? 0 : tokens.intersection(focusTokens).count
+            let score = overlap * 3 + min(6, chunk.count / 80)
+            return (chunk, score)
+        }.sorted { lhs, rhs in
+            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+            return lhs.0.count > rhs.0.count
+        }
+
+        return ranked.prefix(maxChunks).map(\.0)
     }
 
     private func isBoilerplateLine(_ line: String) -> Bool {

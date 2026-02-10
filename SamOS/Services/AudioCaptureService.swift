@@ -26,13 +26,22 @@ final class AudioCaptureService {
     /// Raw Float32 samples from channel 0 at hardware sample rate.
     /// Only written by the tap callback; only read after the engine is stopped.
     private var capturedSamples: [Float] = []
+    private let sampleLock = NSLock()
 
     /// Whether we have detected speech (RMS above threshold) at least once.
     private var speechDetected = false
+    private var consecutiveSpeechFrames = 0
+    private var noiseFloorDB: Float = -100
     /// Timestamp of the last buffer that was above the silence threshold.
     private var lastSpeechTime: Date?
     /// Guards against duplicate finishCapture calls from the tap.
     private var finishDispatched = false
+    private var captureStartedAt: Date?
+    // Keep listening through full utterances; only hard-stop as a safety guard.
+    private let maxCaptureDurationMs: Double = 90_000
+    private let noSpeechTimeoutMs: Double = 8_000
+    private let noiseCalibrationMs: Double = 450
+    private let minSpeechFrames = 2
 
     // MARK: - Errors
 
@@ -59,9 +68,14 @@ final class AudioCaptureService {
         Task { @MainActor in TTSService.shared.stopSpeaking() }
 
         speechDetected = false
+        consecutiveSpeechFrames = 0
+        noiseFloorDB = -100
         lastSpeechTime = nil
         finishDispatched = false
+        captureStartedAt = Date()
+        sampleLock.lock()
         capturedSamples = []
+        sampleLock.unlock()
 
         let engine = AVAudioEngine()
         self.engine = engine
@@ -75,14 +89,13 @@ final class AudioCaptureService {
         self.hardwareFormat = hwFormat
 
         // Pre-allocate for ~30 seconds at hardware rate (avoids reallocations in the tap)
-        capturedSamples.reserveCapacity(Int(hwFormat.sampleRate) * 30)
-
-        let thresholdDB = M2Settings.silenceThresholdDB
-        let silenceDurationMs = M2Settings.silenceDurationMs
+        sampleLock.lock()
+        capturedSamples.reserveCapacity(Int(hwFormat.sampleRate) * 12)
+        sampleLock.unlock()
 
         // Ultra-lightweight tap: only copies samples + computes RMS. No conversion, no file I/O.
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
-            self?.processTap(buffer, thresholdDB: thresholdDB, silenceDurationMs: silenceDurationMs)
+            self?.processTap(buffer)
         }
 
         try engine.start()
@@ -104,26 +117,29 @@ final class AudioCaptureService {
         speechDetected = false
         lastSpeechTime = nil
         finishDispatched = false
+        captureStartedAt = nil
         if discard {
+            sampleLock.lock()
             capturedSamples = []
+            sampleLock.unlock()
             hardwareFormat = nil
         }
     }
 
     // MARK: - Tap Callback (KEEP LIGHTWEIGHT — no allocations, no conversion, no file I/O, no logging)
 
-    private func processTap(
-        _ buffer: AVAudioPCMBuffer,
-        thresholdDB: Float,
-        silenceDurationMs: Int
-    ) {
+    private func processTap(_ buffer: AVAudioPCMBuffer) {
         guard let floatData = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+        let thresholdDB = M2Settings.silenceThresholdDB
+        let silenceDurationMs = min(1_200, max(400, M2Settings.silenceDurationMs))
 
         let count = Int(buffer.frameLength)
         let samples = floatData[0]
 
         // Accumulate raw samples (channel 0 only)
+        sampleLock.lock()
         capturedSamples.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
+        sampleLock.unlock()
 
         // Fast RMS in dB
         var sumSquares: Float = 0
@@ -133,15 +149,61 @@ final class AudioCaptureService {
         }
         let rms = sqrtf(sumSquares / Float(count))
         let rmsDB: Float = rms > 0 ? 20 * log10f(rms) : -100
+        var peak: Float = 0
+        var zeroCrossings = 0
+        var prev = samples[0]
+        for i in 0..<count {
+            let magnitude = abs(samples[i])
+            if magnitude > peak { peak = magnitude }
+            if i > 0 {
+                let curr = samples[i]
+                if (prev >= 0 && curr < 0) || (prev < 0 && curr >= 0) {
+                    zeroCrossings += 1
+                }
+                prev = curr
+            }
+        }
+        let zcr = Float(zeroCrossings) / Float(max(1, count - 1))
 
-        if rmsDB > thresholdDB {
-            if !speechDetected {
+        let captureElapsedMs: Double
+        if let captureStartedAt {
+            captureElapsedMs = Date().timeIntervalSince(captureStartedAt) * 1000
+        } else {
+            captureElapsedMs = 0
+        }
+
+        if !speechDetected && captureElapsedMs <= noiseCalibrationMs {
+            if noiseFloorDB <= -99 {
+                noiseFloorDB = rmsDB
+            } else {
+                noiseFloorDB = (noiseFloorDB * 0.85) + (rmsDB * 0.15)
+            }
+        }
+
+        // Dynamic floor rises with ambient noise to suppress fan/background hum.
+        let adaptiveFloor = min(-30, noiseFloorDB + 8)
+        let effectiveThreshold = max(thresholdDB, adaptiveFloor)
+        let marginOverNoise = rmsDB - noiseFloorDB
+        let speechCandidate =
+            rmsDB > effectiveThreshold
+            && peak > 0.009
+            && marginOverNoise > 3
+        let speechStrong =
+            speechCandidate
+            && zcr > 0.004
+            && zcr < 0.45
+
+        if speechStrong {
+            consecutiveSpeechFrames += 1
+            if !speechDetected, consecutiveSpeechFrames >= minSpeechFrames {
                 speechDetected = true
                 DispatchQueue.main.async { [weak self] in
                     self?.onSpeechDetected?()
                 }
             }
             lastSpeechTime = Date()
+        } else {
+            consecutiveSpeechFrames = 0
         }
 
         // After speech detected, check for silence timeout
@@ -152,6 +214,20 @@ final class AudioCaptureService {
                 DispatchQueue.main.async { [weak self] in
                     self?.finishCapture()
                 }
+            }
+        }
+
+        if !speechDetected && captureElapsedMs >= noSpeechTimeoutMs && !finishDispatched {
+            finishDispatched = true
+            DispatchQueue.main.async { [weak self] in
+                self?.finishCapture()
+            }
+        }
+
+        if captureElapsedMs >= maxCaptureDurationMs && !finishDispatched {
+            finishDispatched = true
+            DispatchQueue.main.async { [weak self] in
+                self?.finishCapture()
             }
         }
     }
@@ -165,9 +241,11 @@ final class AudioCaptureService {
         stopCapture(discard: false)
 
         // Convert accumulated samples to WAV on a background thread
+        sampleLock.lock()
         let samples = capturedSamples
-        let hwFormat = hardwareFormat
         capturedSamples = []
+        sampleLock.unlock()
+        let hwFormat = hardwareFormat
 
         let onComplete = onSessionComplete
         let onError = onError

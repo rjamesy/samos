@@ -3,6 +3,7 @@ import Foundation
 /// HTTP client for the ElevenLabs Text-to-Speech API.
 /// Returns raw audio data (mp3) for playback.
 enum ElevenLabsClient {
+    private static let maxAttempts = 3
 
     enum TTSError: Error, LocalizedError {
         case notConfigured
@@ -50,29 +51,41 @@ enum ElevenLabsClient {
         request.timeoutInterval = 15
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await URLSession.shared.data(for: request)
-        } catch {
-            throw TTSError.requestFailed(error.localizedDescription)
-        }
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw TTSError.requestFailed("Not an HTTP response")
+                }
 
-        guard let http = response as? HTTPURLResponse else {
-            throw TTSError.requestFailed("Not an HTTP response")
-        }
+                if http.statusCode == 429, attempt < maxAttempts {
+                    let waitNanos = retryDelayNanos(attempt: attempt, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                    try await Task.sleep(nanoseconds: waitNanos)
+                    continue
+                }
 
-        guard (200...299).contains(http.statusCode) else {
-            let errorBody = String(data: data.prefix(200), encoding: .utf8) ?? ""
-            print("[ElevenLabsClient] HTTP \(http.statusCode): \(errorBody)")
-            throw TTSError.badResponse(http.statusCode)
-        }
+                guard (200...299).contains(http.statusCode) else {
+                    let errorBody = String(data: data.prefix(200), encoding: .utf8) ?? ""
+                    print("[ElevenLabsClient] HTTP \(http.statusCode): \(errorBody)")
+                    throw TTSError.badResponse(http.statusCode)
+                }
 
-        guard !data.isEmpty else {
-            throw TTSError.emptyAudio
-        }
+                guard !data.isEmpty else {
+                    throw TTSError.emptyAudio
+                }
 
-        return data
+                return data
+            } catch {
+                lastError = error
+                if attempt < maxAttempts {
+                    let waitNanos = retryDelayNanos(attempt: attempt, retryAfter: nil)
+                    try await Task.sleep(nanoseconds: waitNanos)
+                    continue
+                }
+            }
+        }
+        throw (lastError as? TTSError) ?? TTSError.requestFailed(lastError?.localizedDescription ?? "unknown error")
     }
 
     // MARK: - Streaming
@@ -109,42 +122,71 @@ enum ElevenLabsClient {
         request.timeoutInterval = 30
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
-        guard let http = response as? HTTPURLResponse else {
-            throw TTSError.requestFailed("Not an HTTP response")
-        }
-        guard (200...299).contains(http.statusCode) else {
-            print("[ElevenLabsClient] Streaming HTTP \(http.statusCode)")
-            throw TTSError.badResponse(http.statusCode)
-        }
+                guard let http = response as? HTTPURLResponse else {
+                    throw TTSError.requestFailed("Not an HTTP response")
+                }
+                if http.statusCode == 429, attempt < maxAttempts {
+                    let waitNanos = retryDelayNanos(attempt: attempt, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                    try await Task.sleep(nanoseconds: waitNanos)
+                    continue
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    print("[ElevenLabsClient] Streaming HTTP \(http.statusCode)")
+                    throw TTSError.badResponse(http.statusCode)
+                }
 
-        // Buffer all streamed chunks into Data, then write once
-        var audioData = Data()
-        audioData.reserveCapacity(64 * 1024) // 64KB typical for short speech
-        var iterator = bytes.makeAsyncIterator()
-        var chunk: [UInt8] = []
-        chunk.reserveCapacity(4096)
+                // Buffer all streamed chunks into Data, then write once
+                var audioData = Data()
+                audioData.reserveCapacity(64 * 1024) // 64KB typical for short speech
+                var iterator = bytes.makeAsyncIterator()
+                var chunk: [UInt8] = []
+                chunk.reserveCapacity(4096)
 
-        while let byte = try await iterator.next() {
-            chunk.append(byte)
-            if chunk.count >= 4096 {
-                audioData.append(contentsOf: chunk)
-                chunk.removeAll(keepingCapacity: true)
+                while let byte = try await iterator.next() {
+                    chunk.append(byte)
+                    if chunk.count >= 4096 {
+                        audioData.append(contentsOf: chunk)
+                        chunk.removeAll(keepingCapacity: true)
+                    }
+                }
+                if !chunk.isEmpty {
+                    audioData.append(contentsOf: chunk)
+                }
+
+                guard !audioData.isEmpty else {
+                    throw TTSError.emptyAudio
+                }
+
+                let tempURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("samos_tts_stream_\(UUID().uuidString).mp3")
+                try audioData.write(to: tempURL)
+
+                return tempURL
+            } catch {
+                lastError = error
+                if attempt < maxAttempts {
+                    let waitNanos = retryDelayNanos(attempt: attempt, retryAfter: nil)
+                    try await Task.sleep(nanoseconds: waitNanos)
+                    continue
+                }
             }
         }
-        if !chunk.isEmpty {
-            audioData.append(contentsOf: chunk)
+        throw (lastError as? TTSError) ?? TTSError.requestFailed(lastError?.localizedDescription ?? "unknown streaming error")
+    }
+
+    private static func retryDelayNanos(attempt: Int, retryAfter: String?) -> UInt64 {
+        if let retryAfter = retryAfter,
+           let seconds = TimeInterval(retryAfter.trimmingCharacters(in: .whitespacesAndNewlines)),
+           seconds > 0 {
+            return UInt64(seconds * 1_000_000_000)
         }
-
-        guard !audioData.isEmpty else {
-            throw TTSError.emptyAudio
-        }
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("samos_tts_stream_\(UUID().uuidString).mp3")
-        try audioData.write(to: tempURL)
-
-        return tempURL
+        let cappedAttempt = min(max(1, attempt), 5)
+        let seconds = pow(2.0, Double(cappedAttempt - 1))
+        return UInt64(seconds * 1_000_000_000)
     }
 }

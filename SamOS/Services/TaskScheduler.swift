@@ -22,7 +22,7 @@ struct ScheduledTask: Identifiable {
 // MARK: - Task Scheduler
 
 /// SQLite-backed scheduler that fires callbacks when tasks come due.
-/// Polls every 5 seconds for pending tasks past their run_at time.
+/// Polls every second for pending tasks past their run_at time.
 /// All DB access is serialized via `dbQueue` to prevent multi-threaded sqlite crashes.
 final class TaskScheduler {
 
@@ -34,6 +34,7 @@ final class TaskScheduler {
     private var db: OpaquePointer?
     private var pollTimer: Timer?
     private(set) var isAvailable = false
+    private static let pollIntervalSeconds: TimeInterval = 1.0
 
     /// Serial queue protecting ALL sqlite3 operations on `db`.
     private let dbQueue = DispatchQueue(label: "com.samos.taskscheduler.db")
@@ -147,9 +148,11 @@ final class TaskScheduler {
 
     func startPolling() {
         guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        checkForDueTasks()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: Self.pollIntervalSeconds, repeats: true) { [weak self] _ in
             self?.checkForDueTasks()
         }
+        pollTimer?.tolerance = 0.1
     }
 
     func stopPolling() {

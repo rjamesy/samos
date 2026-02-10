@@ -325,6 +325,7 @@ protocol OpenAITransport {
 struct RealOpenAITransport: OpenAITransport {
 
     private static var didLogStartup = false
+    private static let requestTimeoutSeconds: TimeInterval = 8
 
     /// JSON Schema for structured outputs — constrains action enum + step types.
     /// strict: false because args is free-form and not all fields appear on every action.
@@ -337,6 +338,7 @@ struct RealOpenAITransport: OpenAITransport {
                 "name": ["type": "string"],
                 "args": ["type": "object"],
                 "slot": ["type": "string"],
+                "slots": ["type": "array", "items": ["type": "string"]],
                 "prompt": ["type": "string"],
                 "task": ["type": "string"],
                 "context": ["type": "string"]
@@ -396,7 +398,7 @@ struct RealOpenAITransport: OpenAITransport {
             "model": model,
             "messages": messages,
             "temperature": 0.4,
-            "max_tokens": 768,
+            "max_tokens": Self.adaptiveMaxTokens(for: messages),
             "response_format": Self.responseFormat
         ]
 
@@ -404,7 +406,7 @@ struct RealOpenAITransport: OpenAITransport {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(OpenAISettings.apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 10
+        request.timeoutInterval = Self.requestTimeoutSeconds
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
         let requestID = OpenAIAPILogStore.shared.logHTTPRequest(
             service: "OpenAIRouter.chat",
@@ -512,7 +514,54 @@ struct RealOpenAITransport: OpenAITransport {
             throw OpenAIRouter.OpenAIError.requestFailed("Could not extract content from response")
         }
 
-        return content
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "OpenAIRouter.chat",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: model,
+                statusCode: nil,
+                latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
+                error: "OpenAI returned empty content",
+                responseData: data
+            )
+            throw OpenAIRouter.OpenAIError.requestFailed("OpenAI returned empty content")
+        }
+
+        return trimmed
+    }
+
+    private static func adaptiveMaxTokens(for messages: [[String: String]]) -> Int {
+        let userText = messages.last(where: { ($0["role"] ?? "").lowercased() == "user" })?["content"] ?? ""
+        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 768 }
+
+        let lower = trimmed.lowercased()
+        let wordCount = lower.split(whereSeparator: \.isWhitespace).count
+        let sentenceCount = max(1, lower.split(separator: ".").count)
+        let complexityMarkers = [
+            "step by step", "detailed", "explain", "why", "how", "analyze",
+            "compare", "implement", "architecture", "debug", "code", "plan", "walk me through"
+        ]
+        let markerHits = complexityMarkers.reduce(0) { partial, marker in
+            partial + (lower.contains(marker) ? 1 : 0)
+        }
+
+        if lower.contains("\n") || lower.contains("```") {
+            return 1400
+        }
+        if trimmed.count > 300 || wordCount > 55 || markerHits >= 2 || sentenceCount >= 4 {
+            return 1100
+        }
+        if markerHits == 1 || trimmed.count > 140 || wordCount > 24 {
+            return 700
+        }
+        if trimmed.count < 50 && wordCount <= 8 {
+            return 220
+        }
+        return 500
     }
 }
 
@@ -688,10 +737,10 @@ final class OpenAIRouter {
         let tools = ToolRegistry.shared.allTools
         var toolDescriptions = ""
         for tool in tools where tool.name != "capability_gap_to_claude_prompt" {
-            toolDescriptions += "- \(tool.name): \(tool.description)\n"
+            toolDescriptions += "- \(tool.name): \(compactToolDescription(tool.description))\n"
         }
 
-        let installedSkills = SkillStore.shared.loadInstalled()
+        let installedSkills = relevantSkillPromptEntries(for: input, limit: 6)
         var skillBlock = ""
         if !installedSkills.isEmpty {
             skillBlock += "\n## Installed Skills (NOT tool names)\n"
@@ -699,12 +748,12 @@ final class OpenAIRouter {
             skillBlock += "- Never call an installed skill name in TOOL steps.\n"
             skillBlock += "- Use TOOL steps only for names in Available Tools.\n"
             for skill in installedSkills {
-                let triggers = skill.triggerPhrases.joined(separator: ", ")
+                let triggers = skill.triggerPhrases.prefix(2).joined(separator: ", ")
                 skillBlock += "- \(skill.name): triggers on \"\(triggers)\"\n"
             }
         }
 
-        let memoryHints = MemoryStore.shared.memoryContext(query: input, maxItems: 3, maxChars: 300)
+        let memoryHints = fastMemoryHints(for: input, maxItems: 4, maxChars: 600)
         let memoryHintField: String
         if memoryHints.isEmpty {
             memoryHintField = "memory_hint: []"
@@ -715,7 +764,9 @@ final class OpenAIRouter {
             memoryHintField = "memory_hint: [\(snippets.joined(separator: ", "))]"
         }
 
-        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 3, maxChars: 260)
+        let memoryGraphField = "memory_graph: []"
+
+        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 3, maxChars: 360)
         let selfLearningField: String
         if selfLessons.isEmpty {
             selfLearningField = "self_learning: []"
@@ -726,7 +777,7 @@ final class OpenAIRouter {
             selfLearningField = "self_learning: [\(snippets.joined(separator: ", "))]"
         }
 
-        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 10, maxChars: 1200)
+        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 4, maxChars: 500)
         let websiteLearningField: String
         if websiteHints.isEmpty {
             websiteLearningField = "website_learning: []"
@@ -795,6 +846,9 @@ final class OpenAIRouter {
 
         ## Tool Usage
         {"action":"TOOL","name":"find_image","args":{"query":"frog"},"say":"I'll find an image for that."}
+        {"action":"TOOL","name":"find_video","args":{"query":"race car"},"say":"I'll find a video for that."}
+        {"action":"TOOL","name":"find_files","args":{"query":"find all pdfs in downloads"},"say":"I'll search your files."}
+        {"action":"TOOL","name":"find_recipe","args":{"query":"caramel sauce"},"say":"I'll find a recipe for that."}
         {"action":"TOOL","name":"show_image","args":{"urls":"https://example.com/img.jpg","alt":"description"},"say":"Here you go."}
         {"action":"TOOL","name":"show_text","args":{"markdown":"# Title\\nContent"},"say":"Here it is."}
         {"action":"TOOL","name":"save_memory","args":{"type":"fact","content":"Your dog's name is Bailey."},"say":"I'll remember that."}
@@ -818,6 +872,8 @@ final class OpenAIRouter {
         - Time/date/timezone/what time is it -> use get_time
         - Questions about what Sam can currently see through the laptop camera -> use describe_camera_view
         - Object finding, face presence, face enrollment/recognition, visual questions, inventory snapshots, and camera memory notes -> use their matching camera tools
+        - Video lookup requests (show/find video, YouTube clip) -> use find_video
+        - File search requests in Downloads/Documents (find file, PDFs, Word docs, partial names) -> use find_files
         - Do NOT use get_time for weather questions.
 
         ## Tool Policy
@@ -827,7 +883,11 @@ final class OpenAIRouter {
         - For "alarm"/absolute time → schedule_task with run_at.
         - For dense or structured content (markdown blocks, headings/lists/steps, or >200 chars), keep say as a short spoken summary and put full details in show_text markdown.
         - For long or structured content (multi-line, headings, lists, >240 chars) → prefer show_text with markdown.
-        - For recipes/instructions → show_text with markdown.
+        - For recipes/cooking instructions without a URL -> use find_recipe with args.query.
+        - If user asks for recipe + image, use PLAN with find_recipe and find_image.
+        - For user requests to find/show/search a video by topic -> use find_video with args.query.
+        - For "another video" on the same topic, call find_video again with the same query (tool avoids repeats).
+        - For file-system requests (Downloads/Documents), use find_files with a query like "find all pdfs in downloads" or "find document named bestreport".
         - For user requests to find/search/show an image by topic -> use find_image with args.query.
         - Use show_image when the user already provided direct image URL(s).
         - For requests to read/learn/study a URL → use learn_website with the provided url and optional focus.
@@ -857,6 +917,7 @@ final class OpenAIRouter {
 
         ## Memory Hints
         \(memoryHintField)
+        \(memoryGraphField)
         - Memory acknowledgements are optional.
         - Only acknowledge memory if it is clearly relevant to the user's current message.
         - Do NOT mention sensitive topics unless the user brings them up first.
@@ -877,6 +938,7 @@ final class OpenAIRouter {
         ## PLAN Policy
         - Use PLAN for any tool usage or when info is missing (ask step).
         - PLAN steps must be objects: {"step":"talk|tool|ask|delegate",...}
+        - If multiple required fields are missing, ask for them in one combined ask step (one prompt, comma-separated slot names).
 
         ## Tool Payload Limits
         - For show_text, keep args.markdown under ~1200 characters.
@@ -904,11 +966,70 @@ final class OpenAIRouter {
         """
     }
 
+    private func compactToolDescription(_ raw: String, maxChars: Int = 130) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "No description." }
+        let firstSentence = trimmed.components(separatedBy: ". ").first ?? trimmed
+        if firstSentence.count <= maxChars { return firstSentence }
+        return String(firstSentence.prefix(maxChars - 3)) + "..."
+    }
+
+    private func fastMemoryHints(for input: String, maxItems: Int, maxChars: Int) -> [MemoryRow] {
+        MemoryStore.shared.memoryContext(
+            query: input,
+            maxItems: max(1, maxItems),
+            maxChars: max(120, maxChars)
+        )
+    }
+
+    private func relevantSkillPromptEntries(for input: String, limit: Int) -> [SkillSpec] {
+        let installed = SkillStore.shared.loadInstalled()
+        guard !installed.isEmpty else { return [] }
+
+        var seen: Set<String> = []
+        var deduped: [SkillSpec] = []
+        for skill in installed {
+            let triggerKey = skill.triggerPhrases
+                .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+                .sorted()
+                .joined(separator: "|")
+            let key = "\(skill.name.lowercased())#\(triggerKey)"
+            if seen.insert(key).inserted {
+                deduped.append(skill)
+            }
+        }
+
+        let cappedLimit = max(1, min(limit, 12))
+        let ranked = LocalKnowledgeRetriever.rank(
+            query: input,
+            items: deduped,
+            text: { skill in
+                "\(skill.name) \(skill.triggerPhrases.joined(separator: " "))"
+            },
+            limit: cappedLimit,
+            minScore: 0.10
+        ).map(\.item)
+
+        if ranked.count >= cappedLimit {
+            return Array(ranked.prefix(cappedLimit))
+        }
+
+        var output = ranked
+        for skill in deduped where output.count < cappedLimit {
+            if !output.contains(where: { $0.id == skill.id }) {
+                output.append(skill)
+            }
+        }
+        return output
+    }
+
     // MARK: - Tool Choice Guardrails
 
     private func enforcePostParseGuardrails(_ plan: Plan, userInput: String) -> Plan {
         let weatherGuarded = enforceToolChoiceGuardrails(plan, userInput: userInput)
-        return enforceCapabilityLearningGuardrails(weatherGuarded, userInput: userInput)
+        let recipeGuarded = enforceRecipeToolChoiceGuardrails(weatherGuarded, userInput: userInput)
+        let videoGuarded = enforceVideoToolChoiceGuardrails(recipeGuarded, userInput: userInput)
+        return enforceCapabilityLearningGuardrails(videoGuarded, userInput: userInput)
     }
 
     private func enforceToolChoiceGuardrails(_ plan: Plan, userInput: String) -> Plan {
@@ -931,6 +1052,73 @@ final class OpenAIRouter {
         ], say: plan.say)
     }
 
+    private func enforceRecipeToolChoiceGuardrails(_ plan: Plan, userInput: String) -> Plan {
+        guard isRecipeQuery(userInput) else { return plan }
+        if planContainsTool(plan, named: "find_recipe") || planContainsTool(plan, named: "show_text") {
+            return plan
+        }
+
+        let hasCapabilityGapDelegate = plan.steps.contains { step in
+            if case .delegate(let task, _, _) = step {
+                return task.lowercased().hasPrefix("capability_gap:")
+            }
+            return false
+        }
+
+        let hasRefusalTalk = plan.steps.contains { step in
+            if case .talk(let say) = step {
+                return isRefusalTalk(say)
+            }
+            return false
+        }
+
+        let hasAnyToolStep = plan.steps.contains { step in
+            if case .tool = step { return true }
+            return false
+        }
+
+        guard hasCapabilityGapDelegate || hasRefusalTalk || !hasAnyToolStep else { return plan }
+
+        let query = recipeQuery(from: userInput)
+        var steps: [PlanStep] = []
+        if isImageRequest(userInput) {
+            steps.append(.tool(name: "find_image", args: ["query": .string(query)], say: nil))
+        }
+        steps.append(.tool(name: "find_recipe", args: ["query": .string(query)], say: nil))
+        return Plan(steps: steps, say: plan.say)
+    }
+
+    private func enforceVideoToolChoiceGuardrails(_ plan: Plan, userInput: String) -> Plan {
+        guard isVideoQuery(userInput) else { return plan }
+        if planContainsTool(plan, named: "find_video") { return plan }
+
+        let hasCapabilityGapDelegate = plan.steps.contains { step in
+            if case .delegate(let task, _, _) = step {
+                return task.lowercased().hasPrefix("capability_gap:")
+            }
+            return false
+        }
+
+        let hasRefusalTalk = plan.steps.contains { step in
+            if case .talk(let say) = step {
+                return isRefusalTalk(say)
+            }
+            return false
+        }
+
+        let hasAnyToolStep = plan.steps.contains { step in
+            if case .tool = step { return true }
+            return false
+        }
+
+        guard hasCapabilityGapDelegate || hasRefusalTalk || !hasAnyToolStep else { return plan }
+
+        let query = videoQuery(from: userInput)
+        return Plan(steps: [
+            .tool(name: "find_video", args: ["query": .string(query)], say: nil)
+        ], say: plan.say)
+    }
+
     private func enforceCapabilityLearningGuardrails(_ plan: Plan, userInput: String) -> Plan {
         guard isCapabilityLearningRequest(userInput) else { return plan }
 
@@ -939,11 +1127,6 @@ final class OpenAIRouter {
             return Plan(steps: [
                 .tool(name: "forge_queue_clear", args: [:], say: "Okay, I stopped capability learning.")
             ], say: plan.say)
-        }
-
-        // Keep explicit learning tools for URL-based or timed autonomous learning requests.
-        if inputContainsURL(userInput) || isTimedAutonomousLearningRequest(userInput) {
-            return plan
         }
 
         if planContainsTool(plan, named: "start_skillforge")
@@ -970,9 +1153,90 @@ final class OpenAIRouter {
         return keywords.contains { lower.contains($0) }
     }
 
+    private func isRecipeQuery(_ input: String) -> Bool {
+        let lower = input.lowercased()
+        let keywords = [
+            "recipe", "ingredients", "how to make", "how do i make", "cook", "cooking",
+            "bake", "baking", "instructions", "directions", "meal"
+        ]
+        return keywords.contains { lower.contains($0) }
+    }
+
+    private func isImageRequest(_ input: String) -> Bool {
+        let lower = input.lowercased()
+        let keywords = ["image", "picture", "photo", "show me", "what it looks like"]
+        return keywords.contains { lower.contains($0) }
+    }
+
+    private func isVideoQuery(_ input: String) -> Bool {
+        let lower = input.lowercased()
+        let keywords = ["video", "youtube", "clip", "watch"]
+        return keywords.contains { lower.contains($0) }
+    }
+
+    private func isRefusalTalk(_ say: String) -> Bool {
+        let lower = say.lowercased()
+        let phrases = [
+            "can't", "cannot", "couldn't", "unable", "not able", "don't have",
+            "cannot do", "can't find recipes", "can't find recipe"
+        ]
+        return phrases.contains { lower.contains($0) }
+    }
+
+    private func recipeQuery(from input: String) -> String {
+        var query = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"(?i)\b(find|show|get)\s+(me\s+)?(a\s+)?recipe\s+for\s+"#,
+            #"(?i)\brecipe\s+for\s+"#,
+            #"(?i)\bhow\s+to\s+make\s+"#,
+            #"(?i)\bhow\s+do\s+i\s+make\s+"#
+        ]
+        for pattern in patterns {
+            query = query.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        query = query.replacingOccurrences(
+            of: #"(?i)\s+(and|&)\s+(show|find|get).*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        query = query.replacingOccurrences(of: #"(?i)\s+(image|picture|photo).*$"#, with: "", options: .regularExpression)
+        query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? input.trimmingCharacters(in: .whitespacesAndNewlines) : query
+    }
+
+    private func videoQuery(from input: String) -> String {
+        var query = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"(?i)\b(find|show|get|play|watch|search)\s+(me\s+)?(another\s+)?(a\s+)?video\s+(of|about|for)\s+"#,
+            #"(?i)\banother\s+video\s+(of|about|for)\s+"#,
+            #"(?i)\bvideo\s+(of|about|for)\s+"#,
+            #"(?i)\bon\s+youtube\s*"#
+        ]
+        for pattern in patterns {
+            query = query.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? input.trimmingCharacters(in: .whitespacesAndNewlines) : query
+    }
+
     private func isCapabilityLearningRequest(_ input: String) -> Bool {
         let lower = input.lowercased()
-        if inputContainsURL(lower) || isTimedAutonomousLearningRequest(lower) {
+        if isTimedAutonomousLearningRequest(lower) { return false }
+
+        let explicitCapabilityPatterns = [
+            #"\blearn\s+(a\s+)?(new\s+)?capabilit(y|ies)\b"#,
+            #"\b(build|create|develop|implement|forge)\s+(a\s+)?(new\s+)?capabilit(y|ies)\b"#,
+            #"\blearn\s+(a\s+)?(new\s+)?skill(s)?\b"#,
+            #"\b(build|create|develop|implement|forge|install)\s+(a\s+)?(new\s+)?skill(s)?\b"#,
+            #"\bcapability\s+gap\b"#
+        ]
+        for pattern in explicitCapabilityPatterns {
+            if lower.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+
+        if inputContainsURL(lower) {
             return false
         }
 

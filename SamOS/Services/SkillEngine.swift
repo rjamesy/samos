@@ -48,26 +48,34 @@ final class SkillEngine {
 
         let normalizedInput = Self.normalizeTriggerText(input)
         let skills = SkillStore.shared.loadInstalled()
+        guard !skills.isEmpty else { return nil }
 
-        // Find the best matching skill (prefer longest trigger match)
-        var bestMatch: (skill: SkillSpec, trigger: String)?
-        for skill in skills {
-            for trigger in skill.triggerPhrases {
-                let normalizedTrigger = Self.normalizeTriggerText(trigger)
-                guard !normalizedTrigger.isEmpty else { continue }
-                if normalizedInput.contains(normalizedTrigger) {
-                    if bestMatch == nil || trigger.count > bestMatch!.trigger.count {
-                        bestMatch = (skill, trigger)
+        let ranked = LocalKnowledgeRetriever.rank(
+            query: normalizedInput,
+            items: skills,
+            text: { skill in
+                let triggers = Self.effectiveTriggers(for: skill).joined(separator: " ")
+                let slotNames = skill.slots.map(\.name).joined(separator: " ")
+                return "\(skill.name) \(triggers) \(slotNames)"
+            },
+            extraBoost: { skill in
+                let exactBoost = Self.effectiveTriggers(for: skill).reduce(0.0) { partial, normalizedTrigger in
+                    if normalizedInput.contains(normalizedTrigger) {
+                        return partial + min(0.35, Double(normalizedTrigger.count) / 200.0)
                     }
+                    return partial
                 }
-            }
-        }
+                return exactBoost
+            },
+            limit: 3,
+            minScore: 0.18
+        )
 
-        guard let match = bestMatch else { return nil }
+        guard let match = ranked.first?.item else { return nil }
 
         // Extract slots
         var slots: [String: String] = [:]
-        for slotDef in match.skill.slots {
+        for slotDef in match.slots {
             if let value = extractSlotValue(from: input, type: slotDef.type) {
                 slots[slotDef.name] = value
                 // Add display variant for dates
@@ -78,14 +86,14 @@ final class SkillEngine {
         }
 
         // Check for missing required slots
-        for slotDef in match.skill.slots where slotDef.required {
+        for slotDef in match.slots where slotDef.required {
             if slots[slotDef.name] == nil {
-                state = .awaitingSlot(skill: match.skill, filledSlots: slots, missingSlot: slotDef.name)
+                state = .awaitingSlot(skill: match, filledSlots: slots, missingSlot: slotDef.name)
                 return nil // Will be handled as a prompt in the caller
             }
         }
 
-        return (match.skill, slots)
+        return (match, slots)
     }
 
     private static func normalizeTriggerText(_ text: String) -> String {
@@ -95,6 +103,17 @@ final class SkillEngine {
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func effectiveTriggers(for skill: SkillSpec) -> [String] {
+        let cleaned = skill.triggerPhrases
+            .map(normalizeTriggerText)
+            .filter { !$0.isEmpty }
+        if !cleaned.isEmpty {
+            return cleaned
+        }
+        let fallback = normalizeTriggerText(skill.name)
+        return fallback.isEmpty ? [] : [fallback]
     }
 
     /// Returns a prompt message if the engine is awaiting a slot fill.
@@ -226,11 +245,6 @@ final class SkillEngine {
             var value = template
             for (slotName, slotValue) in slots {
                 value = value.replacingOccurrences(of: "{{\(slotName)}}", with: slotValue)
-            }
-            // Clear any remaining unfilled placeholders
-            let placeholderPattern = #"\{\{[^}]+\}\}"#
-            if let regex = try? NSRegularExpression(pattern: placeholderPattern) {
-                value = regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: "")
             }
             result[key] = value
         }

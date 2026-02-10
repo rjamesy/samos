@@ -513,6 +513,10 @@ final class RouterPipelineTests: XCTestCase {
     {"action":"TOOL","name":"learn_website","args":{"url":"https://example.com","focus":"capability gap miner"},"say":"I'll learn from that page."}
     """
 
+    private let capabilityStartSkillforgeActionJSON = """
+    {"action":"START_SKILLFORGE","goal":"Find and display relevant videos when the user requests.","constraints":"Use YouTube API for video search."}
+    """
+
     private let websiteLearningActionJSON = """
     {"action":"TOOL","name":"learn_website","args":{"url":"https://swift.org","focus":"packages"},"say":"I'll learn from that page."}
     """
@@ -644,6 +648,95 @@ final class RouterPipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testRecipeRequestRecoversFromCapabilityGapToFindRecipeTool() async {
+        let first = #"{"action":"CAPABILITY_GAP","goal":"Find a recipe for caramel sauce","missing":"recipe search capability"}"#
+        let second = #"{"action":"TALK","say":"I can't find recipes directly, but I can help with something else!"}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(first), .success(second)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("find a recipe for caramel sauce")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a repaired recipe plan")
+        }
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Recipe guardrail should recover in a single pass")
+
+        let hasFindRecipe = plan.steps.contains { step in
+            if case .tool(let name, let args, _) = step {
+                return name == "find_recipe" && (args["query"]?.stringValue.lowercased().contains("caramel sauce") == true)
+            }
+            return false
+        }
+        XCTAssertTrue(hasFindRecipe, "Recipe request should be repaired to find_recipe tool")
+    }
+
+    @MainActor
+    func testRecipeAndImageRefusalRepairsToFindRecipeAndFindImage() async {
+        let refusal = #"{"action":"TALK","say":"I can't find recipes directly."}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(refusal)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("find a recipe for banana muffins and show me an image of the food")
+
+        guard let plan = plan else {
+            return XCTFail("Expected repaired plan")
+        }
+        let toolNames = plan.steps.compactMap { step -> String? in
+            if case .tool(let name, _, _) = step { return name }
+            return nil
+        }
+        XCTAssertTrue(toolNames.contains("find_recipe"))
+        XCTAssertTrue(toolNames.contains("find_image"))
+    }
+
+    @MainActor
+    func testVideoRequestRecoversFromCapabilityGapToFindVideoTool() async {
+        let first = #"{"action":"CAPABILITY_GAP","goal":"Find and display relevant videos when the user requests.","missing":"video search capability"}"#
+        let second = #"{"action":"TALK","say":"I can't find videos directly right now."}"#
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(first), .success(second)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try? await openAIRouter.routePlan("find a video of a race car")
+
+        guard let plan = plan else {
+            return XCTFail("Expected a repaired video plan")
+        }
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Video guardrail should recover in a single pass")
+
+        let hasFindVideo = plan.steps.contains { step in
+            if case .tool(let name, let args, _) = step {
+                return name == "find_video" && (args["query"]?.stringValue.lowercased().contains("race car") == true)
+            }
+            return false
+        }
+        XCTAssertTrue(hasFindVideo, "Video request should be repaired to find_video tool")
+    }
+
+    @MainActor
     func testCapabilityBuildRequestRoutesToStartSkillforge() async {
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [.success(capabilityWrongToolActionJSON)]
@@ -666,6 +759,47 @@ final class RouterPipelineTests: XCTestCase {
         }
         XCTAssertEqual(name, "start_skillforge")
         XCTAssertTrue((args["goal"]?.stringValue ?? "").lowercased().contains("capability gap miner"))
+    }
+
+    func testCapabilityBuildWithURLPreservesStartSkillforge() async throws {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(capabilityStartSkillforgeActionJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try await openAIRouter.routePlan("Learn a capability: when user says show me a video on X, find and display a relevant video. Use https://www.googleapis.com/youtube/v3/search")
+
+        guard case .tool(let name, let args, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "start_skillforge")
+        XCTAssertTrue((args["goal"]?.stringValue ?? "").lowercased().contains("find and display relevant videos"))
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Should not repair-retry as unexpected capability escalation")
+    }
+
+    func testCapabilityBuildWithURLRepairsWrongToolToStartSkillforge() async throws {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(capabilityWrongToolActionJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let plan = try await openAIRouter.routePlan("Build a capability to find and display videos and use https://www.googleapis.com/youtube/v3/search as the reference.")
+        guard case .tool(let name, _, _) = plan.steps.first else {
+            return XCTFail("Expected first step to be a tool call")
+        }
+        XCTAssertEqual(name, "start_skillforge")
     }
 
     @MainActor
@@ -1589,7 +1723,7 @@ final class RouterPipelineTests: XCTestCase {
 
         do {
             let plan = try await openAIRouter.routePlan("find a recipe for butter chicken and show me an image of the food")
-            XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Should retry once when CAPABILITY_GAP is unexpected")
+            XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Recipe guardrail should recover without a retry round-trip")
             let hasFindImage = plan.steps.contains { step in
                 if case .tool(let name, _, _) = step {
                     return name == "find_image"

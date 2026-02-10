@@ -45,6 +45,7 @@ struct SettingsView: View {
 
     // OpenAI
     @State private var openaiApiKey: String = OpenAISettings.apiKey
+    @State private var youtubeApiKey: String = OpenAISettings.youtubeAPIKey
     @State private var openaiModel: String = OpenAISettings.model
     @State private var openaiRealtimeModeEnabled: Bool = OpenAISettings.realtimeModeEnabled
     @State private var openaiRealtimeUseClassicSTT: Bool = OpenAISettings.realtimeUseClassicSTT
@@ -220,7 +221,7 @@ struct SettingsView: View {
         Section("Audio Capture") {
             HStack {
                 Text("Silence threshold: \(Int(silenceThresholdDB)) dB")
-                Slider(value: $silenceThresholdDB, in: -60...(-20), step: 1)
+                Slider(value: $silenceThresholdDB, in: -50...(-20), step: 1)
                     .onChange(of: silenceThresholdDB) { _, newValue in
                         M2Settings.silenceThresholdDB = newValue
                     }
@@ -228,7 +229,7 @@ struct SettingsView: View {
 
             HStack {
                 Text("Silence duration: \(Int(silenceDurationMs)) ms")
-                Slider(value: $silenceDurationMs, in: 500...5000, step: 100)
+                Slider(value: $silenceDurationMs, in: 400...2000, step: 100)
                     .onChange(of: silenceDurationMs) { _, newValue in
                         M2Settings.silenceDurationMs = Int(newValue)
                     }
@@ -425,6 +426,11 @@ struct SettingsView: View {
                     OpenAISettings.apiKey = newValue
                 }
 
+            SecureField("YouTube Data API Key (optional)", text: $youtubeApiKey)
+                .onChange(of: youtubeApiKey) { _, newValue in
+                    OpenAISettings.youtubeAPIKey = newValue
+                }
+
             TextField("Model", text: $openaiModel)
                 .textFieldStyle(.roundedBorder)
                 .onChange(of: openaiModel) { _, newValue in
@@ -474,6 +480,9 @@ struct SettingsView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
+                        Text(OpenAISettings.isYouTubeConfigured ? "YouTube API configured" : "YouTube API not configured")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
                 } else {
                     Text("API key required").foregroundColor(.secondary)

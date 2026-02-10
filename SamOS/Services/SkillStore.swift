@@ -134,17 +134,8 @@ final class SkillStore {
     /// Copies bundled skills from the app bundle if they aren't already installed,
     /// or re-installs if existing copy lacks metadata (legacy upgrade).
     func installBundledSkillsIfNeeded() {
-        let needsInstall = cache["alarm_v1"] == nil || cache["alarm_v1"]?.approvedAt == nil
-        if needsInstall {
-            if let url = Bundle.main.url(forResource: "alarm_v1", withExtension: "json"),
-               let data = try? Data(contentsOf: url),
-               var skill = try? JSONDecoder().decode(SkillSpec.self, from: data) {
-                skill.status = "active"
-                skill.approvedAt = Date()
-                install(skill)
-                print("[SkillStore] Installed bundled skill: \(skill.name)")
-            }
-        }
+        installBundledJSONSkillIfNeeded(resource: "alarm_v1")
+        installBundledFileSearchSkillIfNeeded()
     }
 
     /// Number of installed skills.
@@ -197,5 +188,56 @@ final class SkillStore {
             result[skill.id] = skill
         }
         return result
+    }
+
+    private func installBundledJSONSkillIfNeeded(resource: String) {
+        let needsInstall = cache[resource] == nil || cache[resource]?.approvedAt == nil
+        guard needsInstall else { return }
+        guard let url = Bundle.main.url(forResource: resource, withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              var skill = try? JSONDecoder().decode(SkillSpec.self, from: data) else {
+            return
+        }
+        skill.status = "active"
+        skill.approvedAt = Date()
+        skill.disabledAt = nil
+        install(skill)
+        print("[SkillStore] Installed bundled skill: \(skill.name)")
+    }
+
+    private func installBundledFileSearchSkillIfNeeded() {
+        let id = "file_system_access_v1"
+        if let existing = cache[id], Self.isInstalled(existing) {
+            return
+        }
+
+        var skill = SkillSpec(
+            id: id,
+            name: "File System Access",
+            version: 1,
+            triggerPhrases: [
+                "find that i downloaded",
+                "what's in my downloads folder",
+                "whats in my downloads folder",
+                "what's in my documents folder",
+                "find all pdfs",
+                "find a word document",
+                "find file",
+                "find document named"
+            ],
+            slots: [
+                SkillSpec.SlotDef(name: "query", type: .string, required: false, prompt: nil)
+            ],
+            steps: [
+                SkillSpec.StepDef(action: "find_files", args: ["query": "{{query}}"])
+            ],
+            onTrigger: nil
+        )
+        skill.status = "active"
+        skill.approvedAt = Date()
+        skill.disabledAt = nil
+
+        install(skill)
+        print("[SkillStore] Installed bundled skill: \(skill.name)")
     }
 }

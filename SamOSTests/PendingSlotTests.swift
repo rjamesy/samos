@@ -76,4 +76,15 @@ final class PendingSlotTests: XCTestCase {
         slot.attempts += 1
         XCTAssertEqual(slot.attempts, 1)
     }
+
+    func testCommaSeparatedSlotNameParsesToSlotNames() {
+        let slot = PendingSlot(
+            slotName: "time, timezone, time",
+            prompt: "Need both",
+            originalUserText: "set alarm in new york"
+        )
+        XCTAssertEqual(slot.slotNames, ["time", "timezone"])
+        XCTAssertEqual(slot.slotName, "time,timezone")
+        XCTAssertEqual(slot.primarySlotName, "time")
+    }
 }

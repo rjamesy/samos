@@ -10,6 +10,8 @@ struct TurnResult {
     var usedMemoryHints: Bool = false
     var llmProvider: LLMProvider = .none
     var knowledgeAttribution: KnowledgeAttribution?
+    var executedToolSteps: [(name: String, args: [String: String])] = []
+    var routerMs: Int?
 }
 
 private struct LocalKnowledgeContext {
@@ -70,6 +72,11 @@ final class TurnOrchestrator {
     private var lastMemoryAckTurn: Int?
     private var lastFollowUpTurn: Int?
     private var followUpQuestionIndex = 0
+    private let openAIRouteTimeoutSeconds: Double = 5.0
+    private let openAIImageRepairTimeoutSeconds: Double = 3.0
+    private let toolFeedbackLoopMaxDepth = 1
+    private let maxRephraseBudgetMs = 700
+    private let maxToolFeedbackBudgetMs = 600
 
     var pendingSlot: PendingSlot? = nil
 
@@ -79,14 +86,14 @@ final class TurnOrchestrator {
         self.ollamaRouter = ollama
         self.openAIRouter = OpenAIRouter(parser: ollama)
         self.memoryAckCooldownTurns = 20
-        self.followUpCooldownTurns = 5
+        self.followUpCooldownTurns = 3
     }
 
     // Test init (injectable)
     init(ollamaRouter: OllamaRouter,
          openAIRouter: OpenAIRouter,
          memoryAckCooldownTurns: Int = 20,
-         followUpCooldownTurns: Int = 5) {
+         followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
         self.openAIRouter = openAIRouter
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
@@ -96,6 +103,7 @@ final class TurnOrchestrator {
     func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
         turnCounter += 1
         let currentTurn = turnCounter
+        let turnStartedAt = Date()
         let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
 
@@ -104,7 +112,7 @@ final class TurnOrchestrator {
             if slot.isExpired {
                 pendingSlot = nil
                 // Fall through to normal routing
-            } else if slot.attempts >= 2 {
+            } else if slot.attempts >= 3 {
                 pendingSlot = nil
                 var result = TurnResult()
                 let msg = "I'm not getting it — can you rephrase?"
@@ -113,12 +121,17 @@ final class TurnOrchestrator {
                 return result
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider) = await routePlan(text, history: history, pendingSlot: slot, reason: .pendingSlotReply)
-                let plan = await maybeRephraseRepeatedTalk(rawPlan, userInput: text, history: history, provider: provider)
+                let (rawPlan, provider, routerMs) = await routePlan(text, history: history, pendingSlot: slot, reason: .pendingSlotReply)
+                let plan = await maybeRephraseRepeatedTalk(rawPlan,
+                                                           userInput: text,
+                                                           history: history,
+                                                           provider: provider,
+                                                           turnStartedAt: turnStartedAt)
 
                 // Check if returned plan has an ask step for the same slot
                 let hasRepeatAsk = plan.steps.contains { step in
-                    if case .ask(let stepSlot, _) = step, stepSlot == slot.slotName {
+                    if case .ask(let stepSlot, _) = step,
+                       !normalizedSlotSet(from: stepSlot).isDisjoint(with: normalizedSlotSet(from: slot.slotName)) {
                         return true
                     }
                     return false
@@ -133,22 +146,34 @@ final class TurnOrchestrator {
 
                 return await executePlan(plan,
                                          originalInput: text,
+                                         history: history,
                                          provider: provider,
+                                         routerMs: routerMs,
                                          localKnowledgeContext: localKnowledgeContext,
                                          hasMemoryHints: hasMemoryHints,
-                                         turnIndex: currentTurn)
+                                         turnIndex: currentTurn,
+                                         feedbackDepth: 0,
+                                         turnStartedAt: turnStartedAt)
             }
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider) = await routePlan(text, history: history, reason: .userChat)
-        let plan = await maybeRephraseRepeatedTalk(rawPlan, userInput: text, history: history, provider: provider)
+        let (rawPlan, provider, routerMs) = await routePlan(text, history: history, reason: .userChat)
+        let plan = await maybeRephraseRepeatedTalk(rawPlan,
+                                                   userInput: text,
+                                                   history: history,
+                                                   provider: provider,
+                                                   turnStartedAt: turnStartedAt)
         return await executePlan(plan,
                                  originalInput: text,
+                                 history: history,
                                  provider: provider,
+                                 routerMs: routerMs,
                                  localKnowledgeContext: localKnowledgeContext,
                                  hasMemoryHints: hasMemoryHints,
-                                 turnIndex: currentTurn)
+                                 turnIndex: currentTurn,
+                                 feedbackDepth: 0,
+                                 turnStartedAt: turnStartedAt)
     }
 
     // MARK: - Brain Router Pipeline
@@ -157,42 +182,41 @@ final class TurnOrchestrator {
     /// No provider hopping. If JSON parses, accept it. No validation repair loops.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
-                           reason: LLMCallReason = .userChat) async -> (Plan, LLMProvider) {
+                           reason: LLMCallReason = .userChat) async -> (Plan, LLMProvider, Int) {
 
         // A) OpenAI ONLY (when configured — no Ollama fallback)
         if OpenAISettings.isConfigured {
             let start = CFAbsoluteTimeGetCurrent()
             do {
-                let plan = try await withTimeout(8.0) {
+                let plan = try await withTimeout(openAIRouteTimeoutSeconds) {
                     try await self.openAIRouter.routePlan(text, history: history, pendingSlot: pendingSlot)
                 }
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
-                return (plan, .openai)
+                return (plan, .openai, ms)
 
             } catch {
                 // OpenAI failed — do NOT fall back to Ollama (it poisons answers + doubles latency)
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                return (friendlyFallbackPlan(error), .none)
+                return (friendlyFallbackPlan(error), .none, ms)
             }
         }
 
         // B) Ollama standalone (OpenAI not configured, useOllama enabled)
         if M2Settings.useOllama {
-            return await ollamaFallback(text, history: history, pendingSlot: pendingSlot,
-                                        reason: reason)
+            return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason)
         }
 
         // C) Nothing configured — MockRouter
         let action = mockRouter.route(text)
-        return (Plan.fromAction(action), .none)
+        return (Plan.fromAction(action), .none, 0)
     }
 
     /// Ollama attempt — single call, no validation repair.
     private func ollamaFallback(_ text: String, history: [ChatMessage],
                                 pendingSlot: PendingSlot?,
-                                reason: LLMCallReason) async -> (Plan, LLMProvider) {
+                                reason: LLMCallReason) async -> (Plan, LLMProvider, Int) {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let plan = try await withTimeout(4.0) {
@@ -200,11 +224,11 @@ final class TurnOrchestrator {
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-            return (plan, .ollama)
+            return (plan, .ollama, ms)
         } catch {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-            return (friendlyFallbackPlan(error), .none)
+            return (friendlyFallbackPlan(error), .none, ms)
         }
     }
 
@@ -212,14 +236,20 @@ final class TurnOrchestrator {
 
     private func executePlan(_ plan: Plan,
                              originalInput: String,
+                             history: [ChatMessage],
                              provider: LLMProvider,
+                             routerMs: Int,
                              localKnowledgeContext: LocalKnowledgeContext,
                              hasMemoryHints: Bool,
-                             turnIndex: Int) async -> TurnResult {
+                             turnIndex: Int,
+                             feedbackDepth: Int,
+                             turnStartedAt: Date) async -> TurnResult {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
 
         var result = TurnResult()
         result.llmProvider = provider
+        result.executedToolSteps = exec.executedToolSteps
+        result.routerMs = routerMs
 
         // Stamp provider on assistant messages
         result.appendedChat = exec.chatMessages.map { msg in
@@ -242,10 +272,13 @@ final class TurnOrchestrator {
             print("[TurnOrchestrator] Image probe failed — auto-repair retry")
             #endif
             let retryResult = await autoRepairImage(originalInput: originalInput,
+                                                    history: history,
                                                     failureReason: req.prompt,
                                                     localKnowledgeContext: localKnowledgeContext,
                                                     hasMemoryHints: hasMemoryHints,
-                                                    turnIndex: turnIndex)
+                                                    turnIndex: turnIndex,
+                                                    feedbackDepth: feedbackDepth,
+                                                    turnStartedAt: turnStartedAt)
             if let retryResult = retryResult {
                 return retryResult
             }
@@ -254,11 +287,7 @@ final class TurnOrchestrator {
 
         // Handle pendingSlot from executor result (non-image)
         if let req = exec.pendingSlotRequest {
-            pendingSlot = PendingSlot(
-                slotName: req.slot,
-                prompt: req.prompt,
-                originalUserText: originalInput
-            )
+            pendingSlot = PendingSlot(slotName: req.slot, prompt: req.prompt, originalUserText: originalInput)
             result.triggerFollowUpCapture = true
         }
 
@@ -269,6 +298,14 @@ final class TurnOrchestrator {
                                   userInput: originalInput,
                                   provider: provider,
                                   localKnowledgeContext: localKnowledgeContext)
+        await applyToolResultFeedbackLoop(
+            &result,
+            originalInput: originalInput,
+            history: history,
+            provider: provider,
+            depth: feedbackDepth,
+            turnStartedAt: turnStartedAt
+        )
         rememberAssistantLines(result.appendedChat)
         return result
     }
@@ -278,10 +315,13 @@ final class TurnOrchestrator {
     /// Retries the LLM once with repair context when image URLs fail the probe.
     /// Uses same provider logic as routePlan: OpenAI only when configured, Ollama only as standalone.
     private func autoRepairImage(originalInput: String,
+                                 history: [ChatMessage],
                                  failureReason: String,
                                  localKnowledgeContext: LocalKnowledgeContext,
                                  hasMemoryHints: Bool,
-                                 turnIndex: Int) async -> TurnResult? {
+                                 turnIndex: Int,
+                                 feedbackDepth: Int,
+                                 turnStartedAt: Date) async -> TurnResult? {
         let repairReasons = [
             "The image URLs you provided are dead or don't serve image content. \(failureReason)",
             "Return 3 NEW direct image URLs from upload.wikimedia.org (preferred), images.unsplash.com, or images.pexels.com. URLs MUST end in .jpg, .png, .gif, or .webp. NEVER use example.com or placeholder domains."
@@ -292,15 +332,18 @@ final class TurnOrchestrator {
             print("[ROUTER] imageRepair via openai")
             #endif
             do {
-                let plan = try await withTimeout(8.0) {
+                let plan = try await withTimeout(openAIImageRepairTimeoutSeconds) {
                     try await self.openAIRouter.routePlan(originalInput, history: [], repairReasons: repairReasons)
                 }
                 return await executeImageRepair(plan,
                                                 originalInput: originalInput,
+                                                history: history,
                                                 provider: .openai,
                                                 localKnowledgeContext: localKnowledgeContext,
                                                 hasMemoryHints: hasMemoryHints,
-                                                turnIndex: turnIndex)
+                                                turnIndex: turnIndex,
+                                                feedbackDepth: feedbackDepth,
+                                                turnStartedAt: turnStartedAt)
             } catch {
                 #if DEBUG
                 print("[ROUTER] imageRepair openai failed: \(error.localizedDescription)")
@@ -316,10 +359,13 @@ final class TurnOrchestrator {
                 }
                 return await executeImageRepair(plan,
                                                 originalInput: originalInput,
+                                                history: history,
                                                 provider: .ollama,
                                                 localKnowledgeContext: localKnowledgeContext,
                                                 hasMemoryHints: hasMemoryHints,
-                                                turnIndex: turnIndex)
+                                                turnIndex: turnIndex,
+                                                feedbackDepth: feedbackDepth,
+                                                turnStartedAt: turnStartedAt)
             } catch {
                 #if DEBUG
                 print("[ROUTER] imageRepair ollama failed: \(error.localizedDescription)")
@@ -332,10 +378,13 @@ final class TurnOrchestrator {
 
     private func executeImageRepair(_ plan: Plan,
                                     originalInput: String,
+                                    history: [ChatMessage],
                                     provider: LLMProvider,
                                     localKnowledgeContext: LocalKnowledgeContext,
                                     hasMemoryHints: Bool,
-                                    turnIndex: Int) async -> TurnResult? {
+                                    turnIndex: Int,
+                                    feedbackDepth: Int,
+                                    turnStartedAt: Date) async -> TurnResult? {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput)
 
         // If the retry ALSO produced an image_url failure, give up
@@ -367,11 +416,7 @@ final class TurnOrchestrator {
         result.usedMemoryHints = hasMemoryHints
 
         if let req = exec.pendingSlotRequest {
-            pendingSlot = PendingSlot(
-                slotName: req.slot,
-                prompt: req.prompt,
-                originalUserText: originalInput
-            )
+            pendingSlot = PendingSlot(slotName: req.slot, prompt: req.prompt, originalUserText: originalInput)
             result.triggerFollowUpCapture = true
         }
 
@@ -382,13 +427,26 @@ final class TurnOrchestrator {
                                   userInput: originalInput,
                                   provider: provider,
                                   localKnowledgeContext: localKnowledgeContext)
+        await applyToolResultFeedbackLoop(
+            &result,
+            originalInput: originalInput,
+            history: history,
+            provider: provider,
+            depth: feedbackDepth,
+            turnStartedAt: turnStartedAt
+        )
         rememberAssistantLines(result.appendedChat)
         return result
     }
 
     // MARK: - Helpers
 
-    private func maybeRephraseRepeatedTalk(_ plan: Plan, userInput: String, history: [ChatMessage], provider: LLMProvider) async -> Plan {
+    private func maybeRephraseRepeatedTalk(_ plan: Plan,
+                                           userInput: String,
+                                           history: [ChatMessage],
+                                           provider: LLMProvider,
+                                           turnStartedAt: Date) async -> Plan {
+        guard elapsedMs(since: turnStartedAt) < maxRephraseBudgetMs else { return plan }
         guard let original = singleTalkLine(from: plan) else { return plan }
         guard isRepeatedAssistantLine(original, history: history) else { return plan }
         guard let rewritten = await requestRephrase(of: original, userInput: userInput, provider: provider) else {
@@ -409,7 +467,7 @@ final class TurnOrchestrator {
         switch provider {
         case .openai:
             do {
-                let plan = try await withTimeout(6.0) {
+                let plan = try await withTimeout(0.9) {
                     try await self.openAIRouter.routePlan(prompt, history: [])
                 }
                 guard let rewritten = singleTalkLine(from: plan) else { return nil }
@@ -422,7 +480,7 @@ final class TurnOrchestrator {
             }
         case .ollama:
             do {
-                let plan = try await withTimeout(4.0) {
+                let plan = try await withTimeout(0.8) {
                     try await self.ollamaRouter.routePlan(prompt, history: [])
                 }
                 guard let rewritten = singleTalkLine(from: plan) else { return nil }
@@ -567,6 +625,111 @@ final class TurnOrchestrator {
         }
     }
 
+    private func applyToolResultFeedbackLoop(_ result: inout TurnResult,
+                                             originalInput: String,
+                                             history: [ChatMessage],
+                                             provider: LLMProvider,
+                                             depth: Int,
+                                             turnStartedAt: Date) async {
+        guard depth < toolFeedbackLoopMaxDepth else { return }
+        guard elapsedMs(since: turnStartedAt) < maxToolFeedbackBudgetMs else { return }
+        guard shouldRunToolFeedbackLoop(result) else { return }
+        guard let synthesized = await synthesizeToolAwareAnswer(
+            from: result,
+            originalInput: originalInput,
+            history: history,
+            provider: provider
+        ) else { return }
+
+        let normalizedSynthesized = normalizeForComparison(synthesized)
+        let existing = result.appendedChat
+            .filter { $0.role == .assistant }
+            .map(\.text)
+            .map(normalizeForComparison)
+        guard !existing.contains(normalizedSynthesized) else { return }
+
+        let line = synthesized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        result.appendedChat.append(ChatMessage(role: .assistant, text: line, llmProvider: provider))
+        result.spokenLines.append(line)
+    }
+
+    private func shouldRunToolFeedbackLoop(_ result: TurnResult) -> Bool {
+        guard !result.executedToolSteps.isEmpty else { return false }
+        guard !result.triggerFollowUpCapture else { return false }
+        guard !result.appendedOutputs.isEmpty else { return false }
+
+        let assistantLines = result.appendedChat
+            .filter { $0.role == .assistant }
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard assistantLines.isEmpty else { return false }
+        return true
+    }
+
+    private func synthesizeToolAwareAnswer(from result: TurnResult,
+                                           originalInput: String,
+                                           history: [ChatMessage],
+                                           provider: LLMProvider) async -> String? {
+        let toolLines = result.executedToolSteps.map { step in
+            let argsPreview = step.args
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: ", ")
+            return "- \(step.name)(\(argsPreview))"
+        }.joined(separator: "\n")
+
+        let outputLines = result.appendedOutputs.enumerated().map { index, item in
+            let clipped = item.payload.replacingOccurrences(of: "\n", with: " ")
+            let preview = clipped.count > 220 ? String(clipped.prefix(217)) + "..." : clipped
+            return "- output[\(index + 1)] kind=\(item.kind.rawValue): \(preview)"
+        }.joined(separator: "\n")
+
+        let synthesisPrompt = """
+        [TOOL_RESULT_FEEDBACK]
+        User request: \(originalInput)
+        Executed tools:
+        \(toolLines.isEmpty ? "- (none)" : toolLines)
+        Tool outputs:
+        \(outputLines.isEmpty ? "- (none)" : outputLines)
+
+        Write one concise final answer for the user using the tool results above.
+        Return TALK JSON only. Do NOT call tools.
+        """
+
+        let plan: Plan?
+        switch provider {
+        case .openai:
+            plan = try? await withTimeout(0.9) {
+                try await self.openAIRouter.routePlan(synthesisPrompt, history: history)
+            }
+        case .ollama:
+            plan = try? await withTimeout(0.8) {
+                try await self.ollamaRouter.routePlan(synthesisPrompt, history: history)
+            }
+        case .none:
+            plan = nil
+        }
+
+        guard let plan else { return nil }
+        return talkOnlyLine(from: plan)
+    }
+
+    private func talkOnlyLine(from plan: Plan) -> String? {
+        if plan.steps.count == 1, case .talk(let say) = plan.steps[0] {
+            return say.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let talkLines = plan.steps.compactMap { step -> String? in
+            guard case .talk(let say) = step else { return nil }
+            return say.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+
+        guard talkLines.count == 1 else { return nil }
+        return talkLines[0]
+    }
+
     private func applyResponsePolish(_ result: inout TurnResult, plan: Plan, hasMemoryHints: Bool, turnIndex: Int) {
         guard !result.appendedChat.isEmpty else { return }
 
@@ -610,7 +773,7 @@ final class TurnOrchestrator {
 
     private func isMemoryAckOnCooldown(_ turnIndex: Int) -> Bool {
         guard let last = lastMemoryAckTurn else { return false }
-        return (turnIndex - last) < memoryAckCooldownTurns
+        return (turnIndex - last) <= memoryAckCooldownTurns
     }
 
     private func isTalkOnlyPlan(_ plan: Plan) -> Bool {
@@ -704,7 +867,7 @@ final class TurnOrchestrator {
     }
 
     private func buildLocalKnowledgeContext(for input: String) -> LocalKnowledgeContext {
-        let memoryRows = MemoryStore.shared.memoryContext(query: input, maxItems: 6, maxChars: 900)
+        let memoryRows = fastMemoryHints(for: input, maxItems: 4, maxChars: 500)
         let memoryItems = memoryRows.map { row in
             KnowledgeSourceSnippet(
                 kind: .memory,
@@ -714,10 +877,15 @@ final class TurnOrchestrator {
                 url: nil
             )
         }
-        let websiteItems = relevantWebsiteKnowledgeSnippets(query: input, maxItems: 6)
-        let selfLearningItems = relevantSelfLearningSnippets(query: input, maxItems: 4, maxChars: 520)
+        return LocalKnowledgeContext(items: dedupeKnowledgeSnippets(memoryItems))
+    }
 
-        return LocalKnowledgeContext(items: dedupeKnowledgeSnippets(memoryItems + websiteItems + selfLearningItems))
+    private func fastMemoryHints(for query: String, maxItems: Int, maxChars: Int) -> [MemoryRow] {
+        MemoryStore.shared.memoryContext(
+            query: query,
+            maxItems: max(1, maxItems),
+            maxChars: max(120, maxChars)
+        )
     }
 
     private func relevantWebsiteKnowledgeSnippets(query: String, maxItems: Int) -> [KnowledgeSourceSnippet] {
@@ -826,6 +994,17 @@ final class TurnOrchestrator {
         #if DEBUG
         print("[ROUTER] provider=\(provider) reason=\(reason) ms=\(ms) ok=\(ok)")
         #endif
+    }
+
+    private func elapsedMs(since start: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(start) * 1000))
+    }
+
+    private func normalizedSlotSet(from raw: String) -> Set<String> {
+        let values = raw.split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        return Set(values)
     }
 
     private func friendlyFallbackPlan(_ error: Error? = nil) -> Plan {

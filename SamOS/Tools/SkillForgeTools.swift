@@ -7,7 +7,7 @@ struct StartSkillForgeTool: Tool {
     let description = "Queue a new capability/skill build for Sam. Use when user asks Sam to build/create/learn a capability. Args: 'goal' (required), 'constraints' (optional). Enqueues into the forge queue; processed FIFO."
 
     func execute(args: [String: String]) -> OutputItem {
-        let goal = args["goal"] ?? ""
+        let goal = (args["goal"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !goal.isEmpty else {
             return OutputItem(kind: .markdown, payload: "I need a goal to learn. What should I build?")
         }

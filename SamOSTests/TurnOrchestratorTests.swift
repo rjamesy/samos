@@ -68,20 +68,20 @@ final class TurnOrchestratorTests: XCTestCase {
     // MARK: - PendingSlot Loop Breaker
 
     @MainActor
-    func testLoopBreakerClearsAfter2Attempts() async {
+    func testLoopBreakerClearsAfter3Attempts() async {
         let orchestrator = TurnOrchestrator()
 
-        // Simulate a pending slot with 2 failed attempts
+        // Simulate a pending slot with 3 failed attempts
         orchestrator.pendingSlot = PendingSlot(
             slotName: "time",
             prompt: "What time?",
             originalUserText: "set an alarm",
-            attempts: 2
+            attempts: 3
         )
 
         let result = await orchestrator.processTurn("something", history: [])
 
-        XCTAssertNil(orchestrator.pendingSlot, "Should clear after 2 attempts")
+        XCTAssertNil(orchestrator.pendingSlot, "Should clear after 3 attempts")
         XCTAssertEqual(result.appendedChat.count, 1)
         XCTAssertTrue(result.appendedChat[0].text.contains("rephrase"))
     }

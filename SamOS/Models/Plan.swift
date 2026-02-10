@@ -55,7 +55,7 @@ enum PlanStep: Decodable, Equatable {
     case delegate(task: String, context: String?, say: String?)
 
     private enum CodingKeys: String, CodingKey {
-        case step, say, name, args, slot, prompt, task, context
+        case step, say, name, args, slot, slots, prompt, task, context
     }
 
     init(from decoder: Decoder) throws {
@@ -72,7 +72,7 @@ enum PlanStep: Decodable, Equatable {
             let say = try container.decodeIfPresent(String.self, forKey: .say)
             self = .tool(name: name, args: args, say: say)
         case "ask":
-            let slot = try container.decode(String.self, forKey: .slot)
+            let slot = try Self.decodeAskSlot(from: container)
             let prompt = try container.decode(String.self, forKey: .prompt)
             self = .ask(slot: slot, prompt: prompt)
         case "delegate":
@@ -92,6 +92,31 @@ enum PlanStep: Decodable, Equatable {
     var toolArgsAsStrings: [String: String] {
         guard case .tool(_, let args, _) = self else { return [:] }
         return args.mapValues { $0.stringValue }
+    }
+
+    private static func decodeAskSlot(from container: KeyedDecodingContainer<CodingKeys>) throws -> String {
+        let single = try container.decodeIfPresent(String.self, forKey: .slot) ?? ""
+        let list = try container.decodeIfPresent([String].self, forKey: .slots) ?? []
+
+        let normalizedList = list
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !normalizedList.isEmpty {
+            return normalizedList.joined(separator: ",")
+        }
+
+        let splitSingle = single.split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !splitSingle.isEmpty {
+            return splitSingle.joined(separator: ",")
+        }
+
+        throw DecodingError.dataCorruptedError(
+            forKey: .slot,
+            in: container,
+            debugDescription: "Ask step requires non-empty slot or slots."
+        )
     }
 }
 

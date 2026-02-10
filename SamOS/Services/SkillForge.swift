@@ -33,7 +33,9 @@ final class SkillForge {
         onProgress(job)
 
         let draft = draftSkillSpec(goal: goal, missing: missing)
-        let toolNames = ToolRegistry.shared.allTools.map { $0.name }
+        let sortedTools = ToolRegistry.shared.allTools.sorted { $0.name < $1.name }
+        let toolNames = sortedTools.map { $0.name }
+        let toolCatalog = sortedTools.map { "\($0.name): \($0.description)" }
 
         // Step 1b: Ask OpenAI for specific capability requirements.
         job.log("Asking OpenAI for specific capability requirements...")
@@ -44,7 +46,7 @@ final class SkillForge {
             requirements = try await refiner.fetchCapabilityRequirements(
                 goal: goal,
                 missing: missing,
-                toolList: toolNames
+                toolList: toolCatalog
             ) { exchange in
                 let header: String
                 switch exchange.phase {
@@ -113,7 +115,7 @@ final class SkillForge {
                 goal: goal,
                 draft: draft,
                 requirements: requirements,
-                toolList: toolNames
+                toolList: toolCatalog
             ) { exchange in
                 let header: String
                 switch exchange.phase {
@@ -139,14 +141,14 @@ final class SkillForge {
         job.log("Requesting OpenAI implementation steps and verification...")
         onProgress(job)
 
-        let review: OpenAIRefinerClient.ImplementationReview
+        var review: OpenAIRefinerClient.ImplementationReview
         do {
             review = try await refiner.reviewSkillSpec(
                 goal: goal,
                 missing: missing,
                 spec: refined,
                 requirements: requirements,
-                toolList: toolNames
+                toolList: toolCatalog
             ) { exchange in
                 let header: String
                 switch exchange.phase {
@@ -183,6 +185,91 @@ final class SkillForge {
             }
         }
         onProgress(job)
+
+        let needsRepairRetry = !review.approved || review.implementationSteps.isEmpty
+        if needsRepairRetry {
+            job.log("OpenAI rejected the first spec. Asking OpenAI to plan and repair the missing parts...")
+            if !review.summary.isEmpty {
+                job.log("Repair target: \(review.summary)")
+            }
+            onProgress(job)
+
+            do {
+                refined = try await refiner.repairSkillSpecAfterReview(
+                    goal: goal,
+                    missing: missing,
+                    draft: refined,
+                    requirements: requirements,
+                    review: review,
+                    toolList: toolCatalog
+                ) { exchange in
+                    let header: String
+                    switch exchange.phase {
+                    case .request:
+                        header = "[OpenAI Request]"
+                    case .response:
+                        header = "[OpenAI Response]"
+                    case .error:
+                        header = "[OpenAI Error]"
+                    }
+                    job.log("\(header)\n\(exchange.content)")
+                    onProgress(job)
+                }
+                job.log("OpenAI repair spec: \(refined.name) with \(refined.steps.count) steps")
+                onProgress(job)
+            } catch {
+                job.fail("OpenAI repair failed: \(error.localizedDescription)")
+                currentJob = job
+                onProgress(job)
+                throw ForgeError.refinementFailed(error.localizedDescription)
+            }
+
+            job.log("Re-running OpenAI implementation review after repair...")
+            onProgress(job)
+            do {
+                review = try await refiner.reviewSkillSpec(
+                    goal: goal,
+                    missing: missing,
+                    spec: refined,
+                    requirements: requirements,
+                    toolList: toolCatalog
+                ) { exchange in
+                    let header: String
+                    switch exchange.phase {
+                    case .request:
+                        header = "[OpenAI Request]"
+                    case .response:
+                        header = "[OpenAI Response]"
+                    case .error:
+                        header = "[OpenAI Error]"
+                    }
+                    job.log("\(header)\n\(exchange.content)")
+                    onProgress(job)
+                }
+            } catch {
+                job.fail("OpenAI post-repair review failed: \(error.localizedDescription)")
+                currentJob = job
+                onProgress(job)
+                throw ForgeError.reviewFailed(error.localizedDescription)
+            }
+
+            if !review.summary.isEmpty {
+                job.log("OpenAI review summary (retry): \(review.summary)")
+            }
+            if !review.implementationSteps.isEmpty {
+                job.log("OpenAI implementation steps (retry):")
+                for (index, step) in review.implementationSteps.enumerated() {
+                    job.log("\(index + 1). \(step)")
+                }
+            }
+            if !review.blockers.isEmpty {
+                job.log("OpenAI blockers (retry):")
+                for blocker in review.blockers {
+                    job.log("- \(blocker)")
+                }
+            }
+            onProgress(job)
+        }
 
         if !review.approved {
             let reason = review.summary.isEmpty ? "OpenAI did not approve this capability implementation." : review.summary
@@ -280,16 +367,20 @@ final class SkillForge {
     /// Creates a basic draft skill spec from the goal.
     private func draftSkillSpec(goal: String, missing: String) -> SkillSpec {
         let id = "forged_\(UUID().uuidString.prefix(8).lowercased())"
-        let name = goal.prefix(30).trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMissing = missing.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveGoal = !trimmedGoal.isEmpty ? trimmedGoal : (!trimmedMissing.isEmpty ? trimmedMissing : "new capability")
+        let name = effectiveGoal.prefix(30).trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = name.isEmpty ? "New Capability" : String(name)
 
         return SkillSpec(
             id: id,
-            name: String(name),
+            name: safeName,
             version: 1,
-            triggerPhrases: [goal.lowercased()],
+            triggerPhrases: [effectiveGoal.lowercased()],
             slots: [],
             steps: [
-                SkillSpec.StepDef(action: "talk", args: ["say": "I'm working on: \(goal)"])
+                SkillSpec.StepDef(action: "talk", args: ["say": "I'm working on: \(effectiveGoal)"])
             ],
             onTrigger: nil
         )
@@ -301,7 +392,10 @@ final class SkillForge {
     func validateSpec(_ spec: SkillSpec, knownToolNames: Set<String>) -> String? {
         if spec.id.isEmpty { return "Skill ID is empty" }
         if spec.name.isEmpty { return "Skill name is empty" }
-        if spec.triggerPhrases.isEmpty { return "No trigger phrases" }
+        let nonEmptyTriggers = spec.triggerPhrases
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if nonEmptyTriggers.isEmpty { return "No trigger phrases" }
         if spec.steps.isEmpty { return "No steps defined" }
 
         let executableSteps = spec.steps.filter { !$0.action.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.action != "talk" }

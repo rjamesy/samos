@@ -473,14 +473,14 @@ final class OllamaRouterTests: XCTestCase {
 
     // MARK: - rescueAsTalk
 
-    func testRescueHelloHiAsTalk() throws {
-        // {"Hello":"Hi!"} has a conversational key
-        let plan = try router.parsePlanOrAction(from: #"{"Hello":"Hi!"}"#)
-        XCTAssertEqual(plan.steps.count, 1)
-        if case .talk(let say) = plan.steps[0] {
-            XCTAssertEqual(say, "Hi!")
-        } else {
-            XCTFail("Expected talk step")
+    func testJsonWithoutActionThrowsSchemaMismatch() throws {
+        let text = #"{"Hello":"Hi!"}"#
+        XCTAssertThrowsError(try router.parsePlanOrAction(from: text)) { error in
+            guard case OllamaRouter.OllamaError.schemaMismatch(_, let reasons) = error else {
+                return XCTFail("Expected .schemaMismatch, got \(error)")
+            }
+            XCTAssertTrue(reasons.joined(separator: " ").contains("action"),
+                          "Expected missing-action diagnostic, got: \(reasons)")
         }
     }
 
@@ -584,11 +584,12 @@ final class OllamaRouterTransportTests: XCTestCase {
                       "Repair call should include [REPAIR] block")
     }
 
-    // MARK: - Rescue Hello:Hi (whitelisted conversational key)
+    // MARK: - Repair on no-action JSON
 
-    func testRescueHelloHi() async throws {
+    func testRepairOnJsonWithoutAction() async throws {
         let fake = FakeTransport(responses: [
-            #"{"Hello":"Hi!"}"#
+            #"{"Hello":"Hi!"}"#,
+            #"{"action":"TALK","say":"Hi!"}"#
         ])
         let router = OllamaRouter(transport: fake)
 
@@ -599,8 +600,8 @@ final class OllamaRouterTransportTests: XCTestCase {
         } else {
             XCTFail("Expected talk step")
         }
-        // Should rescue on first call — no repair needed
-        XCTAssertEqual(fake.chatCallLog.count, 1)
+        // Should perform repair retry due to missing action field
+        XCTAssertEqual(fake.chatCallLog.count, 2)
     }
 
     // MARK: - Repair on non-schema JSON (time/offset — not whitelisted)

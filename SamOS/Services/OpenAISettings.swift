@@ -17,6 +17,7 @@ enum OpenAISettings {
         static let realtimeUseClassicSTT = "openai_realtimeUseClassicSTT"
         static let realtimeModel = "openai_realtimeModel"
         static let realtimeVoice = "openai_realtimeVoice"
+        static let youtubeAPIKey = "youtube_api_key"
     }
 
     private static let defaults = UserDefaults.standard
@@ -126,6 +127,32 @@ enum OpenAISettings {
     static var realtimeVoice: String {
         get { defaults.string(forKey: Key.realtimeVoice) ?? "alloy" }
         set { defaults.set(newValue, forKey: Key.realtimeVoice) }
+    }
+
+    static var youtubeAPIKey: String {
+        get {
+            let stored = defaults.string(forKey: Key.youtubeAPIKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !stored.isEmpty { return stored }
+            #if DEBUG
+            if let envKey = ProcessInfo.processInfo.environment["YOUTUBE_API_KEY"], !envKey.isEmpty {
+                return envKey
+            }
+            #endif
+            return ""
+        }
+        set {
+            let normalized = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.isEmpty {
+                defaults.removeObject(forKey: Key.youtubeAPIKey)
+            } else {
+                defaults.set(normalized, forKey: Key.youtubeAPIKey)
+            }
+        }
+    }
+
+    static var isYouTubeConfigured: Bool {
+        !youtubeAPIKey.isEmpty
     }
 
     // MARK: - Validation

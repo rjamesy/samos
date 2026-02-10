@@ -273,6 +273,16 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertNotNil(tool, "ToolRegistry must contain find_image with exact name")
     }
 
+    func testToolRegistryContainsFindVideo() {
+        let tool = ToolRegistry.shared.get("find_video")
+        XCTAssertNotNil(tool, "ToolRegistry must contain find_video with exact name")
+    }
+
+    func testToolRegistryContainsFindFiles() {
+        let tool = ToolRegistry.shared.get("find_files")
+        XCTAssertNotNil(tool, "ToolRegistry must contain find_files with exact name")
+    }
+
     func testShowTextAcceptsTextAlias() {
         guard let tool = ToolRegistry.shared.get("show_text") else {
             return XCTFail("show_text tool missing")
@@ -333,6 +343,92 @@ final class ImageParsingTests: XCTestCase {
         }
         XCTAssertEqual(dict["kind"] as? String, "prompt")
         XCTAssertEqual(dict["slot"] as? String, "query")
+    }
+
+    func testFindVideoMissingQueryReturnsPromptPayload() {
+        let toolAction = ToolAction(name: "find_video", args: [:])
+        let output = ToolsRuntime.shared.execute(toolAction)
+        XCTAssertNotNil(output)
+        XCTAssertEqual(output?.kind, .markdown)
+
+        guard let payload = output?.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            return XCTFail("Expected structured prompt payload JSON from find_video")
+        }
+        XCTAssertEqual(dict["kind"] as? String, "prompt")
+        XCTAssertEqual(dict["slot"] as? String, "query")
+    }
+
+    func testFindFilesMatchesPartialNameAndType() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("FindFilesTool_\(UUID().uuidString)", isDirectory: true)
+        let downloads = base.appendingPathComponent("Downloads", isDirectory: true)
+        let documents = base.appendingPathComponent("Documents", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let wanted = downloads.appendingPathComponent("BestReport-final.pdf")
+        let other = documents.appendingPathComponent("BestReport-notes.docx")
+        let noise = documents.appendingPathComponent("shopping-list.txt")
+        try Data("pdf".utf8).write(to: wanted)
+        try Data("docx".utf8).write(to: other)
+        try Data("txt".utf8).write(to: noise)
+
+        let tool = FindFilesTool(
+            fileManager: .default,
+            directoryProvider: { [downloads, documents] }
+        )
+        let output = tool.execute(args: ["name": "bestreport", "type": "pdf"])
+        XCTAssertEqual(output.kind, .markdown)
+
+        guard let data = output.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let formatted = dict["formatted"] as? String else {
+            return XCTFail("Expected structured markdown payload from find_files")
+        }
+
+        XCTAssertTrue(formatted.contains("BestReport-final.pdf"))
+        XCTAssertFalse(formatted.contains("BestReport-notes.docx"))
+        XCTAssertFalse(formatted.contains("shopping-list.txt"))
+    }
+
+    func testFindFilesReportsWhenNoMatches() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("FindFilesToolEmpty_\(UUID().uuidString)", isDirectory: true)
+        let downloads = base.appendingPathComponent("Downloads", isDirectory: true)
+        let documents = base.appendingPathComponent("Documents", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try Data("hello".utf8).write(to: downloads.appendingPathComponent("notes.txt"))
+
+        let tool = FindFilesTool(
+            fileManager: .default,
+            directoryProvider: { [downloads, documents] }
+        )
+        let output = tool.execute(args: ["query": "find all pdfs"])
+        XCTAssertEqual(output.kind, .markdown)
+
+        guard let data = output.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let spoken = dict["spoken"] as? String,
+              let formatted = dict["formatted"] as? String else {
+            return XCTFail("Expected structured markdown payload from find_files")
+        }
+
+        XCTAssertTrue(spoken.contains("couldn't find"))
+        XCTAssertTrue(formatted.contains("No matching files found."))
+    }
+
+    func testFindFilesPreferredHomeDirectoryStripsContainerPath() {
+        let containerHome = URL(fileURLWithPath: "/Users/rjamesy/Library/Containers/com.samos.SamOS/Data", isDirectory: true)
+        let resolved = FindFilesTool.preferredHomeDirectory(for: containerHome)
+        XCTAssertEqual(resolved.path, "/Users/rjamesy")
+
+        let downloads = resolved.appendingPathComponent("Downloads", isDirectory: true)
+        let documents = resolved.appendingPathComponent("Documents", isDirectory: true)
+        XCTAssertEqual(downloads.path, "/Users/rjamesy/Downloads")
+        XCTAssertEqual(documents.path, "/Users/rjamesy/Documents")
     }
 
     func testUnknownToolReturnsErrorOutput() {

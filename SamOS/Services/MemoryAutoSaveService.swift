@@ -606,6 +606,15 @@ final class SelfLearningService {
     static let shared = SelfLearningService()
 
     private let store: SelfLearningStore
+    private struct TurnPatternObservation {
+        let userShort: Bool
+        let userCorrection: Bool
+        let userAskedQuestion: Bool
+        let assistantAskedQuestion: Bool
+        let assistantLongWithoutCanvas: Bool
+    }
+    private var recentTurnWindow: [TurnPatternObservation] = []
+    private let maxTurnWindow = 12
 
     init(store: SelfLearningStore = .shared) {
         self.store = store
@@ -681,6 +690,14 @@ final class SelfLearningService {
                 confidence: 0.88
             )
         }
+
+        recordTurnPattern(
+            userMessage: user,
+            assistantMessage: assistant,
+            hadCanvasOutput: hadCanvasOutput,
+            previousAssistantMessage: previousAssistantMessage
+        )
+        detectMultiTurnPatterns()
     }
 
     private func isShortReply(_ text: String) -> Bool {
@@ -705,6 +722,72 @@ final class SelfLearningService {
             "could be", "approximately", "can't confirm", "cannot confirm", "unknown"
         ]
         return markers.contains { lower.contains($0) }
+    }
+
+    private func recordTurnPattern(userMessage: String,
+                                   assistantMessage: String,
+                                   hadCanvasOutput: Bool,
+                                   previousAssistantMessage: String?) {
+        let observation = TurnPatternObservation(
+            userShort: isShortReply(userMessage),
+            userCorrection: isCorrectionSignal(userMessage),
+            userAskedQuestion: questionMarkCount(in: userMessage) > 0,
+            assistantAskedQuestion: isSingleQuestion(assistantMessage),
+            assistantLongWithoutCanvas: assistantMessage.count > 220 && !hadCanvasOutput
+        )
+        recentTurnWindow.append(observation)
+        if recentTurnWindow.count > maxTurnWindow {
+            recentTurnWindow.removeFirst(recentTurnWindow.count - maxTurnWindow)
+        }
+
+        if isSingleQuestion(previousAssistantMessage), isShortReply(userMessage) {
+            store.recordLesson(
+                "Brief user replies right after your question usually answer that question; continue the same context unless explicitly redirected.",
+                category: .continuity,
+                confidence: 0.90
+            )
+        }
+    }
+
+    private func detectMultiTurnPatterns() {
+        let recent = Array(recentTurnWindow.suffix(6))
+        guard !recent.isEmpty else { return }
+
+        let correctionCount = recent.filter(\.userCorrection).count
+        if correctionCount >= 2 {
+            store.recordLesson(
+                "If corrections repeat across nearby turns, switch to explicit clarification mode before continuing.",
+                category: .clarity,
+                confidence: 0.88
+            )
+        }
+
+        let continuitySignals = recent.filter { $0.assistantAskedQuestion && $0.userShort }.count
+        if continuitySignals >= 2 {
+            store.recordLesson(
+                "Across multi-turn exchanges, short replies after your question usually continue the active context.",
+                category: .continuity,
+                confidence: 0.92
+            )
+        }
+
+        let longDumpCount = recent.filter(\.assistantLongWithoutCanvas).count
+        if longDumpCount >= 2 {
+            store.recordLesson(
+                "When long responses repeat in nearby turns, keep spoken replies brief and move detail into canvas output.",
+                category: .brevity,
+                confidence: 0.91
+            )
+        }
+
+        let followupNeedCount = recent.filter { !$0.assistantAskedQuestion && $0.userAskedQuestion }.count
+        if followupNeedCount >= 3 {
+            store.recordLesson(
+                "When users repeatedly ask follow-up questions after answers, include one concise optional follow-up question.",
+                category: .followup,
+                confidence: 0.82
+            )
+        }
     }
 
     private func isCorrectionSignal(_ text: String) -> Bool {
@@ -733,8 +816,72 @@ struct WebsiteLearningRecord: Identifiable, Codable, Equatable {
     var title: String
     var summary: String
     var highlights: [String]
+    var chunks: [String]
     let createdAt: Date
     var updatedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case canonicalURL
+        case url
+        case host
+        case title
+        case summary
+        case highlights
+        case chunks
+        case createdAt
+        case updatedAt
+    }
+
+    init(id: UUID,
+         canonicalURL: String,
+         url: String,
+         host: String,
+         title: String,
+         summary: String,
+         highlights: [String],
+         chunks: [String],
+         createdAt: Date,
+         updatedAt: Date) {
+        self.id = id
+        self.canonicalURL = canonicalURL
+        self.url = url
+        self.host = host
+        self.title = title
+        self.summary = summary
+        self.highlights = highlights
+        self.chunks = chunks
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        canonicalURL = try container.decode(String.self, forKey: .canonicalURL)
+        url = try container.decode(String.self, forKey: .url)
+        host = try container.decode(String.self, forKey: .host)
+        title = try container.decode(String.self, forKey: .title)
+        summary = try container.decode(String.self, forKey: .summary)
+        highlights = try container.decodeIfPresent([String].self, forKey: .highlights) ?? []
+        chunks = try container.decodeIfPresent([String].self, forKey: .chunks) ?? []
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(canonicalURL, forKey: .canonicalURL)
+        try container.encode(url, forKey: .url)
+        try container.encode(host, forKey: .host)
+        try container.encode(title, forKey: .title)
+        try container.encode(summary, forKey: .summary)
+        try container.encode(highlights, forKey: .highlights)
+        try container.encode(chunks, forKey: .chunks)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
 }
 
 /// Persistent store for website-learning summaries that can be reused in future turns.
@@ -765,6 +912,7 @@ final class WebsiteLearningStore {
                          title: String,
                          summary: String,
                          highlights: [String],
+                         chunks: [String],
                          now: Date = Date()) -> WebsiteLearningRecord {
         let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let canonical = canonicalizeURL(cleanedURL) ?? cleanedURL
@@ -774,6 +922,9 @@ final class WebsiteLearningStore {
         let safeHighlights = highlights
             .map { sanitizeSingleLine($0, fallback: "") }
             .filter { !$0.isEmpty }
+        let safeChunks = chunks
+            .map { sanitizeChunk($0) }
+            .filter { !$0.isEmpty }
 
         return queue.sync {
             if let idx = records.firstIndex(where: { $0.canonicalURL == canonical }) {
@@ -781,6 +932,7 @@ final class WebsiteLearningStore {
                 updated.title = safeTitle
                 updated.summary = safeSummary
                 updated.highlights = safeHighlights
+                updated.chunks = safeChunks
                 updated.updatedAt = now
                 records[idx] = updated
                 sortRecordsNewestFirst()
@@ -796,6 +948,7 @@ final class WebsiteLearningStore {
                 title: safeTitle,
                 summary: safeSummary,
                 highlights: safeHighlights,
+                chunks: safeChunks,
                 createdAt: now,
                 updatedAt: now
             )
@@ -804,6 +957,22 @@ final class WebsiteLearningStore {
             saveRecords(records)
             return record
         }
+    }
+
+    @discardableResult
+    func saveLearnedPage(url: String,
+                         title: String,
+                         summary: String,
+                         highlights: [String],
+                         now: Date = Date()) -> WebsiteLearningRecord {
+        saveLearnedPage(
+            url: url,
+            title: title,
+            summary: summary,
+            highlights: highlights,
+            chunks: [],
+            now: now
+        )
     }
 
     func recentRecords(limit: Int = 10) -> [WebsiteLearningRecord] {
@@ -842,17 +1011,39 @@ final class WebsiteLearningStore {
         queue.sync {
             guard !records.isEmpty else { return [] }
 
+            struct WebsiteContextItem {
+                let text: String
+                let updatedAt: Date
+            }
+
+            var candidates: [WebsiteContextItem] = []
+            candidates.reserveCapacity(records.count * 4)
+            for record in records {
+                candidates.append(
+                    WebsiteContextItem(
+                        text: "[web \(record.host)] \(record.title): \(record.summary)",
+                        updatedAt: record.updatedAt
+                    )
+                )
+                for chunk in record.chunks.prefix(24) {
+                    candidates.append(
+                        WebsiteContextItem(
+                            text: "[web \(record.host)] \(record.title): \(chunk)",
+                            updatedAt: record.updatedAt
+                        )
+                    )
+                }
+            }
+
             let ranked = LocalKnowledgeRetriever.rank(
                 query: query,
-                items: records,
-                text: { record in
-                    "\(record.title) \(record.summary) \(record.highlights.joined(separator: " ")) \(record.host)"
+                items: candidates,
+                text: { item in
+                    item.text
                 },
                 recencyDate: { $0.updatedAt },
-                extraBoost: { record in
-                    let highlightBoost = min(0.09, Double(record.highlights.count) * 0.02)
-                    let summaryBoost = min(0.06, Double(record.summary.count) / 800.0)
-                    return highlightBoost + summaryBoost
+                extraBoost: { item in
+                    min(0.08, Double(item.text.count) / 1000.0)
                 },
                 limit: max(1, maxItems * 4),
                 minScore: 0.08
@@ -863,9 +1054,9 @@ final class WebsiteLearningStore {
             let cappedItems = max(1, maxItems)
 
             for entry in ranked {
-                let record = entry.item
+                let item = entry.item
                 guard selected.count < cappedItems else { break }
-                let rawLine = "[web \(record.host)] \(record.title): \(record.summary)"
+                let rawLine = item.text
                 let line = rawLine.count > 220 ? String(rawLine.prefix(217)) + "..." : rawLine
                 if selected.isEmpty {
                     guard line.count <= maxChars else { continue }
@@ -896,6 +1087,17 @@ final class WebsiteLearningStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if compact.isEmpty { return fallback }
         return String(compact.prefix(260))
+    }
+
+    private func sanitizeChunk(_ text: String) -> String {
+        let compact = text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !compact.isEmpty else { return "" }
+        return String(compact.prefix(420))
     }
 
     private func canonicalizeURL(_ raw: String) -> String? {

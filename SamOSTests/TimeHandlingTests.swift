@@ -330,11 +330,13 @@ final class TimeHandlingTests: XCTestCase {
         let slotMsg = messages[1]
         XCTAssertEqual(slotMsg["role"], "system")
         XCTAssertTrue(slotMsg["content"]!.contains("PENDING_SLOT"),
-                       "Should contain pending slot block")
+                      "Should contain pending slot block")
         XCTAssertTrue(slotMsg["content"]!.contains("What time is it in America?"),
                        "Should contain original user text")
         XCTAssertTrue(slotMsg["content"]!.contains("Which state?"),
-                       "Should contain Sam's prompt")
+                      "Should contain Sam's prompt")
+        XCTAssertTrue(slotMsg["content"]!.contains("Slot names"),
+                      "Should include slot names label")
         XCTAssertTrue(slotMsg["content"]!.contains("Alabama"),
                        "Should contain user's reply")
     }

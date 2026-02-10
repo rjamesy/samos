@@ -91,6 +91,19 @@ final class MemoryTests: XCTestCase {
         XCTAssertFalse(deleted)
     }
 
+    func testDeleteMemoryPrefixWithQuoteDoesNotDeleteRows() {
+        let content = "Injection guard \(UUID().uuidString)"
+        guard let row = MemoryStore.shared.addMemory(type: .fact, content: content) else {
+            return XCTFail("Failed to add memory")
+        }
+        defer { MemoryStore.shared.deleteMemory(idOrPrefix: row.id.uuidString) }
+
+        let deleted = MemoryStore.shared.deleteMemory(idOrPrefix: "' OR 1=1 --")
+        XCTAssertFalse(deleted, "Quoted prefix should not match any record")
+        XCTAssertTrue(MemoryStore.shared.listMemories().contains(where: { $0.id == row.id }),
+                      "Original row should remain active")
+    }
+
     func testFilterByType() {
         let factContent = "Fact filter test \(UUID().uuidString)"
         let noteContent = "Note filter test \(UUID().uuidString)"

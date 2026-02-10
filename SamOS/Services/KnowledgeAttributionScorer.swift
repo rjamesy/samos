@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 enum KnowledgeEvidenceKind: String, Equatable, Codable {
     case memory
@@ -321,8 +322,33 @@ struct RetrievalRankedItem<T> {
 }
 
 enum LocalKnowledgeRetriever {
+    private static let defaultHashDimension = 192
+    // Prefer real on-device semantic vectors when available, with hashed fallback.
+    private static let semanticEmbedding: NLEmbedding? = {
+        NLEmbedding.wordEmbedding(for: .english)
+    }()
+    private static let semanticDimension = semanticEmbedding?.dimension ?? defaultHashDimension
+    private static let retrievalQueue = DispatchQueue(label: "LocalKnowledgeRetriever.cache")
+    private static var idfCache: [String: [String: Double]] = [:]
+    private static var queryExpansionCache: [String: [String]] = [:]
+    private static let expansionFallbackMap: [String: [String]] = [
+        "dog": ["canine", "puppy", "pet"],
+        "cat": ["feline", "kitten", "pet"],
+        "coffee": ["espresso", "caffeine", "brew"],
+        "beer": ["brewing", "fermentation", "ale"],
+        "weather": ["forecast", "temperature", "rain"],
+        "recipe": ["ingredients", "cooking", "steps"],
+        "camera": ["photo", "image", "visual"]
+    ]
+
     static func tokens(from text: String) -> [String] {
         tokenize(text, includeBigrams: false)
+    }
+
+    static func expandedQueryTokens(from query: String) -> [String] {
+        let base = tokenize(query, includeBigrams: false)
+        let expanded = expandedTokens(from: base)
+        return uniqueTokens(base + expanded)
     }
 
     static func rank<T>(
@@ -332,11 +358,14 @@ enum LocalKnowledgeRetriever {
         recencyDate: ((T) -> Date?)? = nil,
         extraBoost: (T) -> Double = { _ in 0 },
         limit: Int? = nil,
-        minScore: Double = 0.12
+        minScore: Double = 0.12,
+        requireTokenOverlap: Bool = false
     ) -> [RetrievalRankedItem<T>] {
         guard !items.isEmpty else { return [] }
 
-        let queryTokens = tokenize(query, includeBigrams: false)
+        let baseQueryTokens = tokenize(query, includeBigrams: false)
+        let expandedQueryTokens = expandedTokens(from: baseQueryTokens)
+        let queryTokens = uniqueTokens(baseQueryTokens + expandedQueryTokens)
         let queryBigrams = bigrams(queryTokens)
         let queryVector = embeddingVector(from: queryTokens + queryBigrams)
 
@@ -393,6 +422,7 @@ enum LocalKnowledgeRetriever {
             }
 
             guard final >= minScore else { continue }
+            if requireTokenOverlap && sharedCount == 0 { continue }
             guard sharedCount > 0 || semantic >= 0.28 else { continue }
 
             ranked.append(
@@ -424,17 +454,69 @@ enum LocalKnowledgeRetriever {
     private static func tokenize(_ text: String, includeBigrams: Bool) -> [String] {
         let base = text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { token in
-                let normalized = normalizeToken(token)
-                return !normalized.isEmpty && normalized.count > 1 && !stopwords.contains(normalized)
-            }
             .map(normalizeToken)
-            .filter { !$0.isEmpty }
+            .filter { token in
+                !token.isEmpty && token.count > 1 && !stopwords.contains(token)
+            }
 
         if !includeBigrams {
             return base
         }
         return base + bigrams(base)
+    }
+
+    private static func uniqueTokens(_ tokens: [String]) -> [String] {
+        var seen: Set<String> = []
+        var output: [String] = []
+        output.reserveCapacity(tokens.count)
+        for token in tokens where !token.isEmpty {
+            if seen.insert(token).inserted {
+                output.append(token)
+            }
+        }
+        return output
+    }
+
+    private static func expandedTokens(from tokens: [String], maxExtraPerToken: Int = 2) -> [String] {
+        guard !tokens.isEmpty else { return [] }
+
+        var expanded: [String] = []
+        for token in tokens {
+            expanded.append(contentsOf: expansionCandidates(for: token, maxCount: maxExtraPerToken))
+        }
+        return uniqueTokens(expanded.filter { !stopwords.contains($0) && $0.count > 1 })
+    }
+
+    private static func expansionCandidates(for token: String, maxCount: Int) -> [String] {
+        let key = token.lowercased()
+        let cached: [String]? = retrievalQueue.sync { queryExpansionCache[key] }
+        if let cached {
+            return Array(cached.prefix(maxCount))
+        }
+
+        var expanded = expansionFallbackMap[key] ?? []
+        if let embedding = semanticEmbedding {
+            let neighbors = embedding.neighbors(for: key, maximumCount: max(1, maxCount + 2))
+            for neighbor in neighbors {
+                let normalized = normalizeToken(neighbor.0.lowercased())
+                guard !normalized.isEmpty, normalized != key else { continue }
+                if !expanded.contains(normalized) {
+                    expanded.append(normalized)
+                }
+                if expanded.count >= max(1, maxCount + 2) {
+                    break
+                }
+            }
+        }
+
+        let deduped = uniqueTokens(expanded)
+        retrievalQueue.sync {
+            queryExpansionCache[key] = deduped
+            if queryExpansionCache.count > 512 {
+                queryExpansionCache.removeAll(keepingCapacity: true)
+            }
+        }
+        return Array(deduped.prefix(maxCount))
     }
 
     private static func normalizeToken(_ token: String) -> String {
@@ -466,14 +548,41 @@ enum LocalKnowledgeRetriever {
         return result
     }
 
-    private static func embeddingVector(from tokens: [String], dimension: Int = 192) -> [Double] {
-        guard !tokens.isEmpty else { return Array(repeating: 0, count: dimension) }
+    private static func embeddingVector(from tokens: [String], dimension: Int? = nil) -> [Double] {
+        let vectorDimension = max(1, dimension ?? semanticDimension)
+        guard !tokens.isEmpty else { return Array(repeating: 0, count: vectorDimension) }
 
         var tf: [String: Double] = [:]
         for token in tokens {
             tf[token, default: 0] += 1
         }
 
+        if let embedding = semanticEmbedding {
+            var vector = Array(repeating: 0.0, count: embedding.dimension)
+            var used = 0
+            for (token, count) in tf {
+                guard let wordVector = embedding.vector(for: token), wordVector.count == embedding.dimension else {
+                    continue
+                }
+                let weight = 1.0 + log(count)
+                for idx in 0..<embedding.dimension {
+                    vector[idx] += Double(wordVector[idx]) * weight
+                }
+                used += 1
+            }
+
+            if used > 0 {
+                let norm = sqrt(vector.reduce(0.0) { $0 + ($1 * $1) })
+                if norm > 0 {
+                    return vector.map { $0 / norm }
+                }
+            }
+        }
+
+        return hashedEmbeddingVector(from: tf, dimension: vectorDimension)
+    }
+
+    private static func hashedEmbeddingVector(from tf: [String: Double], dimension: Int) -> [Double] {
         var vector = Array(repeating: 0.0, count: dimension)
         for (token, count) in tf {
             let weight = 1.0 + log(count)
@@ -482,7 +591,6 @@ enum LocalKnowledgeRetriever {
             let sign = ((hash >> 8) & 1) == 0 ? 1.0 : -1.0
             vector[index] += weight * sign
         }
-
         let norm = sqrt(vector.reduce(0.0) { $0 + ($1 * $1) })
         guard norm > 0 else { return vector }
         return vector.map { $0 / norm }
@@ -498,10 +606,16 @@ enum LocalKnowledgeRetriever {
     }
 
     private static func inverseDocumentFrequency(queryTokens: [String], documents: [Set<String>]) -> [String: Double] {
-        let docCount = max(1.0, Double(documents.count))
         let uniqueTokens = Set(queryTokens)
         guard !uniqueTokens.isEmpty else { return [:] }
 
+        let cacheKey = idfCacheKey(tokens: uniqueTokens, documents: documents)
+        let cached: [String: Double]? = retrievalQueue.sync { idfCache[cacheKey] }
+        if let cached {
+            return cached
+        }
+
+        let docCount = max(1.0, Double(documents.count))
         var documentFrequency: [String: Int] = [:]
         documentFrequency.reserveCapacity(uniqueTokens.count)
         for token in uniqueTokens {
@@ -519,7 +633,26 @@ enum LocalKnowledgeRetriever {
             let df = Double(documentFrequency[token] ?? 0)
             map[token] = log((docCount + 1.0) / (df + 1.0)) + 1.0
         }
+
+        retrievalQueue.sync {
+            idfCache[cacheKey] = map
+            if idfCache.count > 256 {
+                idfCache.removeAll(keepingCapacity: true)
+            }
+        }
         return map
+    }
+
+    private static func idfCacheKey(tokens: Set<String>, documents: [Set<String>]) -> String {
+        let tokenPart = tokens.sorted().joined(separator: "|")
+        let docHashes = documents.map { doc -> UInt64 in
+            let sorted = doc.sorted().joined(separator: "|")
+            return fnv1a64(sorted)
+        }
+        let combined = docHashes.reduce(UInt64(1469598103934665603)) { partial, hash in
+            (partial ^ hash) &* 1099511628211
+        }
+        return "\(tokenPart)#\(combined)"
     }
 
     private static func weightedCoverage(sharedTokens: Set<String>, queryTokens: [String], idf: [String: Double]) -> Double {

@@ -32,9 +32,9 @@ final class MemoryStore {
     private static let defaults = UserDefaults.standard
     private static let dailyPruneKey = "memory_prune_last_day"
     private static let totalCap = 1_000
-    private static let perDayCap = 50
+    private static let perDayCap = 75
 
-    private static let highSimilarityThreshold = 0.86
+    private static let highSimilarityThreshold = 0.80
 
     private var db: OpaquePointer?
     private(set) var isAvailable = false
@@ -79,7 +79,7 @@ final class MemoryStore {
         case .fact, .preference:
             return 365
         case .note:
-            return 90
+            return 180
         case .checkin:
             return 7
         }
@@ -112,7 +112,8 @@ final class MemoryStore {
     }
 
     private func openDatabase(atPath path: String) throws {
-        guard sqlite3_open(path, &db) == SQLITE_OK else {
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK else {
             let error = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
             throw StoreError.openFailed(error)
         }
@@ -326,6 +327,23 @@ final class MemoryStore {
             return .skippedDuplicate
         }
 
+        if let contradictory = firstContradictoryMemory(type: type, content: normalizedContent) {
+            if let replaced = replaceMemory(
+                old: contradictory,
+                newContent: normalizedContent,
+                source: source,
+                confidence: confidence,
+                ttlDays: ttlDays,
+                sourceSnippet: sourceSnippet,
+                tags: Array(Set(tags + ["supersedes_contradiction"])).sorted(),
+                isResolved: isResolved,
+                now: now
+            ) {
+                return .updated(replaced)
+            }
+            return .skippedDuplicate
+        }
+
         if countMemoriesCreated(on: now) >= Self.perDayCap {
             return .skippedLimit
         }
@@ -497,10 +515,12 @@ final class MemoryStore {
             resolvedID = idOrPrefix.uppercased()
         } else {
             let prefix = idOrPrefix.uppercased()
-            let findSQL = "SELECT id FROM memories WHERE is_active = 1 AND id LIKE '\(prefix)%' LIMIT 1"
+            let findSQL = "SELECT id FROM memories WHERE is_active = 1 AND id LIKE ? LIMIT 1"
             var findStmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, findSQL, -1, &findStmt, nil) == SQLITE_OK else { return false }
             defer { sqlite3_finalize(findStmt) }
+            let pattern = "\(prefix)%"
+            sqlite3_bind_text(findStmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             if sqlite3_step(findStmt) == SQLITE_ROW, let cStr = sqlite3_column_text(findStmt, 0) {
                 resolvedID = String(cString: cStr)
             } else {
@@ -545,7 +565,7 @@ final class MemoryStore {
         }
         if all.isEmpty { return [] }
 
-        let ranked = LocalKnowledgeRetriever.rank(
+        let baseRanked = LocalKnowledgeRetriever.rank(
             query: query,
             items: all,
             text: { $0.content },
@@ -561,14 +581,41 @@ final class MemoryStore {
                 }
             },
             limit: max(1, limit),
-            minScore: 0.14
+            minScore: 0.15,
+            requireTokenOverlap: true
+        )
+        if !baseRanked.isEmpty {
+            return baseRanked.map(\.item)
+        }
+
+        let expansion = LocalKnowledgeRetriever.expandedQueryTokens(from: query)
+        guard !expansion.isEmpty else { return [] }
+        let expandedQuery = query + " " + expansion.joined(separator: " ")
+        let expandedRanked = LocalKnowledgeRetriever.rank(
+            query: expandedQuery,
+            items: all,
+            text: { $0.content },
+            recencyDate: { $0.lastSeenAt },
+            extraBoost: { memory in
+                switch memory.type {
+                case .fact, .preference:
+                    return 0.08
+                case .checkin:
+                    return 0.05
+                default:
+                    return 0.0
+                }
+            },
+            limit: max(1, limit),
+            minScore: 0.18,
+            requireTokenOverlap: true
         )
 
-        return ranked.map(\.item)
+        return expandedRanked.map(\.item)
     }
 
     /// Compact top-k recall context with strict size limits.
-    func memoryContext(query: String, maxItems: Int = 3, maxChars: Int = 300) -> [MemoryRow] {
+    func memoryContext(query: String, maxItems: Int = 10, maxChars: Int = 1500) -> [MemoryRow] {
         let candidates = searchMemories(query: query, limit: 10)
         guard !candidates.isEmpty else { return [] }
 
@@ -586,6 +633,92 @@ final class MemoryStore {
         }
 
         return selected
+    }
+
+    /// Lightweight relationship hints derived from memories.
+    /// These can be injected as a small graph-like context (subject -> predicate -> object).
+    func graphContext(query: String, maxItems: Int = 6, maxChars: Int = 500) -> [String] {
+        let candidates = memoryContext(query: query, maxItems: 16, maxChars: 2400)
+        guard !candidates.isEmpty else { return [] }
+
+        var edges: [String] = []
+        var seen: Set<String> = []
+
+        for memory in candidates {
+            for edge in extractGraphEdges(from: memory.content) {
+                let key = edge.lowercased()
+                guard !seen.contains(key) else { continue }
+                seen.insert(key)
+                edges.append(edge)
+            }
+        }
+
+        guard !edges.isEmpty else { return [] }
+
+        var selected: [String] = []
+        var usedChars = 0
+        for edge in edges {
+            guard selected.count < max(1, maxItems) else { break }
+            let nextChars = usedChars + edge.count + 3
+            if !selected.isEmpty && nextChars > maxChars { break }
+            if selected.isEmpty && edge.count > maxChars { continue }
+            selected.append(edge)
+            usedChars = nextChars
+        }
+        return selected
+    }
+
+    private static let relationNameRegex = try! NSRegularExpression(
+        pattern: #"(?:your|my)\s+([a-zA-Z][a-zA-Z0-9' _-]{1,40}?)\s+name\s+is\s+([a-zA-Z][a-zA-Z0-9' _-]{1,40})"#,
+        options: [.caseInsensitive]
+    )
+    private static let relationIsRegex = try! NSRegularExpression(
+        pattern: #"([a-zA-Z][a-zA-Z0-9' _-]{1,40})\s+is\s+an?\s+([a-zA-Z][a-zA-Z0-9' _,-]{1,60})"#,
+        options: [.caseInsensitive]
+    )
+
+    private func extractGraphEdges(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
+
+        var edges: [String] = []
+
+        Self.relationNameRegex.enumerateMatches(in: trimmed, options: [], range: nsRange) { match, _, _ in
+            guard
+                let match,
+                let subjectRange = Range(match.range(at: 1), in: trimmed),
+                let objectRange = Range(match.range(at: 2), in: trimmed)
+            else { return }
+            let subject = sanitizeGraphNode(String(trimmed[subjectRange]))
+            let object = sanitizeGraphNode(String(trimmed[objectRange]))
+            guard !subject.isEmpty, !object.isEmpty else { return }
+            edges.append("user -> \(subject) -> \(object)")
+        }
+
+        Self.relationIsRegex.enumerateMatches(in: trimmed, options: [], range: nsRange) { match, _, _ in
+            guard
+                let match,
+                let subjectRange = Range(match.range(at: 1), in: trimmed),
+                let objectRange = Range(match.range(at: 2), in: trimmed)
+            else { return }
+            let subject = sanitizeGraphNode(String(trimmed[subjectRange]))
+            let object = sanitizeGraphNode(String(trimmed[objectRange]))
+            guard !subject.isEmpty, !object.isEmpty else { return }
+            edges.append("\(subject) -> is_a -> \(object)")
+        }
+
+        return edges
+    }
+
+    private func sanitizeGraphNode(_ node: String) -> String {
+        var cleaned = node
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?"))
+        if cleaned.lowercased().hasSuffix("'s") {
+            cleaned = String(cleaned.dropLast(2))
+        }
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Tokenizes text into lowercase keywords, stripping punctuation and stopwords.
@@ -857,6 +990,35 @@ final class MemoryStore {
         return nil
     }
 
+    private func firstContradictoryMemory(type: MemoryType, content: String) -> MemoryRow? {
+        guard type == .fact || type == .preference || type == .note else { return nil }
+        let incomingCanonical = canonicalize(content)
+        guard !incomingCanonical.isEmpty else { return nil }
+        let incomingTokens = Set(incomingCanonical.split(separator: " ").map(String.init))
+        guard incomingTokens.count >= 2 else { return nil }
+
+        let incomingHasNegation = containsNegation(content)
+        let existing = listMemories(filterType: type)
+        for row in existing {
+            let existingCanonical = canonicalize(row.content)
+            let existingTokens = Set(existingCanonical.split(separator: " ").map(String.init))
+            guard existingTokens.count >= 2 else { continue }
+
+            let overlap = incomingTokens.intersection(existingTokens).count
+            let union = incomingTokens.union(existingTokens).count
+            guard union > 0 else { continue }
+            let overlapRatio = Double(overlap) / Double(union)
+            if overlapRatio < 0.55 { continue }
+
+            let existingHasNegation = containsNegation(row.content)
+            if incomingHasNegation != existingHasNegation {
+                return row
+            }
+        }
+
+        return nil
+    }
+
     private func normalizedSimilarity(_ a: String, _ b: String) -> Double {
         guard !a.isEmpty, !b.isEmpty else { return 0 }
         let aSet = Set(a.split(separator: " ").map(String.init))
@@ -867,6 +1029,15 @@ final class MemoryStore {
         let union = Double(aSet.union(bSet).count)
         if union == 0 { return 0 }
         return intersection / union
+    }
+
+    private func containsNegation(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let markers = [
+            "not ", "n't", "never ", "no ", "avoid ", "without ", "don't ", "do not ",
+            "can't ", "cannot ", "won't ", "doesn't ", "does not "
+        ]
+        return markers.contains { lowered.contains($0) }
     }
 
     private func touchMemory(_ row: MemoryRow,

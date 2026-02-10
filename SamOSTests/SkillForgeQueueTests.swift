@@ -257,6 +257,23 @@ final class SkillForgeValidationTests: XCTestCase {
         let error = SkillForge.shared.validateSpec(spec, knownToolNames: ["show_text"])
         XCTAssertNil(error)
     }
+
+    func testValidateSpecRejectsWhitespaceOnlyTriggerPhrases() {
+        let spec = SkillSpec(
+            id: "forged_blank_trigger",
+            name: "Blank Trigger Skill",
+            version: 1,
+            triggerPhrases: ["   "],
+            slots: [],
+            steps: [
+                SkillSpec.StepDef(action: "show_text", args: ["markdown": "Ready"])
+            ],
+            onTrigger: nil
+        )
+
+        let error = SkillForge.shared.validateSpec(spec, knownToolNames: ["show_text"])
+        XCTAssertEqual(error, "No trigger phrases")
+    }
 }
 
 final class OpenAIRefinerRequirementsParsingTests: XCTestCase {

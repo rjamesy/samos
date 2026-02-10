@@ -29,6 +29,8 @@ final class SkillForgeQueueService {
     private(set) var isAvailable = false
     private var isDraining = false
     private var drainTask: Task<Void, Never>?
+    private let maxForgeAttempts = 3
+    private let baseRetryDelayNanos: UInt64 = 750_000_000
 
     /// Serial queue protecting ALL sqlite3 operations on `db`.
     private let dbQueue = DispatchQueue(label: "com.samos.forgequeue.db")
@@ -208,38 +210,54 @@ final class SkillForgeQueueService {
             updateJob(job)
             currentJob = job
 
-            do {
-                var emittedLogCount = 0
-                let skill = try await SkillForge.shared.forge(
-                    goal: job.goal,
-                    missing: job.constraints ?? job.goal
-                ) { skillJob in
-                    guard skillJob.logs.count > emittedLogCount else { return }
-                    let newLogs = skillJob.logs[emittedLogCount...]
-                    emittedLogCount = skillJob.logs.count
-                    let messages = newLogs.map(\.message)
-                    Task { @MainActor in
-                        for message in messages {
-                            self.onJobLog?(job, message)
+            var lastError: Error?
+            var builtSkill: SkillSpec?
+            var attempt = 0
+
+            while attempt < maxForgeAttempts && !Task.isCancelled {
+                attempt += 1
+
+                do {
+                    var emittedLogCount = 0
+                    let skill = try await SkillForge.shared.forge(
+                        goal: job.goal,
+                        missing: job.constraints ?? job.goal
+                    ) { skillJob in
+                        guard skillJob.logs.count > emittedLogCount else { return }
+                        let newLogs = skillJob.logs[emittedLogCount...]
+                        emittedLogCount = skillJob.logs.count
+                        let messages = newLogs.map(\.message)
+                        Task { @MainActor in
+                            for message in messages {
+                                self.onJobLog?(job, message)
+                            }
                         }
                     }
+                    builtSkill = skill
+                    break
+                } catch {
+                    lastError = error
+                    guard attempt < maxForgeAttempts else { break }
+                    let delay = baseRetryDelayNanos * UInt64(1 << (attempt - 1))
+                    onJobLog?(job, "Forge attempt \(attempt) failed (\(error.localizedDescription)). Retrying...")
+                    try? await Task.sleep(nanoseconds: delay)
                 }
-                if Task.isCancelled { break }
+            }
 
+            if Task.isCancelled { break }
+
+            if let skill = builtSkill {
                 job.status = .completed
                 job.completedAt = Date()
                 updateJob(job)
                 currentJob = nil
-
                 onJobCompleted?(job, skill)
-            } catch {
-                if Task.isCancelled { break }
+            } else {
                 job.status = .failed
                 job.completedAt = Date()
                 updateJob(job)
                 currentJob = nil
-
-                onJobFailed?(job, error.localizedDescription)
+                onJobFailed?(job, lastError?.localizedDescription ?? "Unknown forge failure")
             }
         }
         isDraining = false

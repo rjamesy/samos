@@ -101,7 +101,7 @@ final class ClaudeCodeRunner {
                 if msg.contains("sandbox") || msg.contains("Operation not permitted") {
                     continuation.resume(throwing: RunnerError.sandboxDenied)
                 } else {
-                    continuation.resume(throwing: RunnerError.sandboxDenied)
+                    continuation.resume(throwing: RunnerError.processFailed(msg))
                 }
             }
         }

@@ -273,13 +273,35 @@ final class SkillTests: XCTestCase {
         XCTAssertEqual(result["say"], "Hello Richard, your time is tomorrow at 4:40 AM.")
     }
 
-    func testInterpolateArgsClearsUnfilledPlaceholders() {
+    func testInterpolateArgsKeepsUnfilledPlaceholders() {
         let engine = SkillEngine(forTesting: true)
         let args = ["say": "Label: {{label}}"]
         let slots: [String: String] = [:]
 
         let result = engine.interpolateArgs(args, slots: slots)
-        XCTAssertEqual(result["say"], "Label: ")
+        XCTAssertEqual(result["say"], "Label: {{label}}")
+    }
+
+    func testMatchFallsBackToSkillNameWhenTriggerPhraseEmpty() {
+        let token = "skillname\(Int.random(in: 10000...99999))"
+        var skill = SkillSpec(
+            id: "forged_\(token)",
+            name: "Video Finder \(token)",
+            version: 1,
+            triggerPhrases: ["   "],
+            slots: [],
+            steps: [SkillSpec.StepDef(action: "talk", args: ["say": "ok"])],
+            onTrigger: nil
+        )
+        skill.status = "active"
+        skill.approvedAt = Date()
+
+        XCTAssertTrue(SkillStore.shared.install(skill))
+        defer { _ = SkillStore.shared.remove(id: skill.id) }
+
+        let matched = SkillEngine.shared.match("run video finder \(token)")
+        XCTAssertNotNil(matched, "Skill should still be discoverable via name when trigger phrases are blank")
+        XCTAssertEqual(matched?.0.id, skill.id)
     }
 
     // MARK: - SkillEngine Date Detection
