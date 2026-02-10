@@ -464,11 +464,11 @@ final class OllamaRouter {
                     ])
                 }
                 let malformed = steps.compactMap { $0 as? [String: Any] }.filter { step in
-                    step["step"] == nil && step["type"] == nil
+                    step["step"] == nil && step["type"] == nil && step["name"] == nil
                 }
                 if !malformed.isEmpty {
                     throw OllamaError.schemaMismatch(raw: jsonString, reasons: [
-                        "Each PLAN step object must include a \"step\" key (or \"type\" alias) with talk/tool/ask/delegate."
+                        "Each PLAN step object must include either \"step\" (or \"type\") OR a tool \"name\" key."
                     ])
                 }
             }
@@ -492,6 +492,44 @@ final class OllamaRouter {
     private func diagnoseSchemaMismatch(_ dict: [String: Any]) -> [String] {
         if dict.isEmpty {
             return ["You returned an empty JSON object {}. You MUST include an \"action\" field set to PLAN, TALK, or TOOL."]
+        }
+
+        let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name.lowercased() })
+        let allowedStepTypes = Set(["talk", "tool", "ask", "delegate"])
+        if let action = (dict["action"] as? String)?.uppercased(),
+           action == "PLAN",
+           let steps = dict["steps"] as? [[String: Any]] {
+            var reasons: [String] = []
+            for (index, step) in steps.enumerated() {
+                let rawStep = (step["step"] as? String ?? step["type"] as? String ?? "").lowercased()
+                if rawStep.isEmpty && step["name"] == nil {
+                    reasons.append("missing step type at steps[\(index)]")
+                    continue
+                }
+
+                if !rawStep.isEmpty,
+                   !allowedStepTypes.contains(rawStep),
+                   !toolNames.contains(rawStep) {
+                    reasons.append("bad step type '\(rawStep)' at steps[\(index)]")
+                }
+
+                let inferredToolName = (step["name"] as? String)?.lowercased()
+                    ?? (toolNames.contains(rawStep) ? rawStep : nil)
+                if inferredToolName == "show_text" {
+                    guard let args = step["args"] as? [String: Any] else {
+                        reasons.append("bad args key at steps[\(index)] for show_text")
+                        continue
+                    }
+                    let hasMarkdown = !(args["markdown"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    let hasText = !(args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if hasText && !hasMarkdown {
+                        reasons.append("bad args key 'text' at steps[\(index)] for show_text (expected 'markdown')")
+                    } else if !hasMarkdown && !hasText {
+                        reasons.append("missing args.markdown at steps[\(index)] for show_text")
+                    }
+                }
+            }
+            if !reasons.isEmpty { return reasons }
         }
 
         if let action = dict["action"] as? String {
@@ -623,6 +661,10 @@ final class OllamaRouter {
                 }
                 dict["args"] = args
             }
+            if var args = dict["args"] as? [String: Any] {
+                args = normalizeToolArgs(name: toolName, args: args)
+                dict["args"] = args
+            }
             return dict
         }
 
@@ -652,10 +694,17 @@ final class OllamaRouter {
             dict["args"] = args
         }
 
+        if (dict["action"] as? String ?? "").uppercased() == "TOOL",
+           let name = (dict["name"] as? String)?.lowercased(),
+           var args = dict["args"] as? [String: Any] {
+            args = normalizeToolArgs(name: name, args: args)
+            dict["args"] = args
+        }
+
         // Case 4: Normalize PLAN step objects (common model schema drift).
         if (dict["action"] as? String ?? "").uppercased() == "PLAN",
            let steps = dict["steps"] as? [[String: Any]] {
-            dict["steps"] = steps.map(normalizePlanStepJSON)
+            dict["steps"] = steps.map { normalizePlanStepJSON($0, toolNames: toolNames) }
         }
 
         // Case 5: CAPABILITY_GAP missing required fields — inject defaults
@@ -670,7 +719,7 @@ final class OllamaRouter {
         return dict
     }
 
-    private func normalizePlanStepJSON(_ input: [String: Any]) -> [String: Any] {
+    private func normalizePlanStepJSON(_ input: [String: Any], toolNames: Set<String>) -> [String: Any] {
         var step = input
 
         if step["step"] == nil, let type = step["type"] as? String {
@@ -693,6 +742,14 @@ final class OllamaRouter {
         }
 
         if step["step"] == nil, step["name"] != nil {
+            step["step"] = "tool"
+        }
+
+        let rawStepType = (step["step"] as? String ?? "").lowercased()
+        if toolNames.contains(rawStepType) {
+            if step["name"] == nil {
+                step["name"] = rawStepType
+            }
             step["step"] = "tool"
         }
 
@@ -728,7 +785,27 @@ final class OllamaRouter {
             }
         }
 
+        if normalizedType == "tool",
+           let name = (step["name"] as? String)?.lowercased(),
+           var args = step["args"] as? [String: Any] {
+            args = normalizeToolArgs(name: name, args: args)
+            step["args"] = args
+        }
+
         return step
+    }
+
+    private func normalizeToolArgs(name: String, args: [String: Any]) -> [String: Any] {
+        var normalized = args
+        if name == "show_text" {
+            let markdown = (normalized["markdown"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if markdown.isEmpty,
+               let text = normalized["text"] as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                normalized["markdown"] = text
+            }
+        }
+        return normalized
     }
 
     /// Extracts a JSON object from text, preferring objects with an "action" key.

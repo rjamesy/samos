@@ -701,16 +701,35 @@ struct RealOpenAITransport: OpenAITransport {
     }()
 
     func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String {
-        guard OpenAISettings.isConfigured else {
+        OpenAISettings.preloadAPIKey()
+        OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
+        let apiKey: String
+        switch OpenAISettings.apiKeyStatus {
+        case .ready:
+            apiKey = OpenAISettings.apiKey
+        case .missing:
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.chat",
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: model,
-                reason: "OpenAI API key not configured",
+                reason: "OpenAI API key missing/invalid",
                 payload: ["message_count": messages.count]
             )
             throw OpenAIRouter.OpenAIError.notConfigured
+        case .invalid:
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRouter.chat",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: model,
+                reason: "OpenAI API key missing/invalid",
+                payload: [
+                    "message_count": messages.count,
+                    "last_auth_failure_status": OpenAISettings.authFailureStatusCode as Any
+                ]
+            )
+            throw OpenAIRouter.OpenAIError.invalidAPIKey
         }
 
         #if DEBUG
@@ -736,16 +755,23 @@ struct RealOpenAITransport: OpenAITransport {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(OpenAISettings.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = Self.requestTimeoutSeconds
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        let authHeaderPresent = (request.value(forHTTPHeaderField: "Authorization")?.isEmpty == false)
+        #if DEBUG
+        print("[OpenAIRouter] Authorization header present: \(authHeaderPresent)")
+        #endif
         let requestID = OpenAIAPILogStore.shared.logHTTPRequest(
             service: "OpenAIRouter.chat",
             endpoint: url.absoluteString,
             method: "POST",
             model: model,
             timeoutSeconds: request.timeoutInterval,
-            payload: requestBody
+            payload: [
+                "request": requestBody,
+                "authorization_header_present": authHeaderPresent
+            ]
         )
 
         let data: Data
@@ -769,6 +795,9 @@ struct RealOpenAITransport: OpenAITransport {
                 throw OpenAIRouter.OpenAIError.requestFailed("Invalid response")
             }
             guard (200...299).contains(http.statusCode) else {
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    OpenAISettings.markAPIKeyRejected(statusCode: http.statusCode)
+                }
                 OpenAIAPILogStore.shared.logHTTPError(
                     requestID: requestID,
                     service: "OpenAIRouter.chat",
@@ -781,8 +810,12 @@ struct RealOpenAITransport: OpenAITransport {
                     responseData: responseData
                 )
                 loggedTerminal = true
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    throw OpenAIRouter.OpenAIError.invalidAPIKey
+                }
                 throw OpenAIRouter.OpenAIError.badResponse(http.statusCode)
             }
+            OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
             OpenAIAPILogStore.shared.logHTTPResponse(
                 requestID: requestID,
                 service: "OpenAIRouter.chat",
@@ -921,12 +954,14 @@ final class OpenAIRouter {
 
     enum OpenAIError: Error, LocalizedError {
         case notConfigured
+        case invalidAPIKey
         case requestFailed(String)
         case badResponse(Int)
 
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "OpenAI API key not configured"
+            case .invalidAPIKey: return "OpenAI API key missing/invalid"
             case .requestFailed(let msg): return "OpenAI request failed: \(msg)"
             case .badResponse(let code): return "OpenAI returned HTTP \(code)"
             }
@@ -951,16 +986,34 @@ final class OpenAIRouter {
                    promptContext: PromptRuntimeContext? = nil,
                    modelOverride: String? = nil) async throws -> Plan {
         let routeModel = normalizedRouteModel(modelOverride)
-        guard OpenAISettings.isConfigured else {
+        OpenAISettings.preloadAPIKey()
+        OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
+        switch OpenAISettings.apiKeyStatus {
+        case .ready:
+            break
+        case .missing:
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.routePlan",
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: routeModel,
-                reason: "OpenAI API key not configured",
+                reason: "OpenAI API key missing/invalid",
                 payload: ["input_preview": String(input.prefix(160))]
             )
             throw OpenAIError.notConfigured
+        case .invalid:
+            OpenAIAPILogStore.shared.logBlockedRequest(
+                service: "OpenAIRouter.routePlan",
+                endpoint: "https://api.openai.com/v1/chat/completions",
+                method: "POST",
+                model: routeModel,
+                reason: "OpenAI API key missing/invalid",
+                payload: [
+                    "input_preview": String(input.prefix(160)),
+                    "last_auth_failure_status": OpenAISettings.authFailureStatusCode as Any
+                ]
+            )
+            throw OpenAIError.invalidAPIKey
         }
 
         let systemPrompt = buildLightSystemPrompt(forInput: input, promptContext: promptContext)
@@ -1011,6 +1064,7 @@ final class OpenAIRouter {
             guard !trimmed.isEmpty else {
                 throw OpenAIError.requestFailed("Empty response from OpenAI")
             }
+            let parseFailureReason = debugParseFailureReason(from: error)
 
             // Stage 1: normalize args (string→object) and retry decode (existing)
             if let data = trimmed.data(using: .utf8),
@@ -1020,6 +1074,11 @@ final class OpenAIRouter {
                    let action = try? JSONDecoder().decode(Action.self, from: normalizedData) {
                     #if DEBUG
                     print("[OpenAIRouter] Salvaged via normalizeActionJSON")
+                    debugLogParseSalvage(
+                        stage: "normalizeActionJSON",
+                        reason: parseFailureReason,
+                        raw: trimmed
+                    )
                     #endif
                     let guarded = enforcePostParseGuardrails(Plan.fromAction(action), userInput: input)
                     if shouldRepairUnexpectedCapabilityEscalation(guarded, userInput: input) {
@@ -1030,10 +1089,17 @@ final class OpenAIRouter {
             }
 
             // Stage 2: show_text / markdown extraction
-            if trimmed.contains("\"show_text\"") || trimmed.contains("\"markdown\"") {
+            if trimmed.contains("\"show_text\"")
+                || trimmed.contains("\"markdown\"")
+                || trimmed.contains("\"text\"") {
                 if let markdown = extractMarkdownContent(trimmed) {
                     #if DEBUG
                     print("[OpenAIRouter] Salvaged as show_text")
+                    debugLogParseSalvage(
+                        stage: "show_text_extract",
+                        reason: parseFailureReason,
+                        raw: trimmed
+                    )
                     #endif
                 let salvaged = Plan(steps: [.tool(
                     name: "show_text",
@@ -1048,6 +1114,11 @@ final class OpenAIRouter {
             if trimmed.hasPrefix("#") {
                 #if DEBUG
                 print("[OpenAIRouter] Salvaged raw markdown as show_text")
+                debugLogParseSalvage(
+                    stage: "raw_markdown_wrap",
+                    reason: parseFailureReason,
+                    raw: trimmed
+                )
                 #endif
                 let salvaged = Plan(steps: [.tool(
                     name: "show_text",
@@ -1062,6 +1133,11 @@ final class OpenAIRouter {
                 if let imageData = extractImageURLs(trimmed) {
                     #if DEBUG
                     print("[OpenAIRouter] Salvaged as show_image")
+                    debugLogParseSalvage(
+                        stage: "show_image_extract",
+                        reason: parseFailureReason,
+                        raw: trimmed
+                    )
                     #endif
                     let salvaged = Plan(steps: [.tool(
                         name: "show_image",
@@ -1079,6 +1155,10 @@ final class OpenAIRouter {
             if looksLikeJSON(trimmed) {
                 #if DEBUG
                 print("[OpenAIRouter] JSON-looking response could not be parsed, returning friendly error")
+                debugLogParseFailure(
+                    reason: parseFailureReason,
+                    raw: trimmed
+                )
                 #endif
                 return Plan(steps: [.talk(say: "Sorry, I had trouble processing that. Could you try again?")])
             }
@@ -1542,18 +1622,26 @@ final class OpenAIRouter {
 
         // Direct: {"markdown":"..."}
         if let md = dict["markdown"] as? String, !md.isEmpty { return md }
+        if let md = dict["text"] as? String, !md.isEmpty { return md }
+        if let md = dict["content"] as? String, !md.isEmpty { return md }
 
         // Nested in args: {"name":"show_text","args":{"markdown":"..."}}
-        if let args = dict["args"] as? [String: Any],
-           let md = args["markdown"] as? String, !md.isEmpty { return md }
+        if let args = dict["args"] as? [String: Any] {
+            if let md = args["markdown"] as? String, !md.isEmpty { return md }
+            if let md = args["text"] as? String, !md.isEmpty { return md }
+            if let md = args["content"] as? String, !md.isEmpty { return md }
+        }
 
         // In PLAN steps: {"action":"PLAN","steps":[{"name":"show_text","args":{"markdown":"..."}}]}
         if let steps = dict["steps"] as? [[String: Any]] {
             for step in steps {
-                if let name = step["name"] as? String, name == "show_text",
-                   let args = step["args"] as? [String: Any],
-                   let md = args["markdown"] as? String, !md.isEmpty {
-                    return md
+                let stepName = (step["name"] as? String ?? "").lowercased()
+                let stepType = (step["step"] as? String ?? "").lowercased()
+                let isShowText = stepName == "show_text" || stepType == "show_text"
+                if isShowText, let args = step["args"] as? [String: Any] {
+                    if let md = args["markdown"] as? String, !md.isEmpty { return md }
+                    if let md = args["text"] as? String, !md.isEmpty { return md }
+                    if let md = args["content"] as? String, !md.isEmpty { return md }
                 }
             }
         }
@@ -1604,5 +1692,49 @@ final class OpenAIRouter {
         if t.hasPrefix("{") || t.hasPrefix("[") { return true }
         if t.contains("\"action\"") || t.contains("\"name\"") { return true }
         return false
+    }
+
+    private func debugParseFailureReason(from error: Error) -> String {
+        if let ollamaError = error as? OllamaRouter.OllamaError {
+            switch ollamaError {
+            case .schemaMismatch(_, let reasons):
+                return reasons.joined(separator: " | ")
+            case .jsonParseFailed:
+                return "json_parse_failed"
+            case .invalidResponse:
+                return "invalid_response"
+            case .unreachable(let msg):
+                return "unreachable: \(msg)"
+            }
+        }
+        if let decodingError = error as? DecodingError {
+            switch decodingError {
+            case .keyNotFound(let key, _):
+                return "missing_key:\(key.stringValue)"
+            case .typeMismatch(_, let context):
+                return "type_mismatch:\(context.debugDescription)"
+            case .valueNotFound(_, let context):
+                return "missing_value:\(context.debugDescription)"
+            case .dataCorrupted(let context):
+                return "data_corrupted:\(context.debugDescription)"
+            @unknown default:
+                return "decoding_error"
+            }
+        }
+        return error.localizedDescription
+    }
+
+    private func debugLogParseFailure(reason: String, raw: String) {
+        #if DEBUG
+        let snippet = raw.replacingOccurrences(of: "\n", with: " ")
+        print("[OpenAIRouter][debug] parse_failed_reason=\(reason) raw_json_prefix=\(snippet.prefix(120))")
+        #endif
+    }
+
+    private func debugLogParseSalvage(stage: String, reason: String, raw: String) {
+        #if DEBUG
+        let snippet = raw.replacingOccurrences(of: "\n", with: " ")
+        print("[OpenAIRouter][debug] salvage_stage=\(stage) parse_failed_reason=\(reason) raw_json_prefix=\(snippet.prefix(120))")
+        #endif
     }
 }

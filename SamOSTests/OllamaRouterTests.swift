@@ -349,6 +349,28 @@ final class OllamaRouterTests: XCTestCase {
         XCTAssertNil(args?["say"])
     }
 
+    func testNormalizeShowTextTextArgToMarkdown() {
+        let input: [String: Any] = [
+            "action": "PLAN",
+            "steps": [
+                [
+                    "step": "show_text",
+                    "args": [
+                        "text": "# Recipe\n- mix"
+                    ]
+                ]
+            ]
+        ]
+
+        let result = router.normalizeActionJSON(input)
+        let steps = result["steps"] as? [[String: Any]]
+        let first = steps?.first
+        XCTAssertEqual(first?["step"] as? String, "tool")
+        XCTAssertEqual(first?["name"] as? String, "show_text")
+        let args = first?["args"] as? [String: Any]
+        XCTAssertEqual(args?["markdown"] as? String, "# Recipe\n- mix")
+    }
+
     // MARK: - extractJSON Preference for "action"
 
     func testExtractJSONPrefersActionObject() {
@@ -452,13 +474,17 @@ final class OllamaRouterTests: XCTestCase {
         }
     }
 
-    func testParsePlanWithMalformedStepThrowsSchemaMismatch() {
-        // PLAN recognized but step objects missing "step" key → decode fails → schemaMismatch
+    func testParsePlanWithNamedToolStepWithoutStepKeyNormalizesToTool() {
+        // PLAN steps that provide only tool "name" should normalize to step="tool".
         let text = #"{"action":"PLAN","steps":[{"name":"get_time"}]}"#
-        XCTAssertThrowsError(try router.parsePlanOrAction(from: text)) { error in
-            guard case OllamaRouter.OllamaError.schemaMismatch = error else {
-                return XCTFail("Expected .schemaMismatch, got \(error)")
+        do {
+            let plan = try router.parsePlanOrAction(from: text)
+            guard case .tool(let name, _, _) = plan.steps.first else {
+                return XCTFail("Expected first step to normalize into tool step")
             }
+            XCTAssertEqual(name, "get_time")
+        } catch {
+            XCTFail("Expected parser to normalize tool-only step, got: \(error)")
         }
     }
 

@@ -140,17 +140,40 @@ private final class SessionSummaryService {
     private let refreshMessageDelta = 10
     private let refreshTokenEstimateThreshold = 900
 
-    func currentSummary(history: [ChatMessage], currentMode: ConversationMode) -> String {
+    func currentSummary(history: [ChatMessage],
+                        currentMode: ConversationMode,
+                        latestUserTurn: String) -> String {
         let nonSystem = history.filter { $0.role != .system }
-        guard !nonSystem.isEmpty else { return cachedSummary }
+        let normalizedLatest = normalizedSummaryLine(latestUserTurn)
+        guard !nonSystem.isEmpty else {
+            if !cachedSummary.isEmpty {
+                cachedSummary = refreshVolatileBullets(
+                    in: cachedSummary,
+                    currentMode: currentMode,
+                    latestUserTurn: normalizedLatest
+                )
+            }
+            return cachedSummary
+        }
 
         let shouldRefresh = needsRefresh(nonSystem)
         if shouldRefresh {
-            let generated = generateSummary(nonSystem, currentMode: currentMode)
+            let generated = generateSummary(
+                nonSystem,
+                currentMode: currentMode,
+                latestUserTurn: normalizedLatest
+            )
             if !generated.isEmpty {
                 cachedSummary = generated
                 lastMessageCountAtRefresh = nonSystem.count
             }
+        }
+        if !cachedSummary.isEmpty {
+            cachedSummary = refreshVolatileBullets(
+                in: cachedSummary,
+                currentMode: currentMode,
+                latestUserTurn: normalizedLatest
+            )
         }
         return cachedSummary
     }
@@ -162,7 +185,9 @@ private final class SessionSummaryService {
         return tokenEstimate >= refreshTokenEstimateThreshold
     }
 
-    private func generateSummary(_ messages: [ChatMessage], currentMode: ConversationMode) -> String {
+    private func generateSummary(_ messages: [ChatMessage],
+                                 currentMode: ConversationMode,
+                                 latestUserTurn: String) -> String {
         let clipped = Array(messages.suffix(40))
         guard !clipped.isEmpty else { return cachedSummary }
 
@@ -188,12 +213,57 @@ private final class SessionSummaryService {
             bullets.append("- Earlier key detail: \(earlyDetail)")
         }
 
-        let recentUser = clipped.reversed().first(where: { $0.role == .user })?.text ?? ""
-        if !recentUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            bullets.append("- Latest user turn: \(clipLine(recentUser, max: 120))")
+        let recentUser = !latestUserTurn.isEmpty
+            ? latestUserTurn
+            : (clipped.reversed().first(where: { $0.role == .user })?.text ?? "")
+        let normalizedRecentUser = normalizedSummaryLine(recentUser)
+        if !normalizedRecentUser.isEmpty {
+            bullets.append("- Latest user turn: \(clipLine(normalizedRecentUser, max: 120))")
         }
 
         return Array(bullets.prefix(8)).joined(separator: "\n")
+    }
+
+    private func refreshVolatileBullets(in summary: String,
+                                        currentMode: ConversationMode,
+                                        latestUserTurn: String) -> String {
+        var lines = summary
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard !lines.isEmpty else { return summary }
+
+        let topicLine = "- Active topic: \(currentMode.intent.rawValue)/\(currentMode.domain.rawValue)"
+        let latestLine = latestUserTurn.isEmpty ? "" : "- Latest user turn: \(clipLine(latestUserTurn, max: 120))"
+
+        var hasTopic = false
+        var hasLatest = false
+        for idx in lines.indices {
+            if lines[idx].hasPrefix("- Active topic:") {
+                lines[idx] = topicLine
+                hasTopic = true
+            } else if lines[idx].hasPrefix("- Latest user turn:") {
+                if !latestLine.isEmpty {
+                    lines[idx] = latestLine
+                    hasLatest = true
+                }
+            }
+        }
+
+        if !hasTopic {
+            lines.insert(topicLine, at: 0)
+        }
+        if !latestLine.isEmpty && !hasLatest {
+            lines.append(latestLine)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func normalizedSummaryLine(_ text: String) -> String {
+        let single = text.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !single.isEmpty else { return "" }
+        return single.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
     }
 
     private func latestUserGoal(in messages: [ChatMessage]) -> String? {
@@ -456,7 +526,6 @@ func withTimeout<T: Sendable>(_ seconds: Double, _ op: @Sendable @escaping () as
 final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
     private let openAIRouter: OpenAIRouter
-    private let mockRouter = MockRouter()
     private let summaryService = SessionSummaryService()
     private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
@@ -535,7 +604,11 @@ final class TurnOrchestrator {
         purgeExpiredFacts(now: now)
         updateRecentFacts(with: text, mode: mode, now: now)
         updateQuestionAnswerState(with: text)
-        let sessionSummary = summaryService.currentSummary(history: history, currentMode: mode)
+        let sessionSummary = summaryService.currentSummary(
+            history: history,
+            currentMode: mode,
+            latestUserTurn: text
+        )
         let promptContext = buildPromptRuntimeContext(
             mode: mode,
             userInput: text,
@@ -635,15 +708,18 @@ final class TurnOrchestrator {
 
     // MARK: - Brain Router Pipeline
 
-    /// Routes: OpenAI ONLY when configured → Ollama ONLY when OpenAI not configured → MockRouter.
+    /// Routes: OpenAI ONLY when configured → Ollama ONLY when OpenAI missing and enabled → auth error fallback.
     /// No provider hopping. If JSON parses, accept it. No validation repair loops.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
                            reason: LLMCallReason = .userChat,
                            promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?) {
+        OpenAISettings.preloadAPIKey()
+        OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
+        let keyStatus = OpenAISettings.apiKeyStatus
 
         // A) OpenAI ONLY (when configured — no Ollama fallback)
-        if OpenAISettings.isConfigured {
+        if keyStatus == .ready {
             let start = CFAbsoluteTimeGetCurrent()
             let selectedModel = selectOpenAIModel(for: text, reason: reason)
             do {
@@ -669,14 +745,18 @@ final class TurnOrchestrator {
             }
         }
 
+        // A2) OpenAI key is present but known invalid (401/403) — fail fast with explicit auth error.
+        if keyStatus == .invalid {
+            return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil)
+        }
+
         // B) Ollama standalone (OpenAI not configured, useOllama enabled)
         if M2Settings.useOllama {
             return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason, promptContext: promptContext)
         }
 
-        // C) Nothing configured — MockRouter
-        let action = mockRouter.route(text)
-        return (Plan.fromAction(action), .none, 0, nil)
+        // C) No usable model route — return clear auth error.
+        return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil)
     }
 
     /// Ollama attempt — single call, no validation repair.
@@ -2162,9 +2242,16 @@ final class TurnOrchestrator {
         } else if let e = error as? OpenAIRouter.OpenAIError {
             switch e {
             case .notConfigured:
-                msg = "OpenAI isn't configured. Add your API key in Settings."
+                msg = "OpenAI API key missing/invalid. Add or update it in Settings."
+            case .invalidAPIKey:
+                msg = "OpenAI API key missing/invalid. Add or update it in Settings."
             case .badResponse(let code):
-                msg = "OpenAI returned an error (HTTP \(code)). Please try again."
+                if code == 401 || code == 403 {
+                    OpenAISettings.markAPIKeyRejected(statusCode: code)
+                    msg = "OpenAI API key missing/invalid. Add or update it in Settings."
+                } else {
+                    msg = "OpenAI returned an error (HTTP \(code)). Please try again."
+                }
             case .requestFailed:
                 msg = "I couldn't reach OpenAI. Check your connection and try again."
             }

@@ -885,6 +885,66 @@ final class RouterPipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testConversationSummaryFreshnessUsesCurrentModeAndLatestUserTurn() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON), .success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let longHistory: [ChatMessage] = [
+            ChatMessage(role: .user, text: "my dog's name is Bingo"),
+            ChatMessage(role: .assistant, text: "Noted, I'll remember that."),
+            ChatMessage(role: .user, text: "we're planning a weekend hike"),
+            ChatMessage(role: .assistant, text: "Great, I can help with a checklist."),
+            ChatMessage(role: .user, text: "keep it compact because i have a small car"),
+            ChatMessage(role: .assistant, text: "Understood, compact and practical."),
+            ChatMessage(role: .user, text: "what are weather risks"),
+            ChatMessage(role: .assistant, text: "Rain and wind are key factors."),
+            ChatMessage(role: .user, text: "i also want safety tips"),
+            ChatMessage(role: .assistant, text: "Sure, I'll include safety checks."),
+            ChatMessage(role: .user, text: "please keep answers medium length"),
+            ChatMessage(role: .assistant, text: "Will do.")
+        ]
+
+        _ = await orchestrator.processTurn("my tummy is sore", history: longHistory)
+        _ = await orchestrator.processTurn("my engine is making a funny noise", history: longHistory)
+
+        XCTAssertEqual(fakeOpenAI.chatCallLog.count, 2)
+        let secondCall = fakeOpenAI.chatCallLog[1]
+
+        guard let summaryMessage = secondCall.first(where: { message in
+            message["role"] == "system" && (message["content"] ?? "").contains("[CONVERSATION_SUMMARY]")
+        })?["content"] else {
+            return XCTFail("Expected [CONVERSATION_SUMMARY] in second call")
+        }
+        let summaryLower = summaryMessage.lowercased()
+        XCTAssertTrue(
+            summaryLower.contains("active topic: problem_report/vehicle"),
+            "Summary active topic should reflect current mode domain; got: \(summaryMessage)"
+        )
+        XCTAssertTrue(
+            summaryLower.contains("latest user turn: my engine is making a funny noise"),
+            "Summary latest user turn should reflect current input; got: \(summaryMessage)"
+        )
+
+        guard let modeMessage = secondCall.first(where: { message in
+            message["role"] == "system" && (message["content"] ?? "").contains("[MODE]")
+        })?["content"] else {
+            return XCTFail("Expected [MODE] in second call")
+        }
+        XCTAssertTrue(modeMessage.contains("\"intent\":\"problem_report\""))
+        XCTAssertTrue(modeMessage.contains("\"domain\":\"vehicle\""))
+    }
+
+    @MainActor
     func testToolResultFeedbackLoopSynthesizesFinalAnswer() async {
         let initial = """
         {"action":"PLAN","steps":[{"step":"tool","name":"show_text","args":{"markdown":"# Weather\\n- Rain chance: 62%\\n- Bring an umbrella"}}]}
@@ -1544,6 +1604,56 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertTrue(result.appendedChat.contains { $0.text.lowercased().contains("openai") })
     }
 
+    @MainActor
+    func testColdStartLoadsSavedOpenAIKeyBeforeFirstTurn() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "cold-start-test-key"
+        OpenAISettings._resetCacheForTesting() // Simulate first turn after app launch.
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Cold start should load key before first OpenAI route")
+        XCTAssertEqual(fakeOllama.chatCallCount, 0)
+        XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    @MainActor
+    func testInvalidAPIKeyReturnsClearErrorAndBlocksSubsequentOpenAICalls() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .failure(OpenAIRouter.OpenAIError.badResponse(401)),
+            .success(validTalkJSON)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-401"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-401"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let first = await orchestrator.processTurn("hello", history: [])
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
+        let firstText = first.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        XCTAssertTrue(firstText.contains("api key missing/invalid"), "Expected explicit auth error, got: \(firstText)")
+
+        let second = await orchestrator.processTurn("hello again", history: [])
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Second turn should fail fast without calling OpenAI again")
+        let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        XCTAssertTrue(secondText.contains("api key missing/invalid"), "Expected persistent auth error, got: \(secondText)")
+    }
+
     // MARK: - F) Ollama standalone when OpenAI not configured
 
     @MainActor
@@ -1568,10 +1678,10 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(result.llmProvider, .ollama)
     }
 
-    // MARK: - G) Nothing configured uses MockRouter
+    // MARK: - G) Nothing configured returns explicit auth error
 
     @MainActor
-    func testNothingConfiguredUsesMockRouter() async {
+    func testNothingConfiguredReturnsAuthError() async {
         let fakeOpenAI = FakeOpenAITransport()
         let fakeOllama = FakeOllamaTransportForPipeline()
 
@@ -1588,8 +1698,9 @@ final class RouterPipelineTests: XCTestCase {
 
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
         XCTAssertEqual(fakeOllama.chatCallCount, 0)
-        XCTAssertEqual(result.llmProvider, .none, "MockRouter should yield .none provider")
-        XCTAssertFalse(result.appendedChat.isEmpty, "Should have some response from MockRouter")
+        XCTAssertEqual(result.llmProvider, .none)
+        let assistantText = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        XCTAssertTrue(assistantText.contains("api key missing/invalid"), "Expected explicit auth guidance, got: \(assistantText)")
     }
 
     // MARK: - H) OpenAI valid TALK → immediate return, no retry, no fallback
@@ -2056,6 +2167,62 @@ final class RouterPipelineTests: XCTestCase {
         } catch {
             XCTFail("Should not throw — should be salvaged: \(error)")
         }
+    }
+
+    @MainActor
+    func testPlanStepAliasShowTextWithTextArgIsNormalizedAndExecuted() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"step":"show_text","name":"show_text","args":{"text":"# Pancake Recipe\\n1. Mix\\n2. Cook"},"say":"Here you go."}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("show me pancake steps", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "show_text" }))
+        let markdownPayload = result.appendedOutputs.first(where: { $0.kind == .markdown })?.payload ?? ""
+        XCTAssertTrue(markdownPayload.contains("Pancake"), "Expected show_text markdown output, got: \(markdownPayload)")
+        XCTAssertFalse(result.appendedChat.contains(where: { $0.text.contains("trouble processing") }),
+                       "Should not fall back to friendly parse error")
+    }
+
+    @MainActor
+    func testPlanStepAliasShowTextWithoutNameIsNormalizedAndExecuted() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"step":"show_text","args":{"text":"# Waffle Recipe\\n1. Stir\\n2. Bake"},"say":"Done."}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("show me waffle steps", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.contains(where: { step in
+            step.name == "show_text" && (step.args["markdown"]?.contains("Waffle") == true || step.args["text"]?.contains("Waffle") == true)
+        }), "Expected normalized show_text execution, got: \(result.executedToolSteps)")
+        let markdownPayload = result.appendedOutputs.first(where: { $0.kind == .markdown })?.payload ?? ""
+        XCTAssertTrue(markdownPayload.contains("Waffle"), "Expected show_text markdown output, got: \(markdownPayload)")
+        XCTAssertFalse(result.appendedChat.contains(where: { $0.text.contains("trouble processing") }),
+                       "Should not fall back to friendly parse error")
     }
 
     // MARK: - L) Malformed show_image JSON salvaged as show_image tool

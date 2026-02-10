@@ -27,6 +27,14 @@ enum OpenAISettings {
 
     private static var _cachedApiKey: String?
     private static var _cacheLoaded = false
+    private static var _invalidatedApiKey: String?
+    private static var _lastAuthFailureStatusCode: Int?
+
+    enum APIKeyStatus: Equatable {
+        case missing
+        case ready
+        case invalid
+    }
 
     static var apiKey: String {
         get {
@@ -41,6 +49,8 @@ enum OpenAISettings {
                     KeychainStore.delete(forKey: keychainAccount, service: keychainService)
                 }
                 _cachedApiKey = ""
+                _invalidatedApiKey = nil
+                _lastAuthFailureStatusCode = nil
                 defaults.removeObject(forKey: Key.keySavedAt)
             } else {
                 #if DEBUG
@@ -48,6 +58,10 @@ enum OpenAISettings {
                 #endif
                 if KeychainStore.useKeychain {
                     _ = KeychainStore.set(normalized, forKey: keychainAccount, service: keychainService)
+                }
+                if _invalidatedApiKey != normalized {
+                    _invalidatedApiKey = nil
+                    _lastAuthFailureStatusCode = nil
                 }
                 _cachedApiKey = normalized
                 defaults.set(Date(), forKey: Key.keySavedAt)
@@ -184,7 +198,49 @@ enum OpenAISettings {
     // MARK: - Validation
 
     static var isConfigured: Bool {
-        !apiKey.isEmpty
+        apiKeyStatus == .ready
+    }
+
+    static var apiKeyStatus: APIKeyStatus {
+        let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return .missing }
+        if _invalidatedApiKey == normalized {
+            return .invalid
+        }
+        return .ready
+    }
+
+    static var hasStoredAPIKey: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func preloadAPIKey() {
+        _ = apiKey
+    }
+
+    static func markAPIKeyRejected(statusCode: Int) {
+        guard statusCode == 401 || statusCode == 403 else { return }
+        let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        _invalidatedApiKey = normalized
+        _lastAuthFailureStatusCode = statusCode
+    }
+
+    static func clearInvalidatedAPIKeyIfNeeded() {
+        let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            _invalidatedApiKey = nil
+            _lastAuthFailureStatusCode = nil
+            return
+        }
+        if _invalidatedApiKey != normalized {
+            _invalidatedApiKey = nil
+            _lastAuthFailureStatusCode = nil
+        }
+    }
+
+    static var authFailureStatusCode: Int? {
+        _lastAuthFailureStatusCode
     }
 
     // MARK: - Testing Support
@@ -192,6 +248,8 @@ enum OpenAISettings {
     static func _resetCacheForTesting() {
         _cachedApiKey = nil
         _cacheLoaded = false
+        _invalidatedApiKey = nil
+        _lastAuthFailureStatusCode = nil
     }
 }
 
