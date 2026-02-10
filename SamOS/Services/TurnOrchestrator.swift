@@ -23,6 +23,409 @@ private struct LocalKnowledgeContext {
     }
 }
 
+enum ConversationIntent: String, CaseIterable, Codable {
+    case greeting
+    case problemReport = "problem_report"
+    case howto
+    case taskRequest = "task_request"
+    case decisionHelp = "decision_help"
+    case creative
+    case memoryRecall = "memory_recall"
+    case other
+}
+
+enum ConversationDomain: String, CaseIterable, Codable {
+    case health
+    case vehicle
+    case tech
+    case home
+    case work
+    case relationship
+    case general
+    case unknown
+}
+
+enum ConversationUrgency: String, CaseIterable, Codable {
+    case low
+    case medium
+    case high
+}
+
+enum UserGoalHint: String, CaseIterable, Codable {
+    case quickFix = "quick_fix"
+    case understand
+    case stepByStep = "step_by_step"
+    case unknown
+}
+
+struct ConversationMode: Codable, Equatable {
+    let intent: ConversationIntent
+    let domain: ConversationDomain
+    let urgency: ConversationUrgency
+    let needsClarification: Bool
+    let userGoalHint: UserGoalHint
+
+    static let fallback = ConversationMode(
+        intent: .other,
+        domain: .unknown,
+        urgency: .low,
+        needsClarification: false,
+        userGoalHint: .unknown
+    )
+}
+
+struct ResponseLengthBudget: Codable, Equatable {
+    let maxOutputTokens: Int
+    let chatMinTokens: Int
+    let chatMaxTokens: Int
+    let preferCanvasForLongResponses: Bool
+
+    static let `default` = ResponseLengthBudget(
+        maxOutputTokens: 320,
+        chatMinTokens: 120,
+        chatMaxTokens: 350,
+        preferCanvasForLongResponses: true
+    )
+}
+
+struct PromptRuntimeContext: Equatable {
+    let mode: ConversationMode
+    let sessionSummary: String
+    let interactionStateJSON: String
+    let responseBudget: ResponseLengthBudget
+}
+
+private struct RecentFact {
+    let text: String
+    let expiresAt: Date
+}
+
+private final class IntentRepetitionTracker {
+    private struct Event {
+        let intent: ConversationIntent
+        let date: Date
+    }
+
+    private var events: [Event] = []
+
+    func record(_ intent: ConversationIntent, at date: Date = Date()) {
+        prune(now: date)
+        events.append(Event(intent: intent, date: date))
+    }
+
+    func count(for intent: ConversationIntent, within seconds: TimeInterval = 30 * 60, now: Date = Date()) -> Int {
+        prune(now: now, window: seconds)
+        return events.reduce(0) { partial, event in
+            partial + (event.intent == intent ? 1 : 0)
+        }
+    }
+
+    func countsByIntent(within seconds: TimeInterval = 30 * 60, now: Date = Date()) -> [String: Int] {
+        prune(now: now, window: seconds)
+        var counts: [String: Int] = [:]
+        for event in events {
+            counts[event.intent.rawValue, default: 0] += 1
+        }
+        return counts
+    }
+
+    private func prune(now: Date, window: TimeInterval = 30 * 60) {
+        events.removeAll { now.timeIntervalSince($0.date) > window }
+    }
+}
+
+private final class SessionSummaryService {
+    private var cachedSummary: String = ""
+    private var lastMessageCountAtRefresh = 0
+    private let refreshMessageDelta = 10
+    private let refreshTokenEstimateThreshold = 900
+
+    func currentSummary(history: [ChatMessage], currentMode: ConversationMode) -> String {
+        let nonSystem = history.filter { $0.role != .system }
+        guard !nonSystem.isEmpty else { return cachedSummary }
+
+        let shouldRefresh = needsRefresh(nonSystem)
+        if shouldRefresh {
+            let generated = generateSummary(nonSystem, currentMode: currentMode)
+            if !generated.isEmpty {
+                cachedSummary = generated
+                lastMessageCountAtRefresh = nonSystem.count
+            }
+        }
+        return cachedSummary
+    }
+
+    private func needsRefresh(_ messages: [ChatMessage]) -> Bool {
+        if cachedSummary.isEmpty { return messages.count >= 10 }
+        if messages.count - lastMessageCountAtRefresh >= refreshMessageDelta { return true }
+        let tokenEstimate = messages.reduce(0) { $0 + max(1, $1.text.count / 4) }
+        return tokenEstimate >= refreshTokenEstimateThreshold
+    }
+
+    private func generateSummary(_ messages: [ChatMessage], currentMode: ConversationMode) -> String {
+        let clipped = Array(messages.suffix(40))
+        guard !clipped.isEmpty else { return cachedSummary }
+
+        var bullets: [String] = []
+
+        let topic = "\(currentMode.intent.rawValue)/\(currentMode.domain.rawValue)"
+        bullets.append("- Active topic: \(topic)")
+
+        if let goal = latestUserGoal(in: clipped) {
+            bullets.append("- User goal: \(goal)")
+        }
+
+        let constraints = extractConstraints(from: clipped)
+        if !constraints.isEmpty {
+            bullets.append("- Constraints: \(constraints.joined(separator: "; "))")
+        }
+
+        if let qa = lastQuestionAnswerPair(in: clipped) {
+            bullets.append("- Last Q/A: Q=\(qa.question) A=\(qa.answer)")
+        }
+
+        if let earlyDetail = earlyKeyDetail(in: clipped) {
+            bullets.append("- Earlier key detail: \(earlyDetail)")
+        }
+
+        let recentUser = clipped.reversed().first(where: { $0.role == .user })?.text ?? ""
+        if !recentUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            bullets.append("- Latest user turn: \(clipLine(recentUser, max: 120))")
+        }
+
+        return Array(bullets.prefix(8)).joined(separator: "\n")
+    }
+
+    private func latestUserGoal(in messages: [ChatMessage]) -> String? {
+        let users = messages.reversed().filter { $0.role == .user }
+        for user in users {
+            let text = user.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let lower = text.lowercased()
+            if lower.contains("quick") || lower.contains("fast") || lower.contains("fix") {
+                return "quick fix"
+            }
+            if lower.contains("step by step") || lower.contains("walk me through") {
+                return "step-by-step guidance"
+            }
+            if lower.contains("why") || lower.contains("understand") {
+                return "understand root cause"
+            }
+            return clipLine(text, max: 90)
+        }
+        return nil
+    }
+
+    private func extractConstraints(from messages: [ChatMessage]) -> [String] {
+        var items: [String] = []
+        for message in messages where message.role == .user {
+            let text = message.text.lowercased()
+            if text.contains("can't") || text.contains("cannot") {
+                items.append("reported limitation")
+            }
+            if text.contains("deadline") || text.contains("today") || text.contains("tomorrow") {
+                items.append("time-sensitive")
+            }
+            if text.contains("budget") || text.contains("cheap") {
+                items.append("budget-sensitive")
+            }
+        }
+        return Array(Set(items)).sorted()
+    }
+
+    private func lastQuestionAnswerPair(in messages: [ChatMessage]) -> (question: String, answer: String)? {
+        for index in stride(from: messages.count - 1, through: 0, by: -1) {
+            let message = messages[index]
+            guard message.role == .assistant else { continue }
+            let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasSuffix("?") else { continue }
+            let answer = messages[(index + 1)...].first(where: { $0.role == .user })?.text ?? ""
+            guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            return (clipLine(trimmed, max: 100), clipLine(answer, max: 100))
+        }
+        return nil
+    }
+
+    private func earlyKeyDetail(in messages: [ChatMessage]) -> String? {
+        for message in messages where message.role == .user {
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 12 else { continue }
+            let lower = text.lowercased()
+            if lower.contains("my ") || lower.contains("i need") || lower.contains("i have") {
+                return clipLine(text, max: 110)
+            }
+        }
+        return nil
+    }
+
+    private func clipLine(_ text: String, max: Int) -> String {
+        let single = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard single.count > max else { return single }
+        return String(single.prefix(max - 3)) + "..."
+    }
+}
+
+private enum ConversationModeClassifier {
+    static func classify(_ input: String) -> ConversationMode {
+        let normalized = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return .fallback }
+        let lower = normalized.lowercased()
+
+        let domain = detectDomain(lower)
+        let intent = detectIntent(lower)
+        let urgency = detectUrgency(lower, intent: intent, domain: domain)
+        let needsClarification = detectNeedsClarification(lower, intent: intent)
+        let goalHint = detectGoalHint(lower)
+
+        return ConversationMode(
+            intent: intent,
+            domain: domain,
+            urgency: urgency,
+            needsClarification: needsClarification,
+            userGoalHint: goalHint
+        )
+    }
+
+    private static func detectIntent(_ lower: String) -> ConversationIntent {
+        if isGreeting(lower) { return .greeting }
+        if isMemoryRecall(lower) { return .memoryRecall }
+        if isCreative(lower) { return .creative }
+        if isDecisionHelp(lower) { return .decisionHelp }
+        if isHowTo(lower) { return .howto }
+        if isTaskRequest(lower) { return .taskRequest }
+        if isProblemReport(lower) { return .problemReport }
+        return .other
+    }
+
+    private static func detectDomain(_ lower: String) -> ConversationDomain {
+        let padded = " \(lower) "
+        if hasAny(lower, [
+            "tummy", "stomach", "abdomen", "abdominal", "pain", "sore", "nausea", "vomit",
+            "diarrhea", "fever", "blood", "faint", "dizzy", "hydration", "headache", "chest pain"
+        ]) || hasAny(lower, [
+            "dont feel well", "don't feel well", "feel unwell", "not feeling well"
+        ]) { return .health }
+        if hasAny(lower, [
+            "car", "engine", "vehicle", "brake", "oil", "transmission", "accelerat", "overheat",
+            "smoke", "fuel smell", "dashboard", "warning light", "tire", "battery"
+        ]) { return .vehicle }
+        if hasAny(lower, [
+            "wifi", "wi-fi", "internet", "router", "nbn", "computer", "macbook", "laptop", "phone",
+            "software", "error", "bug", "crash", "network", "password", "hacked", "malware"
+        ]) || padded.contains(" app ") { return .tech }
+        if hasAny(lower, [
+            "house", "home", "leak", "plumbing", "heater", "ac ", "aircon", "fridge", "electric",
+            "power outage", "roof", "mold", "appliance", "kitchen"
+        ]) { return .home }
+        if hasAny(lower, [
+            "work", "job", "deadline", "meeting", "manager", "boss", "coworker", "project", "client"
+        ]) { return .work }
+        if hasAny(lower, [
+            "partner", "relationship", "boyfriend", "girlfriend", "spouse", "friend", "family conflict"
+        ]) { return .relationship }
+        if hasAny(lower, ["general", "anything", "topic"]) { return .general }
+        return .unknown
+    }
+
+    private static func detectUrgency(_ lower: String, intent: ConversationIntent, domain: ConversationDomain) -> ConversationUrgency {
+        if hasAny(lower, [
+            "urgent", "right now", "immediately", "severe", "worst", "can't breathe", "fainting",
+            "black stool", "blood", "persistent vomiting", "rigid abdomen",
+            "oil pressure", "overheating", "smoke", "strong fuel smell", "loss of power", "knocking",
+            "data loss", "security breach", "hacked"
+        ]) {
+            return .high
+        }
+        if intent == .problemReport {
+            if domain == .health || domain == .vehicle || domain == .tech {
+                return .medium
+            }
+        }
+        return .low
+    }
+
+    private static func detectNeedsClarification(_ lower: String, intent: ConversationIntent) -> Bool {
+        switch intent {
+        case .problemReport, .decisionHelp, .howto:
+            return true
+        case .taskRequest:
+            return lower.contains("set ") || lower.contains("schedule ")
+        default:
+            return false
+        }
+    }
+
+    private static func detectGoalHint(_ lower: String) -> UserGoalHint {
+        if hasAny(lower, ["quick", "quickly", "fast", "asap", "right now", "quick fix", "fix now"]) {
+            return .quickFix
+        }
+        if hasAny(lower, ["step by step", "walk me through", "guide me", "how do i"]) {
+            return .stepByStep
+        }
+        if hasAny(lower, ["why", "understand", "what causes", "explain"]) {
+            return .understand
+        }
+        return .unknown
+    }
+
+    private static func isGreeting(_ lower: String) -> Bool {
+        let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+        let simpleGreetings = [
+            "hi", "hello", "hey", "yo", "hiya", "good morning", "good afternoon", "good evening",
+            "how are you", "how are you doing", "what's up", "whats up"
+        ]
+        if simpleGreetings.contains(trimmed) { return true }
+        if trimmed.count <= 30 && hasAny(trimmed, ["hi ", "hello", "hey ", "hey!"]) {
+            return true
+        }
+        return false
+    }
+
+    private static func isProblemReport(_ lower: String) -> Bool {
+        if hasAny(lower, [
+            "don't feel well", "dont feel well", "feel unwell", "not feeling well", "sore", "hurts",
+            "pain", "issue", "problem", "not working", "broken", "keeps", "won't", "wont", "dropping out",
+            "funny noise", "strange noise", "engine noise", "warning light", "oil pressure light", "came on",
+            "overheating", "crashing", "failing", "leak", "leaking", "disconnects", "hacked", "stopped working",
+            "deadline", "changed", "conflict", "fighting"
+        ]) {
+            return true
+        }
+        return lower.hasPrefix("my ") && hasAny(lower, ["is ", "keeps ", "won't", "not"])
+    }
+
+    private static func isHowTo(_ lower: String) -> Bool {
+        hasAny(lower, ["how do i", "how to", "walk me through", "step by step", "tutorial", "instructions"])
+    }
+
+    private static func isTaskRequest(_ lower: String) -> Bool {
+        if hasAny(lower, ["set an alarm", "set a timer", "remind me", "schedule", "create", "send", "open", "find"]) {
+            return true
+        }
+        let imperativePrefixes = ["set ", "remind ", "schedule ", "open ", "create ", "send "]
+        return imperativePrefixes.contains { lower.hasPrefix($0) }
+    }
+
+    private static func isDecisionHelp(_ lower: String) -> Bool {
+        hasAny(lower, ["should i", "which should", "which is better", "pros and cons", "compare", "decision"])
+    }
+
+    private static func isCreative(_ lower: String) -> Bool {
+        hasAny(lower, ["write a", "poem", "story", "joke", "brainstorm", "ideas for"])
+    }
+
+    private static func isMemoryRecall(_ lower: String) -> Bool {
+        hasAny(lower, [
+            "what did i say", "what do you remember", "remember what", "my dog's name was",
+            "my dog’s name was", "do you remember", "what was my", "what do you know about me"
+        ])
+    }
+
+    private static func hasAny(_ haystack: String, _ needles: [String]) -> Bool {
+        needles.contains { haystack.contains($0) }
+    }
+}
+
 @MainActor
 protocol TurnOrchestrating: AnyObject {
     var pendingSlot: PendingSlot? { get set }
@@ -54,9 +457,17 @@ final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
     private let openAIRouter: OpenAIRouter
     private let mockRouter = MockRouter()
+    private let summaryService = SessionSummaryService()
+    private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
     private let followUpCooldownTurns: Int
     private var recentAssistantLines: [String] = []
+    private var recentFacts: [RecentFact] = []
+    private var lastAssistantQuestion: String?
+    private var lastAssistantQuestionAnswered = false
+    private var lastAssistantOpeners: [String] = []
+    private var lastPromptContext: PromptRuntimeContext?
+    private var lastFinalActionKind: String = "UNKNOWN"
     private var canvasConfirmationIndex = 0
     private let canvasConfirmations = [
         "I've put the details up here.",
@@ -75,6 +486,7 @@ final class TurnOrchestrator {
         "what", "when", "where", "why", "how", "is", "are", "was", "were", "be", "to",
         "for", "of", "in", "on", "at", "by", "with", "without", "from", "into", "about",
         "tell", "show", "check", "find", "learn", "need", "good", "time", "call", "me", "you",
+        "should", "would", "could", "can",
         "your", "my", "it", "this", "that"
     ]
     private var turnCounter = 0
@@ -83,9 +495,11 @@ final class TurnOrchestrator {
     private var followUpQuestionIndex = 0
     private let openAIRouteTimeoutSeconds: Double = 5.0
     private let openAIImageRepairTimeoutSeconds: Double = 3.0
-    private let toolFeedbackLoopMaxDepth = 3
+    private let toolFeedbackLoopMaxDepth = 2
     private let maxRephraseBudgetMs = 700
-    private let maxToolFeedbackBudgetMs = 1800
+    private let maxToolFeedbackBudgetMs = 3600
+    private let openAIToolFeedbackTimeoutSeconds: Double = 2.2
+    private let ollamaToolFeedbackTimeoutSeconds: Double = 1.2
 
     var pendingSlot: PendingSlot? = nil
 
@@ -112,9 +526,24 @@ final class TurnOrchestrator {
     func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
         turnCounter += 1
         let currentTurn = turnCounter
+        let now = Date()
         let turnStartedAt = Date()
         let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
+        let mode = ConversationModeClassifier.classify(text)
+        intentRepetitionTracker.record(mode.intent, at: now)
+        purgeExpiredFacts(now: now)
+        updateRecentFacts(with: text, mode: mode, now: now)
+        updateQuestionAnswerState(with: text)
+        let sessionSummary = summaryService.currentSummary(history: history, currentMode: mode)
+        let promptContext = buildPromptRuntimeContext(
+            mode: mode,
+            userInput: text,
+            history: history,
+            sessionSummary: sessionSummary,
+            now: now
+        )
+        lastPromptContext = promptContext
 
         // PendingSlot handling — always route through LLM
         if var slot = pendingSlot {
@@ -130,15 +559,22 @@ final class TurnOrchestrator {
                 return result
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(text, history: history, pendingSlot: slot, reason: .pendingSlotReply)
+                let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(
+                    text,
+                    history: history,
+                    pendingSlot: slot,
+                    reason: .pendingSlotReply,
+                    promptContext: promptContext
+                )
                 let plan = await maybeRephraseRepeatedTalk(rawPlan,
                                                            userInput: text,
                                                            history: history,
-                                                           provider: provider,
+                                                           mode: mode,
                                                            turnStartedAt: turnStartedAt)
+                let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
 
                 // Check if returned plan has an ask step for the same slot
-                let hasRepeatAsk = plan.steps.contains { step in
+                let hasRepeatAsk = shapedPlan.steps.contains { step in
                     if case .ask(let stepSlot, _) = step,
                        !normalizedSlotSet(from: stepSlot).isDisjoint(with: normalizedSlotSet(from: slot.slotName)) {
                         return true
@@ -153,7 +589,8 @@ final class TurnOrchestrator {
                     pendingSlot = nil
                 }
 
-                return await executePlan(plan,
+                lastFinalActionKind = inferredActionKind(for: shapedPlan)
+                return await executePlan(shapedPlan,
                                          originalInput: text,
                                          history: history,
                                          provider: provider,
@@ -163,18 +600,26 @@ final class TurnOrchestrator {
                                          hasMemoryHints: hasMemoryHints,
                                          turnIndex: currentTurn,
                                          feedbackDepth: 0,
-                                         turnStartedAt: turnStartedAt)
+                                         turnStartedAt: turnStartedAt,
+                                         mode: mode)
             }
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(text, history: history, reason: .userChat)
+        let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(
+            text,
+            history: history,
+            reason: .userChat,
+            promptContext: promptContext
+        )
         let plan = await maybeRephraseRepeatedTalk(rawPlan,
                                                    userInput: text,
                                                    history: history,
-                                                   provider: provider,
+                                                   mode: mode,
                                                    turnStartedAt: turnStartedAt)
-        return await executePlan(plan,
+        let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
+        lastFinalActionKind = inferredActionKind(for: shapedPlan)
+        return await executePlan(shapedPlan,
                                  originalInput: text,
                                  history: history,
                                  provider: provider,
@@ -184,7 +629,8 @@ final class TurnOrchestrator {
                                  hasMemoryHints: hasMemoryHints,
                                  turnIndex: currentTurn,
                                  feedbackDepth: 0,
-                                 turnStartedAt: turnStartedAt)
+                                 turnStartedAt: turnStartedAt,
+                                 mode: mode)
     }
 
     // MARK: - Brain Router Pipeline
@@ -193,7 +639,8 @@ final class TurnOrchestrator {
     /// No provider hopping. If JSON parses, accept it. No validation repair loops.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
-                           reason: LLMCallReason = .userChat) async -> (Plan, LLMProvider, Int, String?) {
+                           reason: LLMCallReason = .userChat,
+                           promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?) {
 
         // A) OpenAI ONLY (when configured — no Ollama fallback)
         if OpenAISettings.isConfigured {
@@ -206,6 +653,7 @@ final class TurnOrchestrator {
                         text,
                         history: history,
                         pendingSlot: pendingSlot,
+                        promptContext: promptContext,
                         modelOverride: selectedModel
                     )
                 }
@@ -223,7 +671,7 @@ final class TurnOrchestrator {
 
         // B) Ollama standalone (OpenAI not configured, useOllama enabled)
         if M2Settings.useOllama {
-            return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason)
+            return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason, promptContext: promptContext)
         }
 
         // C) Nothing configured — MockRouter
@@ -234,11 +682,12 @@ final class TurnOrchestrator {
     /// Ollama attempt — single call, no validation repair.
     private func ollamaFallback(_ text: String, history: [ChatMessage],
                                 pendingSlot: PendingSlot?,
-                                reason: LLMCallReason) async -> (Plan, LLMProvider, Int, String?) {
+                                reason: LLMCallReason,
+                                promptContext: PromptRuntimeContext?) async -> (Plan, LLMProvider, Int, String?) {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let plan = try await withTimeout(4.0) {
-                try await self.ollamaRouter.routePlan(text, history: history, pendingSlot: pendingSlot)
+                try await self.ollamaRouter.routePlan(text, history: history, pendingSlot: pendingSlot, promptContext: promptContext)
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
@@ -262,7 +711,8 @@ final class TurnOrchestrator {
                              hasMemoryHints: Bool,
                              turnIndex: Int,
                              feedbackDepth: Int,
-                             turnStartedAt: Date) async -> TurnResult {
+                             turnStartedAt: Date,
+                             mode: ConversationMode) async -> TurnResult {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
 
         var result = TurnResult()
@@ -312,10 +762,10 @@ final class TurnOrchestrator {
             result.triggerFollowUpCapture = true
         }
 
+        let shouldNarrateProgress = shouldNarrateToolProgress(for: originalInput, plan: plan)
         let forceToolFeedback = shouldForceToolFeedback(for: originalInput, plan: plan)
-        if forceToolFeedback,
-           let progress = firstToolProgressLine(from: plan) {
-            prependAssistantProgressLine(progress, into: &result, provider: provider)
+        if shouldNarrateProgress {
+            prependAssistantProgressLines(toolProgressLines(from: plan), into: &result, provider: provider)
         }
 
         await applyToolResultFeedbackLoop(
@@ -325,6 +775,7 @@ final class TurnOrchestrator {
             provider: provider,
             aiModelUsed: aiModelUsed,
             force: forceToolFeedback,
+            allowFeedback: shouldAllowToolFeedback(for: plan),
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
@@ -336,6 +787,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        updateAssistantState(after: result, mode: mode)
         rememberAssistantLines(result.appendedChat)
         return result
     }
@@ -461,10 +913,10 @@ final class TurnOrchestrator {
             result.triggerFollowUpCapture = true
         }
 
+        let shouldNarrateProgress = shouldNarrateToolProgress(for: originalInput, plan: plan)
         let forceToolFeedback = shouldForceToolFeedback(for: originalInput, plan: plan)
-        if forceToolFeedback,
-           let progress = firstToolProgressLine(from: plan) {
-            prependAssistantProgressLine(progress, into: &result, provider: provider)
+        if shouldNarrateProgress {
+            prependAssistantProgressLines(toolProgressLines(from: plan), into: &result, provider: provider)
         }
 
         await applyToolResultFeedbackLoop(
@@ -474,6 +926,7 @@ final class TurnOrchestrator {
             provider: provider,
             aiModelUsed: aiModelUsed,
             force: forceToolFeedback,
+            allowFeedback: shouldAllowToolFeedback(for: plan),
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
@@ -485,6 +938,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        updateAssistantState(after: result, mode: ConversationModeClassifier.classify(originalInput))
         rememberAssistantLines(result.appendedChat)
         return result
     }
@@ -494,56 +948,32 @@ final class TurnOrchestrator {
     private func maybeRephraseRepeatedTalk(_ plan: Plan,
                                            userInput: String,
                                            history: [ChatMessage],
-                                           provider: LLMProvider,
+                                           mode: ConversationMode,
                                            turnStartedAt: Date) async -> Plan {
         guard elapsedMs(since: turnStartedAt) < maxRephraseBudgetMs else { return plan }
         guard let original = singleTalkLine(from: plan) else { return plan }
-        guard isRepeatedAssistantLine(original, history: history) else { return plan }
-        guard let rewritten = await requestRephrase(of: original, userInput: userInput, provider: provider) else {
-            return plan
-        }
-        return Plan(steps: [.talk(say: rewritten)], say: plan.say)
-    }
+        let repetitionCount = intentRepetitionTracker.count(for: mode.intent)
 
-    private func requestRephrase(of line: String, userInput: String, provider: LLMProvider) async -> String? {
-        let prompt = """
-        Rephrase this assistant sentence to avoid repeating it verbatim.
-        Keep the same meaning, tone, and length.
-        Return TALK JSON only.
-        User input: "\(userInput)"
-        Original assistant sentence: "\(line)"
-        """
-
-        switch provider {
-        case .openai:
-            do {
-                let plan = try await withTimeout(0.9) {
-                    try await self.openAIRouter.routePlan(prompt, history: [])
-                }
-                guard let rewritten = singleTalkLine(from: plan) else { return nil }
-                if normalizeForComparison(rewritten) == normalizeForComparison(line) {
-                    return nil
-                }
-                return rewritten
-            } catch {
-                return nil
+        if mode.intent == .greeting {
+            if repetitionCount >= 4 {
+                let meta = "You've asked that a few times — testing variation, or checking in?"
+                return Plan(steps: [.talk(say: meta)], say: plan.say)
             }
-        case .ollama:
-            do {
-                let plan = try await withTimeout(0.8) {
-                    try await self.ollamaRouter.routePlan(prompt, history: [])
-                }
-                guard let rewritten = singleTalkLine(from: plan) else { return nil }
-                if normalizeForComparison(rewritten) == normalizeForComparison(line) {
-                    return nil
-                }
-                return rewritten
-            } catch {
-                return nil
-            }
-        case .none:
-            return nil
+            guard isGreetingLikeAssistantLine(original) else { return plan }
+            let variant = variedGreeting(for: repetitionCount)
+            return Plan(steps: [.talk(say: variant)], say: plan.say)
         }
+
+        let previous = latestAssistantLine(from: history)
+        let similarity = semanticSimilarity(original, previous)
+        if similarity >= 0.86 || repetitionCount >= 5 {
+            let shifted = modeShiftedLine(original, repetitionCount: repetitionCount)
+            if normalizeForComparison(shifted) != normalizeForComparison(original) {
+                return Plan(steps: [.talk(say: shifted)], say: plan.say)
+            }
+        }
+
+        return plan
     }
 
     private func singleTalkLine(from plan: Plan) -> String? {
@@ -552,20 +982,269 @@ final class TurnOrchestrator {
         return say
     }
 
-    private func isRepeatedAssistantLine(_ line: String, history: [ChatMessage]) -> Bool {
-        let normalized = normalizeForComparison(line)
-        guard !normalized.isEmpty else { return false }
-
-        let recentHistory = history.filter { $0.role == .assistant }.suffix(3).map(\.text)
-        let candidates = recentHistory + Array(recentAssistantLines.suffix(3))
-        for candidate in candidates {
-            let other = normalizeForComparison(candidate)
-            guard !other.isEmpty else { continue }
-            if normalized == other { return true }
-            if isNearDuplicate(normalized, other) { return true }
-        }
-        return false
+    private func variedGreeting(for repetitionCount: Int) -> String {
+        let options = [
+            "Hey! What's up?",
+            "Hi there. How's your day going?",
+            "Hey hey. What are we tackling?",
+            "Good to hear from you. What do you need?"
+        ]
+        let idx = max(0, min(options.count - 1, repetitionCount - 1))
+        return options[idx]
     }
+
+    private func isGreetingLikeAssistantLine(_ line: String) -> Bool {
+        let normalized = normalizeForComparison(line)
+        if normalized.isEmpty { return false }
+        let greetingPhrases = [
+            "hey there",
+            "hi there",
+            "hello",
+            "what s up",
+            "how s your day",
+            "good to hear from you"
+        ]
+        return greetingPhrases.contains { normalized.contains($0) }
+    }
+
+    private func latestAssistantLine(from history: [ChatMessage]) -> String {
+        history.reversed().first(where: { $0.role == .assistant })?.text ?? ""
+    }
+
+    private func semanticSimilarity(_ lhs: String, _ rhs: String) -> Double {
+        let a = Set(normalizeForComparison(lhs).split(separator: " ").map(String.init))
+        let b = Set(normalizeForComparison(rhs).split(separator: " ").map(String.init))
+        guard !a.isEmpty && !b.isEmpty else { return 0 }
+        let overlap = a.intersection(b).count
+        let union = a.union(b).count
+        guard union > 0 else { return 0 }
+        return Double(overlap) / Double(union)
+    }
+
+    private func modeShiftedLine(_ line: String, repetitionCount: Int) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return line }
+        let shifts = [
+            "Quick take: ",
+            "Another angle: ",
+            "Short version: ",
+            "Meta note: "
+        ]
+        let prefix = shifts[repetitionCount % shifts.count]
+        if trimmed.hasPrefix(prefix) {
+            return trimmed
+        }
+        return prefix + trimmed
+    }
+
+    private func buildPromptRuntimeContext(mode: ConversationMode,
+                                           userInput: String,
+                                           history: [ChatMessage],
+                                           sessionSummary: String,
+                                           now: Date) -> PromptRuntimeContext {
+        let repetition = intentRepetitionTracker.countsByIntent(now: now)
+        let activeTopic = "\(mode.intent.rawValue):\(mode.domain.rawValue)"
+        let facts = recentFacts
+            .filter { $0.expiresAt > now }
+            .map(\.text)
+            .prefix(3)
+        let compactState: [String: Any] = [
+            "active_topic": activeTopic,
+            "last_assistant_question": lastAssistantQuestion ?? "",
+            "last_question_answered": lastAssistantQuestionAnswered,
+            "repetition_by_intent": repetition,
+            "last_assistant_openers": Array(lastAssistantOpeners.suffix(2)),
+            "recent_facts_ttl": Array(facts)
+        ]
+        let interactionStateJSON = compactJSONString(from: compactState) ?? "{}"
+        return PromptRuntimeContext(
+            mode: mode,
+            sessionSummary: sessionSummary,
+            interactionStateJSON: interactionStateJSON,
+            responseBudget: responseLengthBudget(for: mode, userInput: userInput, history: history)
+        )
+    }
+
+    private func compactJSONString(from value: [String: Any]) -> String? {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        if text.count <= 620 {
+            return text
+        }
+        return String(text.prefix(620))
+    }
+
+    private func responseLengthBudget(for mode: ConversationMode,
+                                      userInput: String,
+                                      history: [ChatMessage]) -> ResponseLengthBudget {
+        let lower = userInput.lowercased()
+        if mode.intent == .problemReport {
+            return ResponseLengthBudget(
+                maxOutputTokens: 560,
+                chatMinTokens: 250,
+                chatMaxTokens: 600,
+                preferCanvasForLongResponses: true
+            )
+        }
+
+        let isTechnicalDeep = mode.domain == .tech
+            && (lower.contains("step by step")
+                || lower.contains("architecture")
+                || lower.contains("debug")
+                || lower.contains("implementation")
+                || userInput.count > 220
+                || history.count > 14)
+        if isTechnicalDeep {
+            return ResponseLengthBudget(
+                maxOutputTokens: 900,
+                chatMinTokens: 500,
+                chatMaxTokens: 1000,
+                preferCanvasForLongResponses: true
+            )
+        }
+
+        if mode.intent == .greeting {
+            return ResponseLengthBudget(
+                maxOutputTokens: 220,
+                chatMinTokens: 20,
+                chatMaxTokens: 120,
+                preferCanvasForLongResponses: false
+            )
+        }
+
+        return .default
+    }
+
+    private func enforceLengthPresentationPolicy(_ plan: Plan, mode: ConversationMode) -> Plan {
+        guard let talk = singleTalkLine(from: plan) else { return plan }
+        let trimmed = talk.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return plan }
+        guard trimmed.count > 240 else { return plan }
+
+        if mode.intent == .problemReport || shouldUseVisualDetail(for: trimmed) {
+            let spoken = spokenSummary(from: trimmed)
+            return Plan(steps: [
+                .talk(say: spoken),
+                .tool(name: "show_text", args: ["markdown": .string(trimmed)], say: nil)
+            ], say: plan.say)
+        }
+        return plan
+    }
+
+    private func spokenSummary(from text: String) -> String {
+        let lines = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if let first = lines.first, first.count <= 150 {
+            return first.hasSuffix(".") ? first : first + "."
+        }
+        let fallback = String(text.prefix(140)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.hasSuffix(".") ? fallback : fallback + "."
+    }
+
+    private func purgeExpiredFacts(now: Date) {
+        recentFacts.removeAll { $0.expiresAt <= now }
+    }
+
+    private func updateRecentFacts(with userInput: String, mode: ConversationMode, now: Date) {
+        guard mode.intent != .other else { return }
+        let ttl: TimeInterval = 120
+        let lower = userInput.lowercased()
+
+        func appendFact(_ text: String) {
+            if recentFacts.contains(where: { $0.text == text }) { return }
+            recentFacts.append(RecentFact(text: text, expiresAt: now.addingTimeInterval(ttl)))
+        }
+
+        if mode.intent == .problemReport {
+            appendFact("user reported \(mode.domain.rawValue) issue")
+            if mode.domain == .health && lower.contains("tummy") {
+                appendFact("asked about tummy pain")
+            }
+            if mode.domain == .tech && lower.contains("wifi") {
+                appendFact("user has wifi connectivity issue")
+            }
+        }
+    }
+
+    private func updateQuestionAnswerState(with userInput: String) {
+        guard let lastQuestion = lastAssistantQuestion,
+              !lastQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            lastAssistantQuestionAnswered = false
+            return
+        }
+        let trimmed = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            lastAssistantQuestionAnswered = false
+            return
+        }
+        lastAssistantQuestionAnswered = !trimmed.hasSuffix("?")
+    }
+
+    private func updateAssistantState(after result: TurnResult, mode: ConversationMode) {
+        let assistantMessages = result.appendedChat.filter { $0.role == .assistant }
+        guard !assistantMessages.isEmpty else { return }
+
+        for message in assistantMessages {
+            let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let firstSentence = firstSentence(of: trimmed) {
+                lastAssistantOpeners.append(firstSentence)
+            }
+            if trimmed.hasSuffix("?") {
+                lastAssistantQuestion = trimmed
+            }
+        }
+        if lastAssistantOpeners.count > 6 {
+            lastAssistantOpeners.removeFirst(lastAssistantOpeners.count - 6)
+        }
+
+        if mode.intent != .problemReport {
+            lastAssistantQuestionAnswered = false
+        }
+    }
+
+    private func firstSentence(of text: String) -> String? {
+        let normalized = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        if let range = normalized.range(of: #"[.!?]\s"#, options: .regularExpression) {
+            return String(normalized[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return normalized
+    }
+
+    private func inferredActionKind(for plan: Plan) -> String {
+        if plan.steps.count == 1 {
+            switch plan.steps[0] {
+            case .talk:
+                return "TALK"
+            case .tool:
+                return "TOOL"
+            case .ask, .delegate:
+                return "PLAN"
+            }
+        }
+        return "PLAN"
+    }
+
+    #if DEBUG
+    func debugLastPromptContext() -> PromptRuntimeContext? {
+        lastPromptContext
+    }
+
+    func debugLastFinalActionKind() -> String {
+        lastFinalActionKind
+    }
+
+    func debugClassify(_ input: String) -> ConversationMode {
+        ConversationModeClassifier.classify(input)
+    }
+    #endif
 
     private func normalizeForComparison(_ text: String) -> String {
         let tokens = text.lowercased()
@@ -681,6 +1360,7 @@ final class TurnOrchestrator {
                                              provider: LLMProvider,
                                              aiModelUsed: String?,
                                              force: Bool,
+                                             allowFeedback: Bool,
                                              depth: Int,
                                              turnStartedAt: Date) async {
         guard depth < toolFeedbackLoopMaxDepth else { return }
@@ -693,7 +1373,7 @@ final class TurnOrchestrator {
 
         while loopDepth < toolFeedbackLoopMaxDepth {
             guard elapsedMs(since: turnStartedAt) < maxToolFeedbackBudgetMs else { break }
-            guard shouldRunToolFeedbackLoop(result, force: force) else { break }
+            guard shouldRunToolFeedbackLoop(result, force: force, allowFeedback: allowFeedback) else { break }
             guard let feedbackPlan = await synthesizeToolAwarePlan(
                 from: result,
                 originalInput: originalInput,
@@ -742,15 +1422,18 @@ final class TurnOrchestrator {
 
         if force,
            !committedTalk,
+           pendingCoverageTokens.isEmpty,
            let deferredTalkLine {
             upsertToolFeedbackTalkLine(deferredTalkLine, result: &result, provider: provider)
         }
     }
 
-    private func shouldRunToolFeedbackLoop(_ result: TurnResult, force: Bool) -> Bool {
+    private func shouldRunToolFeedbackLoop(_ result: TurnResult, force: Bool, allowFeedback: Bool) -> Bool {
+        guard allowFeedback || force else { return false }
         guard !result.executedToolSteps.isEmpty else { return false }
         guard !result.triggerFollowUpCapture else { return false }
         guard !result.appendedOutputs.isEmpty else { return false }
+        guard !containsToolErrorOutput(result) else { return false }
 
         let assistantLines = result.appendedChat
             .filter { $0.role == .assistant }
@@ -768,7 +1451,47 @@ final class TurnOrchestrator {
             return false
         }
         guard hasOnlyToolSteps else { return false }
+        if plan.steps.count > 1 { return true }
         return isMultiClauseRequest(userInput)
+    }
+
+    private func shouldAllowToolFeedback(for plan: Plan) -> Bool {
+        let allowlist: Set<String> = ["get_weather", "get_time", "find_files", "learn_website"]
+        for step in plan.steps {
+            guard case .tool(let name, let args, _) = step else { continue }
+            if allowlist.contains(name) { return true }
+            if let marker = args["needs_reasoning"]?.stringValue.lowercased(),
+               marker == "true" || marker == "1" || marker == "yes" {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func containsToolErrorOutput(_ result: TurnResult) -> Bool {
+        result.appendedOutputs.contains { output in
+            let lower = output.payload.lowercased()
+            if lower.contains("\"kind\":\"error\"") { return true }
+            if lower.hasPrefix("error:") { return true }
+            if lower.contains("i couldn't") { return true }
+            return false
+        }
+    }
+
+    private func shouldNarrateToolProgress(for userInput: String, plan: Plan) -> Bool {
+        let toolSteps = plan.steps.filter { step in
+            if case .tool = step { return true }
+            return false
+        }
+        guard !toolSteps.isEmpty else { return false }
+        guard !plan.steps.contains(where: {
+            if case .ask = $0 { return true }
+            return false
+        }) else {
+            return false
+        }
+        if toolSteps.count > 1 { return true }
+        return shouldForceToolFeedback(for: userInput, plan: plan)
     }
 
     private func isMultiClauseRequest(_ text: String) -> Bool {
@@ -780,28 +1503,38 @@ final class TurnOrchestrator {
         return lower.count > 80
     }
 
-    private func firstToolProgressLine(from plan: Plan) -> String? {
+    private func toolProgressLines(from plan: Plan) -> [String] {
+        var lines: [String] = []
+        var seen: Set<String> = []
         for step in plan.steps {
             if case .tool(_, _, let say) = step,
                let line = say?.trimmingCharacters(in: .whitespacesAndNewlines),
                !line.isEmpty {
-                return line
+                let normalized = normalizeForComparison(line)
+                guard !normalized.isEmpty else { continue }
+                if seen.insert(normalized).inserted {
+                    lines.append(line)
+                }
             }
         }
-        return nil
+        return lines
     }
 
-    private func prependAssistantProgressLine(_ line: String,
-                                              into result: inout TurnResult,
-                                              provider: LLMProvider) {
-        let normalized = normalizeForComparison(line)
-        guard !normalized.isEmpty else { return }
-        if result.appendedChat.contains(where: { $0.role == .assistant && normalizeForComparison($0.text) == normalized }) {
-            return
+    private func prependAssistantProgressLines(_ lines: [String],
+                                               into result: inout TurnResult,
+                                               provider: LLMProvider) {
+        guard !lines.isEmpty else { return }
+
+        for line in lines.reversed() {
+            let normalized = normalizeForComparison(line)
+            guard !normalized.isEmpty else { continue }
+            if result.appendedChat.contains(where: { $0.role == .assistant && normalizeForComparison($0.text) == normalized }) {
+                continue
+            }
+            let progress = ChatMessage(role: .assistant, text: line, llmProvider: provider)
+            result.appendedChat.insert(progress, at: 0)
+            result.spokenLines.insert(line, at: 0)
         }
-        let progress = ChatMessage(role: .assistant, text: line, llmProvider: provider)
-        result.appendedChat.insert(progress, at: 0)
-        result.spokenLines.insert(line, at: 0)
     }
 
     private func isLikelyCanvasConfirmation(_ text: String) -> Bool {
@@ -878,6 +1611,7 @@ final class TurnOrchestrator {
         \(coverageGuidance)
         - If there is enough information, return TALK with one concise final answer.
         - If one more tool call is required, return a PLAN with concrete tool step(s).
+        - For comparative or decision-style user requests, provide an explicit recommendation or judgment.
         - Do NOT repeat an identical tool call that already ran with the same args.
         - Never return CAPABILITY_GAP in this feedback pass.
         Output valid JSON only.
@@ -886,22 +1620,46 @@ final class TurnOrchestrator {
         let plan: Plan?
         switch provider {
         case .openai:
-            plan = try? await withTimeout(0.9) {
+            let openAIPlan = try? await withTimeout(toolFeedbackTimeoutSeconds(requiredCoverageTokens: requiredCoverageTokens)) {
                 try await self.openAIRouter.routePlan(
                     synthesisPrompt,
                     history: history,
                     modelOverride: aiModelUsed
                 )
             }
+            if let openAIPlan {
+                plan = openAIPlan
+                break
+            }
+            if M2Settings.useOllama {
+                plan = try? await withTimeout(ollamaToolFeedbackTimeoutSeconds) {
+                    try await self.ollamaRouter.routePlan(synthesisPrompt, history: history)
+                }
+            } else {
+                plan = nil
+            }
         case .ollama:
-            plan = try? await withTimeout(0.8) {
+            plan = try? await withTimeout(ollamaToolFeedbackTimeoutSeconds) {
                 try await self.ollamaRouter.routePlan(synthesisPrompt, history: history)
             }
         case .none:
-            plan = nil
+            if M2Settings.useOllama {
+                plan = try? await withTimeout(ollamaToolFeedbackTimeoutSeconds) {
+                    try await self.ollamaRouter.routePlan(synthesisPrompt, history: history)
+                }
+            } else {
+                plan = nil
+            }
         }
 
         return plan
+    }
+
+    private func toolFeedbackTimeoutSeconds(requiredCoverageTokens: [String]) -> Double {
+        if !requiredCoverageTokens.isEmpty {
+            return openAIToolFeedbackTimeoutSeconds
+        }
+        return 1.2
     }
 
     private func feedbackPlanFingerprint(_ plan: Plan) -> String {

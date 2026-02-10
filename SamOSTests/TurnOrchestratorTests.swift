@@ -3,6 +3,81 @@ import XCTest
 
 final class TurnOrchestratorTests: XCTestCase {
 
+    // MARK: - Conversation Mode Classifier
+
+    @MainActor
+    func testConversationModeClassifierCanonicalExamples() {
+        let orchestrator = TurnOrchestrator()
+
+        let greeting = orchestrator.debugClassify("hi sam how are you")
+        XCTAssertEqual(greeting.intent, .greeting)
+
+        let health = orchestrator.debugClassify("my tummy is sore")
+        XCTAssertEqual(health.intent, .problemReport)
+        XCTAssertEqual(health.domain, .health)
+
+        let vehicle = orchestrator.debugClassify("engine making a funny noise")
+        XCTAssertEqual(vehicle.intent, .problemReport)
+        XCTAssertEqual(vehicle.domain, .vehicle)
+
+        let tech = orchestrator.debugClassify("my wifi keeps dropping out")
+        XCTAssertEqual(tech.intent, .problemReport)
+        XCTAssertEqual(tech.domain, .tech)
+
+        let task = orchestrator.debugClassify("set an alarm for 7")
+        XCTAssertEqual(task.intent, .taskRequest)
+
+        let recall = orchestrator.debugClassify("what did i say my dog's name was?")
+        XCTAssertEqual(recall.intent, .memoryRecall)
+    }
+
+    @MainActor
+    func testConversationModeClassifierBatchCoverage() {
+        let orchestrator = TurnOrchestrator()
+        let samples: [(String, ConversationIntent, ConversationDomain)] = [
+            ("hello", .greeting, .unknown),
+            ("hey", .greeting, .unknown),
+            ("good morning", .greeting, .unknown),
+            ("i dont feel well", .problemReport, .health),
+            ("my stomach hurts", .problemReport, .health),
+            ("severe abdominal pain and vomiting", .problemReport, .health),
+            ("engine noise when i accelerate", .problemReport, .vehicle),
+            ("oil pressure light came on", .problemReport, .vehicle),
+            ("car overheating and smoke", .problemReport, .vehicle),
+            ("wifi disconnects every hour", .problemReport, .tech),
+            ("app keeps crashing on my macbook", .problemReport, .tech),
+            ("possible account hacked", .problemReport, .tech),
+            ("roof leak in my house", .problemReport, .home),
+            ("ac stopped working", .problemReport, .home),
+            ("kitchen appliance not working", .problemReport, .home),
+            ("deadline is tomorrow at work", .problemReport, .work),
+            ("my manager changed the project scope", .problemReport, .work),
+            ("coworker conflict at work", .problemReport, .work),
+            ("my partner and i are fighting", .problemReport, .relationship),
+            ("family conflict advice", .problemReport, .relationship),
+            ("should i choose sedan or suv", .decisionHelp, .unknown),
+            ("which is better for commuting", .decisionHelp, .unknown),
+            ("compare these options", .decisionHelp, .unknown),
+            ("how do i reset my router", .howto, .tech),
+            ("step by step guide for budgeting", .howto, .unknown),
+            ("walk me through this process", .howto, .unknown),
+            ("set a timer for 5 minutes", .taskRequest, .unknown),
+            ("remind me tomorrow at 9", .taskRequest, .unknown),
+            ("open my downloads folder", .taskRequest, .unknown),
+            ("write a short poem", .creative, .unknown),
+            ("brainstorm startup names", .creative, .unknown),
+            ("what do you remember about me", .memoryRecall, .unknown)
+        ]
+
+        for sample in samples {
+            let mode = orchestrator.debugClassify(sample.0)
+            XCTAssertEqual(mode.intent, sample.1, "Intent mismatch for: \(sample.0)")
+            if sample.2 != .unknown {
+                XCTAssertEqual(mode.domain, sample.2, "Domain mismatch for: \(sample.0)")
+            }
+        }
+    }
+
     // MARK: - Plan Execution
 
     @MainActor

@@ -1107,12 +1107,35 @@ struct FindRecipeTool: Tool {
     let name = "find_recipe"
     let description = "Find a recipe by dish/topic and return concise ingredients + steps in markdown. Use for recipe/how-to-cook/ingredients requests. Args: 'query' (preferred), also accepts 'dish', 'recipe', 'topic', or 'q'."
 
-    private static let searchURLTemplate = "https://duckduckgo.com/html/?q=%@"
+    private static let searchURLTemplates: [String] = [
+        "https://www.taste.com.au/search-recipes/?q=%@",
+        "https://duckduckgo.com/html/?q=%@",
+        "https://www.bbcgoodfood.com/search?q=%@",
+        "https://www.simplyrecipes.com/search?q=%@",
+        "https://www.recipetineats.com/?s=%@"
+    ]
+    private static let allowedRecipeHosts: Set<String> = [
+        "taste.com.au",
+        "bbcgoodfood.com",
+        "simplyrecipes.com",
+        "recipetineats.com",
+        "allrecipes.com",
+        "seriouseats.com",
+        "delish.com",
+        "epicurious.com",
+        "foodnetwork.com",
+        "bonappetit.com",
+        "cookieandkate.com",
+        "sbs.com.au",
+        "nytimes.com"
+    ]
     private static let recipeHostHints: [String] = [
         "allrecipes.", "foodnetwork.", "bbcgoodfood.", "seriouseats.", "taste.", "delish.",
         "epicurious.", "simplyrecipes.", "recipetineats.", "bonappetit.", "cookieandkate.",
         "sbs.com.au/food", "nytimes.com"
     ]
+    private static let shownStoreQueue = DispatchQueue(label: "com.samos.findrecipe.shown")
+    private static var shownURLsByQuery: [String: [String]] = [:]
     private static let searchLinkRegex = try! NSRegularExpression(
         pattern: #"href="([^"]+)""#,
         options: [.caseInsensitive]
@@ -1155,8 +1178,10 @@ struct FindRecipeTool: Tool {
     )
 
     func execute(args: [String: String]) -> OutputItem {
-        let query = resolvedQuery(from: args)
-        guard !query.isEmpty else {
+        let rawQuery = resolvedQuery(from: args)
+        let intent = parseQueryIntent(from: rawQuery)
+
+        guard !intent.canonicalQuery.isEmpty else {
             return recipePromptPayload(
                 slot: "query",
                 spoken: "What recipe should I find?",
@@ -1164,22 +1189,86 @@ struct FindRecipeTool: Tool {
             )
         }
 
-        let searchQuery = query.lowercased().contains("recipe") ? query : "\(query) recipe"
-        let encodedQuery = searchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchQuery
-        let candidateURLs = searchRecipeURLs(encodedQuery: encodedQuery)
+        if intent.resetHistoryRequested {
+            clearShownHistory(for: intent.cacheKey)
+        }
 
-        if let found = firstRecipeMatch(query: query, urls: candidateURLs) {
-            let formatted = buildRecipeMarkdown(query: query, sourceTitle: found.title, sourceURL: found.url, ingredients: found.ingredients, steps: found.steps)
-            let spoken = "I found a \(query) recipe and put it up here."
+        let searchQuery = intent.canonicalQuery.lowercased().contains("recipe")
+            ? intent.canonicalQuery
+            : "\(intent.canonicalQuery) recipe"
+        let encodedQuery = searchQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchQuery
+        let baseCandidates = searchRecipeURLs(
+            encodedQuery: encodedQuery,
+            domainAllowlist: Self.allowedRecipeHosts
+        )
+        var candidates = baseCandidates
+
+        if candidates.count < 3 {
+            let suggestion = fetchOpenAIRecipeSearchHints(query: intent.canonicalQuery)
+            if let suggestion {
+                let allowedSuggestionDomains = sanitizeSuggestedDomains(suggestion.domains)
+                let allowedDomainSet = Set(allowedSuggestionDomains)
+                let variants = [intent.canonicalQuery] + suggestion.queryVariants
+                for variant in variants.prefix(5) {
+                    let normalizedVariant = variant.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !normalizedVariant.isEmpty else { continue }
+                    let variantSearch = normalizedVariant.lowercased().contains("recipe")
+                        ? normalizedVariant
+                        : "\(normalizedVariant) recipe"
+                    let variantEncoded = variantSearch.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? variantSearch
+                    let fromVariant = searchRecipeURLs(
+                        encodedQuery: variantEncoded,
+                        domainAllowlist: allowedDomainSet.isEmpty ? Self.allowedRecipeHosts : allowedDomainSet
+                    )
+                    candidates = mergeUniqueURLs(candidates, fromVariant)
+                    if candidates.count >= 12 { break }
+                }
+            }
+        }
+
+        let allMatches = recipeMatches(query: intent.canonicalQuery, urls: candidates)
+
+        if let selected = selectRecipeMatch(from: allMatches, intent: intent) {
+            markRecipeShown(url: selected.url, cacheKey: intent.cacheKey)
+            let alternatives = allMatches
+                .filter { $0.url != selected.url }
+                .filter { !shownURLs(for: intent.cacheKey).contains($0.url.absoluteString) }
+                .prefix(3)
+            let formatted = buildRecipeMarkdown(
+                query: intent.canonicalQuery,
+                sourceTitle: selected.title,
+                sourceURL: selected.url,
+                ingredients: selected.ingredients,
+                steps: selected.steps,
+                alternatives: Array(alternatives)
+            )
+            let spoken = "I found several \(intent.canonicalQuery) recipes and put one up here."
             return structuredMarkdownPayload(kind: "recipe", spoken: spoken, formatted: formatted)
+        }
+
+        if intent.requestAnother, !allMatches.isEmpty {
+            let shownCount = shownURLs(for: intent.cacheKey).count
+            let noMore = """
+            # Recipe Search
+
+            I found recipes for **\(intent.canonicalQuery)**, but you've already seen all the options I could fetch right now.
+
+            - Shown so far: \(shownCount)
+            - Ask: `reset recipe history for \(intent.canonicalQuery)` to start over.
+            """
+            return structuredMarkdownPayload(
+                kind: "recipe",
+                spoken: "I ran out of new recipe options for that one.",
+                formatted: noMore
+            )
         }
 
         let fallback = """
         # Recipe Search
 
-        I couldn't fetch a reliable recipe page for **\(query)** right now.
+        I couldn't fetch a reliable recipe page for **\(intent.canonicalQuery)** right now.
 
-        Try again with a more specific dish name, or provide a direct recipe URL.
+        Try again with a more specific dish name, provide a direct recipe URL, or ask again in a moment.
         """
         return structuredMarkdownPayload(
             kind: "recipe",
@@ -1199,36 +1288,113 @@ struct FindRecipeTool: Tool {
         return ""
     }
 
-    private func searchRecipeURLs(encodedQuery: String, limit: Int = 12) -> [URL] {
-        guard let searchURL = URL(string: String(format: Self.searchURLTemplate, encodedQuery)),
-              let html = fetchHTML(url: searchURL) else { return [] }
+    private struct ParsedRecipeIntent {
+        let canonicalQuery: String
+        let cacheKey: String
+        let requestAnother: Bool
+        let resetHistoryRequested: Bool
+    }
 
-        let source = html as NSString
-        let range = NSRange(location: 0, length: source.length)
-        let matches = Self.searchLinkRegex.matches(in: html, options: [], range: range)
+    private struct RecipeMatch {
+        let url: URL
+        let title: String
+        let ingredients: [String]
+        let steps: [String]
+        let score: Int
+    }
 
+    private struct OpenAIRecipeHints {
+        let domains: [String]
+        let queryVariants: [String]
+    }
+
+    private func parseQueryIntent(from rawQuery: String) -> ParsedRecipeIntent {
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        let requestAnother = lower.contains("another") || lower.contains("different") || lower.contains("next")
+        let resetRequested = lower.contains("reset") && lower.contains("history")
+
+        var canonical = trimmed
+        let cleanupPatterns = [
+            #"(?i)\b(show|find|get)\s+(me\s+)?(another|next|different)\s+recipe\s+(for\s+)?"#,
+            #"(?i)\banother\s+recipe\s+(for\s+)?"#,
+            #"(?i)\brecipe\s+for\s+"#,
+            #"(?i)\bhow\s+to\s+make\s+"#
+        ]
+        for pattern in cleanupPatterns {
+            canonical = canonical.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        canonical = canonical.trimmingCharacters(in: .whitespacesAndNewlines)
+        if canonical.isEmpty {
+            canonical = trimmed
+        }
+
+        let cacheKey = canonical.lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ParsedRecipeIntent(
+            canonicalQuery: canonical,
+            cacheKey: cacheKey,
+            requestAnother: requestAnother,
+            resetHistoryRequested: resetRequested
+        )
+    }
+
+    private func searchRecipeURLs(encodedQuery: String, domainAllowlist: Set<String>, limit: Int = 12) -> [URL] {
         var urls: [URL] = []
-        for match in matches {
-            guard let hrefRange = Range(match.range(at: 1), in: html) else { continue }
-            let href = String(html[hrefRange])
-            guard let url = normalizeSearchHref(href) else { continue }
-            let host = url.host?.lowercased() ?? ""
-            guard !host.contains("duckduckgo.com"),
-                  !host.contains("google."),
-                  !host.contains("bing."),
-                  !host.contains("yahoo.") else { continue }
 
-            if urls.contains(url) { continue }
-            urls.append(url)
-            if urls.count >= max(1, limit) { break }
+        for template in Self.searchURLTemplates {
+            guard let searchURL = URL(string: String(format: template, encodedQuery)),
+                  let html = fetchHTML(url: searchURL) else { continue }
+
+            let source = html as NSString
+            let range = NSRange(location: 0, length: source.length)
+            let matches = Self.searchLinkRegex.matches(in: html, options: [], range: range)
+
+            for match in matches {
+                guard let hrefRange = Range(match.range(at: 1), in: html) else { continue }
+                let href = String(html[hrefRange])
+                guard let url = normalizeSearchHref(href, baseURL: searchURL) else { continue }
+                let host = url.host?.lowercased() ?? ""
+
+                guard !host.contains("duckduckgo.com"),
+                      !host.contains("google."),
+                      !host.contains("bing."),
+                      !host.contains("yahoo."),
+                      !host.contains("pinterest."),
+                      !host.contains("facebook."),
+                      !host.contains("instagram.") else { continue }
+
+                guard isAllowedRecipeHost(host, allowlist: domainAllowlist) else { continue }
+                guard looksRecipeLike(url: url) else { continue }
+                if urls.contains(url) { continue }
+                urls.append(url)
+                if urls.count >= max(1, limit * 2) { break }
+            }
+
+            if urls.count >= max(1, limit * 2) { break }
         }
 
         let preferred = urls.sorted { lhs, rhs in
             let l = preferredHostScore(lhs.host?.lowercased() ?? "")
             let r = preferredHostScore(rhs.host?.lowercased() ?? "")
-            return l > r
+            if l != r { return l > r }
+            return lhs.absoluteString.count < rhs.absoluteString.count
         }
-        return preferred
+        return Array(preferred.prefix(max(1, limit)))
+    }
+
+    private func isAllowedRecipeHost(_ host: String, allowlist: Set<String>) -> Bool {
+        allowlist.contains(where: { host == $0 || host.hasSuffix(".\($0)") })
+    }
+
+    private func mergeUniqueURLs(_ base: [URL], _ extra: [URL]) -> [URL] {
+        var merged = base
+        for url in extra where !merged.contains(url) {
+            merged.append(url)
+        }
+        return merged
     }
 
     private func preferredHostScore(_ host: String) -> Int {
@@ -1238,7 +1404,7 @@ struct FindRecipeTool: Tool {
         return 0
     }
 
-    private func normalizeSearchHref(_ href: String) -> URL? {
+    private func normalizeSearchHref(_ href: String, baseURL: URL? = nil) -> URL? {
         let decoded = href
             .replacingOccurrences(of: "&amp;", with: "&")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1252,11 +1418,31 @@ struct FindRecipeTool: Tool {
         if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") {
             return URL(string: decoded)
         }
+        if decoded.hasPrefix("/") {
+            return URL(string: decoded, relativeTo: baseURL)?.absoluteURL
+        }
         return nil
     }
 
-    private func firstRecipeMatch(query: String, urls: [URL]) -> (url: URL, title: String, ingredients: [String], steps: [String])? {
-        for url in urls.prefix(6) {
+    private func looksRecipeLike(url: URL) -> Bool {
+        let host = (url.host ?? "").lowercased()
+        let path = url.path.lowercased()
+
+        let recipePathTokens = [
+            "/recipe", "/recipes", "/how-to", "/food/recipe", "/cooking/recipe",
+            "/blog/", "/dish/", "/meal/"
+        ]
+
+        if recipePathTokens.contains(where: { path.contains($0) }) {
+            return true
+        }
+
+        return Self.recipeHostHints.contains(where: { host.contains($0) })
+    }
+
+    private func recipeMatches(query: String, urls: [URL], maxMatches: Int = 8) -> [RecipeMatch] {
+        var matches: [RecipeMatch] = []
+        for url in urls.prefix(12) {
             guard let html = fetchHTML(url: url) else { continue }
             let title = extractTitle(fromHTML: html) ?? (url.host ?? "Recipe")
             let text = extractVisibleText(fromHTML: html)
@@ -1268,10 +1454,178 @@ struct FindRecipeTool: Tool {
             let ingredients = extractIngredients(from: lines)
             let steps = extractSteps(from: lines)
             if !ingredients.isEmpty && !steps.isEmpty {
-                return (url, title, ingredients, steps)
+                let hostScore = preferredHostScore(url.host?.lowercased() ?? "")
+                let richness = min(ingredients.count, 12) * 2 + min(steps.count, 10) * 3
+                matches.append(RecipeMatch(url: url, title: title, ingredients: ingredients, steps: steps, score: hostScore + richness))
+                if matches.count >= maxMatches { break }
             }
         }
-        return nil
+        return matches.sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.url.absoluteString.count < rhs.url.absoluteString.count
+        }
+    }
+
+    private func selectRecipeMatch(from matches: [RecipeMatch], intent: ParsedRecipeIntent) -> RecipeMatch? {
+        guard !matches.isEmpty else { return nil }
+        let shown = Set(shownURLs(for: intent.cacheKey))
+        if intent.requestAnother, let nextUnseen = matches.first(where: { !shown.contains($0.url.absoluteString) }) {
+            return nextUnseen
+        }
+        if let unseen = matches.first(where: { !shown.contains($0.url.absoluteString) }) {
+            return unseen
+        }
+        return matches.first
+    }
+
+    private func shownURLs(for cacheKey: String) -> [String] {
+        Self.shownStoreQueue.sync {
+            Self.shownURLsByQuery[cacheKey] ?? []
+        }
+    }
+
+    private func markRecipeShown(url: URL, cacheKey: String) {
+        Self.shownStoreQueue.sync {
+            var urls = Self.shownURLsByQuery[cacheKey] ?? []
+            let absolute = url.absoluteString
+            if !urls.contains(absolute) {
+                urls.append(absolute)
+            }
+            if urls.count > 30 {
+                urls = Array(urls.suffix(30))
+            }
+            Self.shownURLsByQuery[cacheKey] = urls
+        }
+    }
+
+    private func clearShownHistory(for cacheKey: String) {
+        Self.shownStoreQueue.sync {
+            Self.shownURLsByQuery[cacheKey] = nil
+        }
+    }
+
+    private func sanitizeSuggestedDomains(_ rawDomains: [String]) -> [String] {
+        var domains: [String] = []
+        for domain in rawDomains.prefix(12) {
+            let trimmed = domain
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"/.*$"#, with: "", options: .regularExpression)
+            guard !trimmed.isEmpty else { continue }
+            if isAllowedRecipeHost(trimmed, allowlist: Self.allowedRecipeHosts), !domains.contains(trimmed) {
+                domains.append(trimmed)
+            }
+        }
+        return domains
+    }
+
+    private func fetchOpenAIRecipeSearchHints(query: String) -> OpenAIRecipeHints? {
+        guard OpenAISettings.isConfigured else { return nil }
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else { return nil }
+
+        let system = """
+        You suggest recipe discovery hints.
+        Return strict JSON only:
+        {"domains":["example.com"],"query_variants":["variant 1","variant 2"]}
+        Rules:
+        - Suggest at most 5 domains and 5 query_variants.
+        - Domains must be likely recipe websites.
+        - No prose, no markdown, only JSON.
+        """
+        let user = "Dish query: \(query)"
+        let requestBody: [String: Any] = [
+            "model": OpenAISettings.generalModel,
+            "messages": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": user]
+            ],
+            "temperature": 0.1,
+            "max_tokens": 220,
+            "response_format": ["type": "json_object"]
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(OpenAISettings.apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+
+        let requestID = OpenAIAPILogStore.shared.logHTTPRequest(
+            service: "FindRecipeTool.fetchOpenAIRecipeSearchHints",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.generalModel,
+            timeoutSeconds: request.timeoutInterval,
+            payload: requestBody
+        )
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseCode: Int?
+        var responseError: String?
+        let startedAt = Date()
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            responseData = data
+            responseCode = (response as? HTTPURLResponse)?.statusCode
+            responseError = error?.localizedDescription
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 6)
+        let latencyMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        guard let status = responseCode,
+              status >= 200,
+              status < 300,
+              let responseData else {
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "FindRecipeTool.fetchOpenAIRecipeSearchHints",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: OpenAISettings.generalModel,
+                statusCode: responseCode,
+                latencyMs: latencyMs,
+                error: responseError ?? "No response",
+                responseData: responseData
+            )
+            return nil
+        }
+
+        OpenAIAPILogStore.shared.logHTTPResponse(
+            requestID: requestID,
+            service: "FindRecipeTool.fetchOpenAIRecipeSearchHints",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.generalModel,
+            statusCode: status,
+            latencyMs: latencyMs,
+            responseData: responseData
+        )
+
+        guard let envelope = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              let choices = envelope["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            return nil
+        }
+
+        let raw = content
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let jsonData = raw.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return nil
+        }
+
+        let domains = (parsed["domains"] as? [String] ?? []).prefix(5).map { $0 }
+        let variants = (parsed["query_variants"] as? [String] ?? []).prefix(5).map { $0 }
+        return OpenAIRecipeHints(domains: domains, queryVariants: variants)
     }
 
     private func extractIngredients(from lines: [String]) -> [String] {
@@ -1343,7 +1697,12 @@ struct FindRecipeTool: Tool {
         return trimmed.replacingOccurrences(of: #"^\d+[\.\)]\s*"#, with: "", options: .regularExpression)
     }
 
-    private func buildRecipeMarkdown(query: String, sourceTitle: String, sourceURL: URL, ingredients: [String], steps: [String]) -> String {
+    private func buildRecipeMarkdown(query: String,
+                                     sourceTitle: String,
+                                     sourceURL: URL,
+                                     ingredients: [String],
+                                     steps: [String],
+                                     alternatives: [RecipeMatch]) -> String {
         var lines: [String] = []
         lines.append("# Recipe: \(query)")
         lines.append("")
@@ -1358,6 +1717,16 @@ struct FindRecipeTool: Tool {
         for (index, step) in steps.prefix(10).enumerated() {
             lines.append("\(index + 1). \(step)")
         }
+        if !alternatives.isEmpty {
+            lines.append("")
+            lines.append("## More Recipes Found")
+            for alt in alternatives.prefix(3) {
+                lines.append("- [\(alt.title)](\(alt.url.absoluteString))")
+            }
+        }
+        lines.append("")
+        lines.append("_Want another option? Ask: `show another recipe for \(query)`_")
+        lines.append("_To restart options: `reset recipe history for \(query)`_")
 
         let markdown = lines.joined(separator: "\n")
         // Keep payload comfortably inside router/tool payload guidance.
@@ -2591,7 +2960,9 @@ struct GetTimeTool: Tool {
 
         // 1. Explicit IANA timezone takes priority
         if let tzId = args["timezone"], let resolved = TimeZone(identifier: tzId) {
-            return buildTimePayload(now: now, tz: resolved)
+            let placeLabel = args["place"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let locationLabel = (placeLabel?.isEmpty == false ? placeLabel : tzId)
+            return buildTimePayload(now: now, tz: resolved, locationLabel: locationLabel)
         }
 
         // 2. Place-based resolution
@@ -2609,12 +2980,12 @@ struct GetTimeTool: Tool {
 
             // Try TimezoneMapping
             if let tzId = TimezoneMapping.lookup(place), let tz = TimeZone(identifier: tzId) {
-                return buildTimePayload(now: now, tz: tz)
+                return buildTimePayload(now: now, tz: tz, locationLabel: place)
             }
 
             // Try as direct IANA identifier
             if let tz = TimeZone(identifier: place) {
-                return buildTimePayload(now: now, tz: tz)
+                return buildTimePayload(now: now, tz: tz, locationLabel: place)
             }
 
             // Unknown place — prompt for clarification
@@ -2626,17 +2997,26 @@ struct GetTimeTool: Tool {
         }
 
         // 3. No timezone or place — use device local timezone
-        return buildTimePayload(now: now, tz: .current)
+        return buildTimePayload(now: now, tz: .current, locationLabel: nil)
     }
 
     // MARK: - Payload Builders
 
-    private func buildTimePayload(now: Date, tz: TimeZone) -> OutputItem {
+    private func buildTimePayload(now: Date, tz: TimeZone, locationLabel: String?) -> OutputItem {
         let spokenFormatter = DateFormatter()
         spokenFormatter.timeZone = tz
         spokenFormatter.dateFormat = "h:mm a"
         let spokenTime = spokenFormatter.string(from: now)
-        let spoken = "It's \(spokenTime)."
+        let cleanedLocation = locationLabel?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+        let locationSuffix: String
+        if let cleanedLocation, !cleanedLocation.isEmpty {
+            locationSuffix = " in \(cleanedLocation)"
+        } else {
+            locationSuffix = ""
+        }
+        let spoken = "It's \(spokenTime)\(locationSuffix)."
 
         let fullFormatter = DateFormatter()
         fullFormatter.timeZone = tz
@@ -2650,7 +3030,8 @@ struct GetTimeTool: Tool {
             "kind": "time",
             "spoken": spoken,
             "formatted": formatted,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "location": cleanedLocation ?? ""
         ]
 
         if let data = try? JSONSerialization.data(withJSONObject: payload),

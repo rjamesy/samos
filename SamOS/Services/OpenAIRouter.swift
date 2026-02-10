@@ -316,9 +316,339 @@ final class OpenAIAPILogStore {
     ]
 }
 
+enum PromptBuilder {
+    private static let maxPromptChars = 5600
+    private static let websiteRetrievalThreshold = 0.23
+
+    private static let cachedToolDescriptions: String = {
+        let tools = ToolRegistry.shared.allTools.filter { $0.name != "capability_gap_to_claude_prompt" }
+        return tools.prefix(30).map {
+            "- \($0.name): \(compactDescription($0.description, maxChars: 88))"
+        }.joined(separator: "\n")
+    }()
+
+    static func buildSystemPrompt(forInput input: String,
+                                  promptContext: PromptRuntimeContext?,
+                                  includeLongToolExamples: Bool) -> String {
+        let installedSkills = SkillStore.shared.loadInstalled()
+        let skillLines: [String]
+        if installedSkills.isEmpty {
+            skillLines = ["- (none)"]
+        } else {
+            skillLines = installedSkills.prefix(8).map { skill in
+                let triggers = skill.triggerPhrases.prefix(2).joined(separator: ", ")
+                return "- \(skill.name): triggers on \"\(triggers)\""
+            }
+        }
+
+        // Keep local context deterministic and fast; runtime summary/state is injected separately.
+        let memoryHintLines = ["- memory_hint: []"]
+        let selfLessonLines = ["- self_learning: []"]
+
+        let websiteHints = gatedWebsiteLearningContext(query: input, maxItems: includeLongToolExamples ? 10 : 6, maxChars: 1200)
+        let websiteLines = websiteHints.isEmpty
+            ? ["- website_learning: []"]
+            : websiteHints.map { "- website_learning: \($0.replacingOccurrences(of: "\"", with: "'"))" }
+
+        let modePolicy = dynamicModePolicy(promptContext?.mode)
+        let budgetDirective: String
+        if promptContext?.responseBudget != nil {
+            budgetDirective = """
+            - Token budget target:
+              chat default 120-350; problem_report 250-600; technical deep 500-1000.
+            - Keep TALK.say under 200 chars when possible.
+            - If detail exceeds ~240 chars, use PLAN with short talk + show_text.
+            """
+        } else {
+            budgetDirective = """
+            - Token budget target: chat 120-350.
+            - Keep TALK.say concise and use show_text for long detail.
+            """
+        }
+
+        let toolExampleBlock: String
+        if includeLongToolExamples {
+            toolExampleBlock = """
+            {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"London"},"say":"Let me check."}]}
+            {"action":"PLAN","steps":[{"step":"ask","slot":"timezone","prompt":"Which state or city in the US?"}]}
+            {"action":"TOOL","name":"find_image","args":{"query":"frog"},"say":"I'll find an image for that."}
+            {"action":"TOOL","name":"show_text","args":{"markdown":"# Title\\n- point"},"say":"Here it is."}
+            """
+        } else {
+            toolExampleBlock = """
+            {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"London"},"say":"Let me check."}]}
+            {"action":"TALK","say":"Hey! What's up?"}
+            """
+        }
+
+        let coreSystem = """
+        [BLOCK 1: CORE]
+        You are Sam, a friendly voice assistant inside a macOS app called SamOS.
+        Return EXACTLY ONE valid JSON object and nothing else.
+        The "action" field MUST be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP.
+        Think step by step internally before choosing the final JSON action, but never reveal chain-of-thought.
+        Never output markdown or prose outside JSON.
+        """
+
+        let stylePolicy = """
+        [BLOCK 2: STYLE_AND_LENGTH]
+        - Warm, casual, clear language. Use contractions.
+        - Default: medium response length in chat.
+        - Chat target: 120-350 tokens for most replies.
+        - Problem reports: 250-600 tokens with structure.
+        - Technical deep explanations: 500-1000 tokens and prefer show_text.
+        - Keep spoken "say" short. If content is >240 chars or structured, return PLAN with:
+          1) talk step (short summary)
+          2) tool step show_text with markdown details.
+        - Ask one follow-up question by default, except problem reports where 2-4 clarifying questions in one turn are allowed.
+        \(budgetDirective)
+        - If prior assistant turn asked a question and the user replies briefly, treat that as the answer unless topic clearly changes.
+        """
+
+        let modeBlock = """
+        [BLOCK 3: MODE_POLICY]
+        \(modePolicy)
+        """
+
+        let toolPolicy = """
+        [BLOCK 4: TOOL_POLICY]
+        Available tools:
+        \(cachedToolDescriptions)
+        Installed skills (matched automatically, not tool names):
+        \(skillLines.joined(separator: "\n"))
+        Tool rules:
+        - Weather/forecast -> get_weather.
+        - Time/date/timezone -> get_time.
+        - Timer/countdown/relative time -> schedule_task with in_seconds.
+        - Alarm/absolute time -> schedule_task with run_at.
+        - URL learn/read requests -> learn_website.
+        - Video lookup -> find_video.
+        - File lookup in Downloads/Documents -> find_files.
+        - Never claim alarm set/cancelled without the tool call.
+        - Use PLAN for tool work or missing information.
+        - If multiple fields are missing, ask once with combined slot names.
+        Examples:
+        \(toolExampleBlock)
+        """
+
+        let localContext = """
+        [LOCAL_CONTEXT]
+        \(memoryHintLines.joined(separator: "\n"))
+        \(selfLessonLines.joined(separator: "\n"))
+        \(websiteLines.joined(separator: "\n"))
+        - Use website notes only when relevant to the user query. Do not invent details.
+        """
+
+        return cappedPrompt(
+            blocks: [coreSystem, stylePolicy, modeBlock, toolPolicy, localContext],
+            maxChars: maxPromptChars
+        )
+    }
+
+    static func dynamicModePolicy(_ mode: ConversationMode?) -> String {
+        guard let mode else {
+            return "- No special mode policy. Continue with normal medium-length assistance."
+        }
+        guard mode.intent == .problemReport else {
+            return "- Intent=\(mode.intent.rawValue), domain=\(mode.domain.rawValue), urgency=\(mode.urgency.rawValue). Keep response practical and concise."
+        }
+
+        var lines: [String] = [
+            "- Intent is problem_report. Use this playbook in one message:",
+            "  1) one short empathy sentence",
+            "  2) ask 2-4 targeted clarifying questions together",
+            "  3) offer 1-3 safe immediate next steps",
+            "  4) add red flags when urgency is medium/high or domain has safety risk",
+            "  5) end with one next-step question: quick checks now or deeper troubleshooting"
+        ]
+
+        switch mode.domain {
+        case .health:
+            lines.append("- Health clarifiers: onset, location, severity 1-10, vomiting/fever/diarrhea/blood, hydration.")
+            lines.append("- Health red flags: severe/worsening pain, blood/black stools, persistent vomiting, fainting, rigid abdomen.")
+        case .vehicle:
+            lines.append("- Vehicle clarifiers: when it happens (idle/accel), warning lights, overheating/smoke, recent oil/service.")
+            lines.append("- Vehicle red flags: oil pressure light, overheating, smoke/fuel smell, loud knocking, loss of power; advise stop driving/tow.")
+        case .tech:
+            lines.append("- Tech clarifiers: exact error text, when started, recent changes, device/network details.")
+            lines.append("- Tech red flags: data loss or security compromise.")
+        default:
+            lines.append("- Use domain-agnostic clarifiers focused on timeline, severity, triggers, and constraints.")
+        }
+
+        if mode.domain == .health && mode.urgency == .high {
+            lines.append("- If severe/worsening or red flags, seek urgent care.")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    static func gatedWebsiteLearningContext(query: String, maxItems: Int, maxChars: Int) -> [String] {
+        let lowerQuery = query.lowercased()
+        let explicitReference = queryHasExplicitWebsiteReference(lowerQuery)
+        if !explicitReference && !shouldAttemptWebsiteRetrieval(lowerQuery) {
+            return []
+        }
+
+        let records = WebsiteLearningStore.shared.allRecords()
+        guard !records.isEmpty else { return [] }
+
+        let candidateRecords: [WebsiteLearningRecord]
+        if explicitReference {
+            let mentionedHost = hostMention(in: lowerQuery)
+            if let mentionedHost {
+                let hostMatches = records.filter { record in
+                    record.host.lowercased() == mentionedHost || mentionedHost.hasSuffix(record.host.lowercased())
+                }
+                candidateRecords = hostMatches.isEmpty ? Array(records.prefix(40)) : Array(hostMatches.prefix(40))
+            } else {
+                candidateRecords = Array(records.prefix(40))
+            }
+        } else {
+            let queryTokens = retrievalTokens(from: lowerQuery)
+            guard !queryTokens.isEmpty else { return [] }
+            let filtered = records.filter { record in
+                let haystack = "\(record.host) \(record.title) \(record.summary)".lowercased()
+                return queryTokens.contains(where: { haystack.contains($0) })
+            }
+            guard !filtered.isEmpty else { return [] }
+            candidateRecords = Array(filtered.prefix(48))
+        }
+
+        let ranked = LocalKnowledgeRetriever.rank(
+            query: query,
+            items: candidateRecords,
+            text: { record in
+                "\(record.title) \(record.summary) \(record.host)"
+            },
+            recencyDate: { $0.updatedAt },
+            limit: max(6, maxItems * 4),
+            minScore: 0.08
+        )
+
+        if !explicitReference {
+            guard let top = ranked.first,
+                  top.finalScore >= websiteRetrievalThreshold,
+                  top.sharedTokenCount >= 1 else {
+                return []
+            }
+        }
+
+        var output: [String] = []
+        var usedChars = 0
+        for entry in ranked.prefix(max(1, maxItems)) {
+            let record = entry.item
+            let line = "[web \(record.host)] \(record.title): \(record.summary)"
+            let clipped = line.count > 320 ? String(line.prefix(317)) + "..." : line
+            if output.isEmpty {
+                guard clipped.count <= maxChars else { continue }
+            } else if usedChars + clipped.count > maxChars {
+                break
+            }
+            output.append(clipped)
+            usedChars += clipped.count
+        }
+        return output
+    }
+
+    private static func queryHasExplicitWebsiteReference(_ lowerQuery: String) -> Bool {
+        if lowerQuery.contains("learned website")
+            || lowerQuery.contains("that site")
+            || lowerQuery.contains("learned url")
+            || lowerQuery.contains("website note")
+            || lowerQuery.contains("from that page")
+            || lowerQuery.range(of: #"https?://\S+"#, options: .regularExpression) != nil {
+            return true
+        }
+        let hostPattern = #"\b([a-z0-9-]+\.)+[a-z]{2,}\b"#
+        return lowerQuery.range(of: hostPattern, options: .regularExpression) != nil
+    }
+
+    private static func shouldAttemptWebsiteRetrieval(_ lowerQuery: String) -> Bool {
+        let trimmed = lowerQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let greetingTokens = ["hi", "hello", "hey", "yo", "sup", "how are you", "good morning", "good evening"]
+        if greetingTokens.contains(where: { trimmed == $0 || trimmed.hasPrefix("\($0) ") }) {
+            return false
+        }
+
+        let problemSignals = [
+            "don't feel", "do not feel", "tummy", "stomach", "pain", "sore", "engine", "car", "wifi", "internet",
+            "network", "headache", "fever", "vomit", "accident", "noise", "not working"
+        ]
+        if problemSignals.contains(where: { trimmed.contains($0) }) {
+            return false
+        }
+
+        let queryTokens = trimmed.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
+        if queryTokens < 4 {
+            return false
+        }
+
+        return true
+    }
+
+    private static func retrievalTokens(from lowerQuery: String) -> [String] {
+        Array(Set(lowerQuery
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count >= 4 }))
+    }
+
+    private static func hostMention(in lowerQuery: String) -> String? {
+        let pattern = #"([a-z0-9-]+\.)+[a-z]{2,}"#
+        guard let range = lowerQuery.range(of: pattern, options: .regularExpression) else {
+            return nil
+        }
+        return String(lowerQuery[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func compactDescription(_ raw: String, maxChars: Int) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "tool" }
+        let first = trimmed.components(separatedBy: ". ").first ?? trimmed
+        if first.count <= maxChars { return first }
+        return String(first.prefix(maxChars - 3)) + "..."
+    }
+
+    private static func cappedPrompt(blocks: [String], maxChars: Int) -> String {
+        var assembled = blocks.joined(separator: "\n\n")
+        if assembled.count <= maxChars {
+            return assembled
+        }
+
+        // First trim local context block aggressively.
+        var mutable = blocks
+        if let idx = mutable.firstIndex(where: { $0.hasPrefix("[LOCAL_CONTEXT]") }) {
+            mutable[idx] = "[LOCAL_CONTEXT]\n- memory_hint: []\n- self_learning: []\n- website_learning: []"
+        }
+        assembled = mutable.joined(separator: "\n\n")
+        if assembled.count <= maxChars {
+            return assembled
+        }
+
+        // Then trim tool block examples only.
+        if let idx = mutable.firstIndex(where: { $0.hasPrefix("[BLOCK 4: TOOL_POLICY]") }) {
+            mutable[idx] = """
+            [BLOCK 4: TOOL_POLICY]
+            Use available tools exactly by name.
+            Prefer PLAN for tool work and missing fields.
+            Weather -> get_weather; time -> get_time; URL learning -> learn_website; long detail -> show_text.
+            """
+        }
+        assembled = mutable.joined(separator: "\n\n")
+        if assembled.count <= maxChars {
+            return assembled
+        }
+
+        return String(assembled.prefix(maxChars))
+    }
+}
+
 /// Abstraction over the OpenAI HTTP API so tests can inject a fake.
 protocol OpenAITransport {
-    func chat(messages: [[String: String]], model: String) async throws -> String
+    func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String
 }
 
 /// Real transport that hits the OpenAI /v1/chat/completions endpoint.
@@ -370,7 +700,7 @@ struct RealOpenAITransport: OpenAITransport {
         ]
     }()
 
-    func chat(messages: [[String: String]], model: String) async throws -> String {
+    func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String {
         guard OpenAISettings.isConfigured else {
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.chat",
@@ -394,11 +724,12 @@ struct RealOpenAITransport: OpenAITransport {
             throw OpenAIRouter.OpenAIError.requestFailed("Invalid URL")
         }
 
+        let cappedTokens = min(1_200, max(120, maxOutputTokens ?? Self.adaptiveMaxTokens(for: messages)))
         let requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
             "temperature": 0.4,
-            "max_tokens": Self.adaptiveMaxTokens(for: messages),
+            "max_tokens": cappedTokens,
             "response_format": Self.responseFormat
         ]
 
@@ -534,6 +865,9 @@ struct RealOpenAITransport: OpenAITransport {
     }
 
     private static func adaptiveMaxTokens(for messages: [[String: String]]) -> Int {
+        if let forced = explicitMaxOutputTokens(in: messages) {
+            return max(120, min(1400, forced))
+        }
         let userText = messages.last(where: { ($0["role"] ?? "").lowercased() == "user" })?["content"] ?? ""
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return 768 }
@@ -562,6 +896,20 @@ struct RealOpenAITransport: OpenAITransport {
             return 220
         }
         return 500
+    }
+
+    private static func explicitMaxOutputTokens(in messages: [[String: String]]) -> Int? {
+        for message in messages.reversed() {
+            guard message["role"] == "system",
+                  let content = message["content"] else { continue }
+            guard content.contains("max_output_tokens=") else { continue }
+            let suffix = content.components(separatedBy: "max_output_tokens=").last ?? ""
+            let digits = suffix.prefix { $0.isNumber }
+            if let value = Int(digits) {
+                return value
+            }
+        }
+        return nil
     }
 }
 
@@ -600,6 +948,7 @@ final class OpenAIRouter {
                    repairReasons: [String]? = nil,
                    repairRawSnippet: String? = nil,
                    alarmContext: AlarmContext? = nil,
+                   promptContext: PromptRuntimeContext? = nil,
                    modelOverride: String? = nil) async throws -> Plan {
         let routeModel = normalizedRouteModel(modelOverride)
         guard OpenAISettings.isConfigured else {
@@ -614,14 +963,19 @@ final class OpenAIRouter {
             throw OpenAIError.notConfigured
         }
 
-        let systemPrompt = buildLightSystemPrompt(forInput: input)
+        let systemPrompt = buildLightSystemPrompt(forInput: input, promptContext: promptContext)
         var messages = parser.buildMessages(input: input, history: history,
                                             systemPrompt: systemPrompt,
                                             pendingSlot: pendingSlot,
-                                            alarmContext: alarmContext)
+                                            alarmContext: alarmContext,
+                                            promptContext: promptContext)
         parser.appendRepairBlock(to: &messages, repairReasons: repairReasons, rawSnippet: repairRawSnippet)
 
-        let responseText = try await transport.chat(messages: messages, model: routeModel)
+        let responseText = try await transport.chat(
+            messages: messages,
+            model: routeModel,
+            maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
+        )
 
         #if DEBUG
         print("[OpenAIRouter] Raw response: \(responseText)")
@@ -645,6 +999,7 @@ final class OpenAIRouter {
                         repairReasons: reasons,
                         repairRawSnippet: responseText,
                         alarmContext: alarmContext,
+                        promptContext: promptContext,
                         modelOverride: routeModel
                     )
                 }
@@ -666,7 +1021,11 @@ final class OpenAIRouter {
                     #if DEBUG
                     print("[OpenAIRouter] Salvaged via normalizeActionJSON")
                     #endif
-                    return enforcePostParseGuardrails(Plan.fromAction(action), userInput: input)
+                    let guarded = enforcePostParseGuardrails(Plan.fromAction(action), userInput: input)
+                    if shouldRepairUnexpectedCapabilityEscalation(guarded, userInput: input) {
+                        return talkOnlyFallbackForUnexpectedCapabilityEscalation(plan: guarded, userInput: input)
+                    }
+                    return guarded
                 }
             }
 
@@ -741,237 +1100,12 @@ final class OpenAIRouter {
     // MARK: - Light System Prompt
 
     /// Shorter system prompt for OpenAI.
-    private func buildLightSystemPrompt(forInput input: String) -> String {
-        let tools = ToolRegistry.shared.allTools
-        var toolDescriptions = ""
-        for tool in tools where tool.name != "capability_gap_to_claude_prompt" {
-            toolDescriptions += "- \(tool.name): \(compactToolDescription(tool.description))\n"
-        }
-
-        let installedSkills = relevantSkillPromptEntries(for: input, limit: 6)
-        var skillBlock = ""
-        if !installedSkills.isEmpty {
-            skillBlock += "\n## Installed Skills (NOT tool names)\n"
-            skillBlock += "- These are matched automatically from user text.\n"
-            skillBlock += "- Never call an installed skill name in TOOL steps.\n"
-            skillBlock += "- Use TOOL steps only for names in Available Tools.\n"
-            for skill in installedSkills {
-                let triggers = skill.triggerPhrases.prefix(2).joined(separator: ", ")
-                skillBlock += "- \(skill.name): triggers on \"\(triggers)\"\n"
-            }
-        }
-
-        let memoryHints = fastMemoryHints(for: input, maxItems: 4, maxChars: 600)
-        let memoryHintField: String
-        if memoryHints.isEmpty {
-            memoryHintField = "memory_hint: []"
-        } else {
-            let snippets = memoryHints.map { memory in
-                "\"[\(memory.type.rawValue)] \(memory.content.replacingOccurrences(of: "\"", with: "'"))\""
-            }
-            memoryHintField = "memory_hint: [\(snippets.joined(separator: ", "))]"
-        }
-
-        let memoryGraphField = "memory_graph: []"
-
-        let selfLessons = SelfLearningStore.shared.relevantLessonTexts(query: input, maxItems: 3, maxChars: 360)
-        let selfLearningField: String
-        if selfLessons.isEmpty {
-            selfLearningField = "self_learning: []"
-        } else {
-            let snippets = selfLessons.map { lesson in
-                "\"\(lesson.replacingOccurrences(of: "\"", with: "'"))\""
-            }
-            selfLearningField = "self_learning: [\(snippets.joined(separator: ", "))]"
-        }
-
-        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 8, maxChars: 1800)
-        let websiteLearningField: String
-        if websiteHints.isEmpty {
-            websiteLearningField = "website_learning: []"
-        } else {
-            let snippets = websiteHints.map { note in
-                "\"\(note.replacingOccurrences(of: "\"", with: "'"))\""
-            }
-            websiteLearningField = "website_learning: [\(snippets.joined(separator: ", "))]"
-        }
-
-        return """
-        You are Sam, a friendly voice assistant inside a macOS app called SamOS.
-        You receive a user's spoken request and must respond with EXACTLY ONE valid JSON object.
-        Output ONLY the JSON object. No explanation, no markdown, no code fences.
-
-        ## Tone & Style
-        - Warm, casual, concise. Sound like a real person, not a robot.
-        - Keep spoken responses short — one to two sentences.
-        - Use contractions and informal phrasing.
-        - You may include one brief follow-up question if it helps the user proceed.
-        - Do NOT ask whether the user wants a quick/brief/detailed version unless they explicitly ask for that choice.
-        - If your previous message asked a question and the user replies briefly, treat it as an answer to that question unless they clearly changed topic.
-
-        ## Reasoning (CoT)
-        - For complex tasks (math, logic, coding, multi-step planning), think step by step internally before choosing the final JSON action.
-        - Break the task into small logical checks internally, then output only the best final action.
-        - Keep internal reasoning private. Never output chain-of-thought text.
-
-        ## Anti-Repetition
-        - Never reuse the same greeting or phrase verbatim within the last 10 assistant messages.
-        - For greetings ("hi", "hello", "hey"), pick a different short response each time.
-        - Keep it casual, 1 sentence max unless the user asks more.
-        - Avoid "How can I assist you today?" style corporate lines.
-        - Example greetings to rotate naturally:
-          "Hey! What's up?" / "Hi, how's your day going?" / "Hey there — what can I do for you?" /
-          "Hello! Need a hand with anything?" / "Hey! How can I help?" / "Hi! What are we doing today?" /
-          "What's going on?" / "Hey hey — what do you need?"
-
-        ## Available Tools
-        \(toolDescriptions)
-        \(skillBlock)
-
-        ## Response Format
-        The "action" field MUST be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP.
-
-        ## Multi-Step Plans (PREFERRED for tool usage)
-        {"action":"PLAN","steps":[
-          {"step":"tool","name":"get_time","args":{"place":"London"},"say":"Here's the time."}
-        ]}
-
-        {"action":"PLAN","steps":[
-          {"step":"tool","name":"schedule_task","args":{"in_seconds":"60","label":"1 minute timer"},"say":"Timer set."}
-        ]}
-
-        {"action":"PLAN","steps":[
-          {"step":"ask","slot":"time","prompt":"What time should I set the alarm for?"}
-        ]}
-
-        Timezone clarification (ambiguous region like "America" / "US"):
-        {"action":"PLAN","steps":[
-          {"step":"ask","slot":"timezone","prompt":"Which state or city in the US?"}
-        ]}
-
-        ## Simple Responses
-        {"action":"TALK","say":"Hey! What's up?"}
-
-        ## Tool Usage
-        {"action":"TOOL","name":"find_image","args":{"query":"frog"},"say":"I'll find an image for that."}
-        {"action":"TOOL","name":"find_video","args":{"query":"race car"},"say":"I'll find a video for that."}
-        {"action":"TOOL","name":"find_files","args":{"query":"find all pdfs in downloads"},"say":"I'll search your files."}
-        {"action":"TOOL","name":"find_recipe","args":{"query":"caramel sauce"},"say":"I'll find a recipe for that."}
-        {"action":"TOOL","name":"show_image","args":{"urls":"https://example.com/img.jpg","alt":"description"},"say":"Here you go."}
-        {"action":"TOOL","name":"show_text","args":{"markdown":"# Title\\nContent"},"say":"Here it is."}
-        {"action":"TOOL","name":"save_memory","args":{"type":"fact","content":"Your dog's name is Bailey."},"say":"I'll remember that."}
-        {"action":"TOOL","name":"get_time","args":{},"say":"Let me check."}
-        {"action":"TOOL","name":"learn_website","args":{"url":"https://example.com","focus":"pricing"},"say":"I'll learn from that page."}
-        {"action":"TOOL","name":"autonomous_learn","args":{"minutes":"5","topic":"productivity habits"},"say":"I'll go learn and report back."}
-        {"action":"TOOL","name":"stop_autonomous_learn","args":{},"say":"Okay, I'll stop learning now."}
-        {"action":"TOOL","name":"describe_camera_view","args":{},"say":"Here's what I can see."}
-        {"action":"TOOL","name":"find_camera_objects","args":{"query":"bottle"},"say":"I'll look for that object."}
-        {"action":"TOOL","name":"get_camera_face_presence","args":{},"say":"I'll check face presence."}
-        {"action":"TOOL","name":"enroll_camera_face","args":{"name":"Ricky"},"say":"I'll learn that face."}
-        {"action":"TOOL","name":"recognize_camera_faces","args":{},"say":"I'll recognize faces now."}
-        {"action":"TOOL","name":"camera_visual_qa","args":{"question":"Do you see a red cup?"},"say":"I'll check the camera view."}
-        {"action":"TOOL","name":"camera_inventory_snapshot","args":{},"say":"I'll capture a snapshot."}
-        {"action":"TOOL","name":"save_camera_memory_note","args":{},"say":"I'll save a camera memory note."}
-        {"action":"TOOL","name":"start_skillforge","args":{"goal":"Capability Gap Miner","constraints":"Analyze failed/blocked turns and propose the next capability to build."},"say":"I'll build that capability."}
-        {"action":"TOOL","name":"forge_queue_clear","args":{},"say":"Okay, I stopped capability learning."}
-
-        [TOOL CHOICE]
-        - Weather/forecast/rain/temperature/wind/humidity -> use get_weather
-        - Time/date/timezone/what time is it -> use get_time
-        - Questions about what Sam can currently see through the laptop camera -> use describe_camera_view
-        - Object finding, face presence, face enrollment/recognition, visual questions, inventory snapshots, and camera memory notes -> use their matching camera tools
-        - Video lookup requests (show/find video, YouTube clip) -> use find_video
-        - File search requests in Downloads/Documents (find file, PDFs, Word docs, partial names) -> use find_files
-        - Do NOT use get_time for weather questions.
-
-        ## Tool Policy
-        - For time/date questions → prefer get_time tool for accurate results.
-        - For weather/forecast/rain questions → prefer get_weather.
-        - For "timer"/"countdown"/relative time → schedule_task with in_seconds.
-        - For "alarm"/absolute time → schedule_task with run_at.
-        - For dense or structured content (markdown blocks, headings/lists/steps, or >200 chars), keep say as a short spoken summary and put full details in show_text markdown.
-        - For long or structured content (multi-line, headings, lists, >240 chars) → prefer show_text with markdown.
-        - For recipes/cooking instructions without a URL -> use find_recipe with args.query.
-        - If user asks for recipe + image, use PLAN with find_recipe and find_image.
-        - For user requests to find/show/search a video by topic -> use find_video with args.query.
-        - For "another video" on the same topic, call find_video again with the same query (tool avoids repeats).
-        - For file-system requests (Downloads/Documents), use find_files with a query like "find all pdfs in downloads" or "find document named bestreport".
-        - For user requests to find/search/show an image by topic -> use find_image with args.query.
-        - Use show_image when the user already provided direct image URL(s).
-        - For requests to read/learn/study a URL → use learn_website with the provided url and optional focus.
-        - For requests to describe what Sam can currently see through camera vision → use describe_camera_view.
-        - For requests to find objects in the camera view → use find_camera_objects with query.
-        - For requests about face presence/count in camera view → use get_camera_face_presence.
-        - For requests to learn/register a person's face in camera view → use enroll_camera_face with name.
-        - For requests to identify/recognize known faces in camera view → use recognize_camera_faces.
-        - For camera questions (for example "Do you see X?") → use camera_visual_qa with question.
-        - For inventory tracking from camera view → use camera_inventory_snapshot.
-        - For saving what camera saw into memory → use save_camera_memory_note.
-        - For requests like "go learn for X minutes" or autonomous self-learning -> use autonomous_learn with minutes and optional topic.
-        - If user asks to stop autonomous timed learning, use stop_autonomous_learn.
-        - For requests to build/create/learn a new capability or skill for Sam -> use start_skillforge with goal and optional constraints.
-        - Do NOT use learn_website or autonomous_learn as a substitute for capability-building requests.
-        - If user asks to stop/abort capability learning, use forge_queue_clear.
-        - For remembering → save_memory. For recalling → list_memories.
-        - For get_time: use "place" for city/state names, "timezone" for IANA IDs.
-        - If region has multiple timezones (US, America) → ask which city/state first.
-        - NEVER claim "alarm set" or "timer set" without calling the tool.
-        - NEVER claim "cancelled" without calling cancel_task.
-        - After learning from a website, use saved website-learning notes to answer follow-up questions.
-        - After autonomous learning, report what you learned clearly and ask one helpful follow-up question if needed.
-        - If you still cannot fulfill a request, return CAPABILITY_GAP with clear goal/missing fields so Sam can auto-build the capability.
-        - For general conversation, factual questions, greetings → use TALK.
-        - For installed skills listed above, execute their behavior with tools/PLAN instead of CAPABILITY_GAP.
-
-        ## Memory Hints
-        \(memoryHintField)
-        \(memoryGraphField)
-        - Memory acknowledgements are optional.
-        - Only acknowledge memory if it is clearly relevant to the user's current message.
-        - Do NOT mention sensitive topics unless the user brings them up first.
-        - Do NOT invent memory. If uncertain, skip memory acknowledgement.
-        - Keep acknowledgements short (one clause) before the main answer.
-
-        ## Self-Improvement Lessons (private)
-        \(selfLearningField)
-        - Use these lessons as internal quality guidance only.
-        - Never mention the lessons directly to the user.
-        - Apply only when relevant to the current turn.
-
-        ## Learned Website Notes
-        \(websiteLearningField)
-        - Use these notes when the user asks about previously learned websites.
-        - Do not invent details that are not present in these notes.
-
-        ## PLAN Policy
-        - Use PLAN for any tool usage or when info is missing (ask step).
-        - PLAN steps must be objects: {"step":"talk|tool|ask|delegate",...}
-        - If multiple required fields are missing, ask for them in one combined ask step (one prompt, comma-separated slot names).
-
-        ## Tool Payload Limits
-        - For show_text, keep args.markdown under ~1200 characters.
-        - Prefer concise content (ingredients + short steps). Do not append quick-vs-detailed upsell prompts.
-        - ALWAYS return complete, valid JSON with closed quotes and braces. Never cut off mid-string.
-
-        ## Newline Escaping
-        - Inside JSON string values, use literal \\n for newlines (not raw newlines).
-        - Example: "markdown":"# Title\\n\\nStep 1: Do this\\nStep 2: Do that"
-        - NEVER put raw newlines inside a JSON string — it breaks the JSON.
-
-        ## Image URL Rules
-        - For show_image you MUST return 3 direct image file URLs (not web pages).
-        - URLs MUST end with .jpg, .png, .webp or .gif.
-        - Use ONLY reliable sources:
-          - https://upload.wikimedia.org/wikipedia/commons/... (preferred)
-          - https://images.unsplash.com/... (direct)
-          - https://images.pexels.com/... (direct)
-        - NEVER use example.com or placeholder domains.
-        - If unsure, prefer Wikimedia upload URLs.
-
-        ## Critical Rules
-        - Output ONLY one valid JSON object with a required "action" field.
-        - The "say" field is for SHORT spoken responses only.
-        """
+    private func buildLightSystemPrompt(forInput input: String, promptContext: PromptRuntimeContext?) -> String {
+        PromptBuilder.buildSystemPrompt(
+            forInput: input,
+            promptContext: promptContext,
+            includeLongToolExamples: false
+        )
     }
 
     private func compactToolDescription(_ raw: String, maxChars: Int = 130) -> String {
@@ -1279,6 +1413,25 @@ final class OpenAIRouter {
             prompt = "I can help directly without building a new capability. Try again with the exact task, and include a URL if you want me to learn from a specific page."
         }
         return Plan(steps: [.talk(say: prompt)])
+    }
+
+    private func talkOnlyFallbackForUnexpectedCapabilityEscalation(plan: Plan, userInput: String) -> Plan {
+        let talk = plan.steps.compactMap { step -> String? in
+            if case .talk(let say) = step {
+                let trimmed = say.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            return nil
+        }.first
+
+        if let talk {
+            return Plan(steps: [.talk(say: talk)])
+        }
+
+        if inputContainsURL(userInput) {
+            return Plan(steps: [.talk(say: "I'm not sure yet. If you want, I can read that URL and summarize what I find.")])
+        }
+        return Plan(steps: [.talk(say: "I'm not sure how to help with that yet — can you try rephrasing?")])
     }
 
     private func isStopCapabilityLearningRequest(_ input: String) -> Bool {

@@ -40,29 +40,6 @@ struct StatusStripView: View {
 
             Spacer()
 
-            // Start / Stop Listening
-            if appState.isListeningEnabled {
-                Button(action: { appState.stopListening() }) {
-                    Label("Stop Listening", systemImage: "mic.slash")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            } else if appState.status == .idle {
-                Button(action: { appState.startListening() }) {
-                    Label("Start Listening", systemImage: "mic")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
-
-            Button(action: { appState.toggleCamera() }) {
-                Label(appState.isCameraEnabled ? "Camera On" : "Camera Off",
-                      systemImage: appState.isCameraEnabled ? "video.fill" : "video.slash")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .help(appState.isCameraEnabled ? "Turn Camera Off" : "Turn Camera On")
-
             // Mute toggle
             Button(action: { appState.toggleMute() }) {
                 Image(systemName: appState.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")

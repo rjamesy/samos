@@ -68,6 +68,8 @@ final class TimezoneTests: XCTestCase {
         let parsed = GetTimeTool.parsePayload(result.payload)
         XCTAssertNotNil(parsed, "London should resolve to a time, not a clarification prompt")
         XCTAssertTrue(parsed!.spoken.hasPrefix("It's "))
+        XCTAssertTrue(parsed!.spoken.lowercased().contains("london"),
+                      "Spoken time should preserve place context for downstream reasoning")
     }
 
     func testGetTimeTokyoResolvesToAsiaTokyo() {

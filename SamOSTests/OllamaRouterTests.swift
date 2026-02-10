@@ -543,7 +543,7 @@ final class FakeTransport: OllamaTransport {
         self.responses = responses
     }
 
-    func chat(messages: [[String: String]]) async throws -> String {
+    func chat(messages: [[String: String]], maxOutputTokens: Int?) async throws -> String {
         chatCallLog.append(messages)
         guard callCount < responses.count else {
             throw OllamaRouter.OllamaError.unreachable("FakeTransport: no more responses")
