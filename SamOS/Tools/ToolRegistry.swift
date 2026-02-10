@@ -1404,19 +1404,37 @@ struct FindRecipeTool: Tool {
         return 0
     }
 
-    private func normalizeSearchHref(_ href: String, baseURL: URL? = nil) -> URL? {
+    func normalizeSearchHref(_ href: String, baseURL: URL? = nil) -> URL? {
         let decoded = href
             .replacingOccurrences(of: "&amp;", with: "&")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if decoded.hasPrefix("/l/?"), let comps = URLComponents(string: "https://duckduckgo.com\(decoded)"),
-           let uddg = comps.queryItems?.first(where: { $0.name == "uddg" })?.value,
-           let resolved = URL(string: uddg) {
-            return resolved
+        let lower = decoded.lowercased()
+        if decoded.hasPrefix("/l/?")
+            || lower.contains("duckduckgo.com/l/?") {
+            let redirectURLString: String
+            if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") {
+                redirectURLString = decoded
+            } else if decoded.hasPrefix("//") {
+                redirectURLString = "https:\(decoded)"
+            } else if decoded.hasPrefix("/") {
+                redirectURLString = "https://duckduckgo.com\(decoded)"
+            } else {
+                redirectURLString = "https://duckduckgo.com/\(decoded)"
+            }
+
+            if let comps = URLComponents(string: redirectURLString),
+               let uddg = comps.queryItems?.first(where: { $0.name == "uddg" })?.value,
+               let resolved = URL(string: uddg) {
+                return resolved
+            }
         }
 
         if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") {
             return URL(string: decoded)
+        }
+        if decoded.hasPrefix("//") {
+            return URL(string: "https:\(decoded)")
         }
         if decoded.hasPrefix("/") {
             return URL(string: decoded, relativeTo: baseURL)?.absoluteURL

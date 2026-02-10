@@ -945,6 +945,122 @@ final class RouterPipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testPromptExportSamplesForTummyAndEngine() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON), .success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let longHistory: [ChatMessage] = [
+            ChatMessage(role: .user, text: "my dog's name is Bingo"),
+            ChatMessage(role: .assistant, text: "Noted, I'll remember that."),
+            ChatMessage(role: .user, text: "we're planning a weekend hike"),
+            ChatMessage(role: .assistant, text: "Great, I can help with a checklist."),
+            ChatMessage(role: .user, text: "keep it compact because i have a small car"),
+            ChatMessage(role: .assistant, text: "Understood, compact and practical."),
+            ChatMessage(role: .user, text: "what are weather risks"),
+            ChatMessage(role: .assistant, text: "Rain and wind are key factors."),
+            ChatMessage(role: .user, text: "i also want safety tips"),
+            ChatMessage(role: .assistant, text: "Sure, I'll include safety checks."),
+            ChatMessage(role: .user, text: "please keep answers medium length"),
+            ChatMessage(role: .assistant, text: "Will do.")
+        ]
+
+        _ = await orchestrator.processTurn("my tummy is sore", history: longHistory)
+        _ = await orchestrator.processTurn("my engine is making a funny noise", history: longHistory)
+
+        XCTAssertEqual(fakeOpenAI.chatCallLog.count, 2)
+
+        let labels = ["my tummy is sore", "my engine is making a funny noise"]
+        let expectedDomains = ["health", "vehicle"]
+
+        for index in 0..<2 {
+            let messages = fakeOpenAI.chatCallLog[index]
+            guard let systemPrompt = messages.first(where: { $0["role"] == "system" })?["content"] else {
+                return XCTFail("Expected core system prompt")
+            }
+            guard let modeMessage = messages.first(where: { ($0["content"] ?? "").contains("[MODE]") })?["content"] else {
+                return XCTFail("Expected [MODE] block")
+            }
+            guard let stateMessage = messages.first(where: { ($0["content"] ?? "").contains("[INTERACTION_STATE]") })?["content"] else {
+                return XCTFail("Expected [INTERACTION_STATE] block")
+            }
+            guard let summaryMessage = messages.first(where: { ($0["content"] ?? "").contains("[CONVERSATION_SUMMARY]") })?["content"] else {
+                return XCTFail("Expected [CONVERSATION_SUMMARY] block")
+            }
+            guard let budgetMessage = messages.first(where: { ($0["content"] ?? "").contains("[RESPONSE_BUDGET]") })?["content"] else {
+                return XCTFail("Expected [RESPONSE_BUDGET] block")
+            }
+
+            XCTAssertTrue(modeMessage.contains("\"intent\":\"problem_report\""))
+            XCTAssertTrue(modeMessage.contains("\"domain\":\"\(expectedDomains[index])\""))
+
+            let summaryLower = summaryMessage.lowercased()
+            XCTAssertTrue(summaryLower.contains("active topic: problem_report/\(expectedDomains[index])"))
+            XCTAssertTrue(summaryLower.contains("latest user turn: \(labels[index])"))
+
+            print("[PROMPT_EXPORT] input=\(labels[index])")
+            print("[PROMPT_EXPORT][MODE]\n\(modeMessage)")
+            print("[PROMPT_EXPORT][INTERACTION_STATE]\n\(stateMessage)")
+            print("[PROMPT_EXPORT][CONVERSATION_SUMMARY]\n\(summaryMessage)")
+            print("[PROMPT_EXPORT][RESPONSE_BUDGET]\n\(budgetMessage)")
+            print("[PROMPT_EXPORT][FINAL_SYSTEM_TEXT] chars=\(systemPrompt.count)")
+            print(systemPrompt)
+            print("[PROMPT_EXPORT][END]")
+        }
+    }
+
+    @MainActor
+    func testProblemReportPivotsFromHealthToVehicleImmediately() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON), .success(validTalkJSON), .success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        var history: [ChatMessage] = []
+
+        let first = await orchestrator.processTurn("I don't feel well", history: history)
+        history.append(ChatMessage(role: .user, text: "I don't feel well"))
+        history.append(contentsOf: first.appendedChat)
+
+        let second = await orchestrator.processTurn("my tummy is sore", history: history)
+        history.append(ChatMessage(role: .user, text: "my tummy is sore"))
+        history.append(contentsOf: second.appendedChat)
+
+        _ = await orchestrator.processTurn("actually it's my car, engine noise", history: history)
+
+        XCTAssertEqual(fakeOpenAI.chatCallLog.count, 3)
+        let thirdCall = fakeOpenAI.chatCallLog[2]
+        guard let modeMessage = thirdCall.first(where: { ($0["content"] ?? "").contains("[MODE]") })?["content"] else {
+            return XCTFail("Expected [MODE] block")
+        }
+        guard let systemPrompt = thirdCall.first(where: { $0["role"] == "system" })?["content"] else {
+            return XCTFail("Expected system prompt")
+        }
+
+        XCTAssertTrue(modeMessage.contains("\"intent\":\"problem_report\""))
+        XCTAssertTrue(modeMessage.contains("\"domain\":\"vehicle\""))
+        XCTAssertTrue(systemPrompt.contains("Vehicle clarifiers"), "Expected vehicle mode policy in system prompt")
+        XCTAssertFalse(systemPrompt.contains("Health clarifiers"), "Should not keep health framing after pivot")
+    }
+
+    @MainActor
     func testToolResultFeedbackLoopSynthesizesFinalAnswer() async {
         let initial = """
         {"action":"PLAN","steps":[{"step":"tool","name":"show_text","args":{"markdown":"# Weather\\n- Rain chance: 62%\\n- Bring an umbrella"}}]}
@@ -1646,12 +1762,47 @@ final class RouterPipelineTests: XCTestCase {
         let first = await orchestrator.processTurn("hello", history: [])
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
         let firstText = first.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(firstText.contains("api key missing/invalid"), "Expected explicit auth error, got: \(firstText)")
+        XCTAssertTrue(firstText.contains("openai rejected the request (401)"), "Expected explicit auth error, got: \(firstText)")
+        XCTAssertTrue(firstText.contains("settings -> openai"), "Expected actionable settings path, got: \(firstText)")
 
         let second = await orchestrator.processTurn("hello again", history: [])
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Second turn should fail fast without calling OpenAI again")
         let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(secondText.contains("api key missing/invalid"), "Expected persistent auth error, got: \(secondText)")
+        XCTAssertTrue(secondText.contains("openai rejected the request"), "Expected persistent auth error, got: \(secondText)")
+        XCTAssertTrue(secondText.contains("settings -> openai"), "Expected actionable settings path, got: \(secondText)")
+    }
+
+    @MainActor
+    func testInvalidAPIKeyStateClearsOnlyWhenKeyChanges() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .failure(OpenAIRouter.OpenAIError.badResponse(401)),
+            .success(validTalkJSON)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "same-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "same-key"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        _ = await orchestrator.processTurn("hello", history: [])
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
+
+        // Re-saving the same key should remain blocked.
+        OpenAISettings.apiKey = "same-key"
+        _ = await orchestrator.processTurn("hello again", history: [])
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Same key should keep invalid lockout active")
+
+        // Saving a different key should clear invalid lockout and allow retry.
+        OpenAISettings.apiKey = "different-key"
+        let recovered = await orchestrator.processTurn("hello after update", history: [])
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Different key should clear invalid lockout")
+        XCTAssertEqual(recovered.llmProvider, .openai)
     }
 
     // MARK: - F) Ollama standalone when OpenAI not configured
@@ -1700,7 +1851,8 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOllama.chatCallCount, 0)
         XCTAssertEqual(result.llmProvider, .none)
         let assistantText = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(assistantText.contains("api key missing/invalid"), "Expected explicit auth guidance, got: \(assistantText)")
+        XCTAssertTrue(assistantText.contains("api key isn't set"), "Expected explicit auth guidance, got: \(assistantText)")
+        XCTAssertTrue(assistantText.contains("settings -> openai"), "Expected actionable settings path, got: \(assistantText)")
     }
 
     // MARK: - H) OpenAI valid TALK → immediate return, no retry, no fallback
@@ -2223,6 +2375,56 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertTrue(markdownPayload.contains("Waffle"), "Expected show_text markdown output, got: \(markdownPayload)")
         XCTAssertFalse(result.appendedChat.contains(where: { $0.text.contains("trouble processing") }),
                        "Should not fall back to friendly parse error")
+    }
+
+    @MainActor
+    func testMalformedNamedTalkStepFallsBackWithoutToolExecution() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"name":"talk","say":"hi"}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.isEmpty, "Malformed step must not execute any tool")
+        let assistant = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        XCTAssertTrue(assistant.contains("trouble processing"), "Expected safe friendly fallback, got: \(assistant)")
+    }
+
+    @MainActor
+    func testUnknownToolStepRejectedWithFriendlyFallback() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"delete_all_files","args":{}}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("clean up my machine", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.isEmpty, "Unknown tool must never be executed")
+        let assistant = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        XCTAssertTrue(assistant.contains("trouble processing"), "Expected safe friendly fallback, got: \(assistant)")
     }
 
     // MARK: - L) Malformed show_image JSON salvaged as show_image tool

@@ -283,6 +283,24 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertNotNil(tool, "ToolRegistry must contain find_files with exact name")
     }
 
+    func testFindRecipeNormalizesDuckDuckGoSchemeRelativeRedirect() {
+        let tool = FindRecipeTool()
+        let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.recipetineats.com%2Fbutter-chicken%2F"
+        let resolved = tool.normalizeSearchHref(href, baseURL: URL(string: "https://duckduckgo.com/html/?q=butter+chicken"))
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.host, "www.recipetineats.com")
+        XCTAssertTrue(resolved?.absoluteString.contains("/butter-chicken/") == true)
+    }
+
+    func testFindRecipeNormalizesDuckDuckGoAbsoluteRedirect() {
+        let tool = FindRecipeTool()
+        let href = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.bbcgoodfood.com%2Frecipes%2Feasy-butter-chicken"
+        let resolved = tool.normalizeSearchHref(href)
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.host, "www.bbcgoodfood.com")
+        XCTAssertTrue(resolved?.absoluteString.contains("/recipes/") == true)
+    }
+
     func testShowTextAcceptsTextAlias() {
         guard let tool = ToolRegistry.shared.get("show_text") else {
             return XCTFail("show_text tool missing")

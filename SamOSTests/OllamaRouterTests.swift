@@ -371,6 +371,28 @@ final class OllamaRouterTests: XCTestCase {
         XCTAssertEqual(args?["markdown"] as? String, "# Recipe\n- mix")
     }
 
+    func testNormalizeShowTextContentArgToMarkdown() {
+        let input: [String: Any] = [
+            "action": "PLAN",
+            "steps": [
+                [
+                    "step": "show_text",
+                    "args": [
+                        "content": "# Recipe\n- simmer"
+                    ]
+                ]
+            ]
+        ]
+
+        let result = router.normalizeActionJSON(input)
+        let steps = result["steps"] as? [[String: Any]]
+        let first = steps?.first
+        XCTAssertEqual(first?["step"] as? String, "tool")
+        XCTAssertEqual(first?["name"] as? String, "show_text")
+        let args = first?["args"] as? [String: Any]
+        XCTAssertEqual(args?["markdown"] as? String, "# Recipe\n- simmer")
+    }
+
     // MARK: - extractJSON Preference for "action"
 
     func testExtractJSONPrefersActionObject() {
@@ -485,6 +507,27 @@ final class OllamaRouterTests: XCTestCase {
             XCTAssertEqual(name, "get_time")
         } catch {
             XCTFail("Expected parser to normalize tool-only step, got: \(error)")
+        }
+    }
+
+    func testParsePlanWithNamedTalkStepWithoutStepKeyThrowsSchemaMismatch() {
+        let text = #"{"action":"PLAN","steps":[{"name":"talk","say":"hi"}]}"#
+        XCTAssertThrowsError(try router.parsePlanOrAction(from: text)) { error in
+            guard case OllamaRouter.OllamaError.schemaMismatch(_, let reasons) = error else {
+                return XCTFail("Expected .schemaMismatch, got \(error)")
+            }
+            let joined = reasons.joined(separator: " ").lowercased()
+            XCTAssertTrue(joined.contains("known tool") || joined.contains("missing step type"))
+        }
+    }
+
+    func testParsePlanWithUnknownToolNameThrowsSchemaMismatch() {
+        let text = #"{"action":"PLAN","steps":[{"step":"tool","name":"delete_all_files","args":{}}]}"#
+        XCTAssertThrowsError(try router.parsePlanOrAction(from: text)) { error in
+            guard case OllamaRouter.OllamaError.schemaMismatch(_, let reasons) = error else {
+                return XCTFail("Expected .schemaMismatch, got \(error)")
+            }
+            XCTAssertTrue(reasons.joined(separator: " ").contains("unknown tool"))
         }
     }
 

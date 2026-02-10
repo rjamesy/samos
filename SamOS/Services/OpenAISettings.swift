@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CryptoKit
 
 /// Settings for OpenAI (SkillForge), using Keychain for the API key and UserDefaults for the model.
 /// Follows the same pattern as ElevenLabsSettings.
@@ -14,6 +15,8 @@ enum OpenAISettings {
         static let model = "openai_model"
         static let escalationModel = "openai_escalation_model"
         static let keySavedAt = "openai_keySavedAt"
+        static let invalidatedKeyFingerprint = "openai_invalidatedKeyFingerprint"
+        static let lastAuthFailureStatusCode = "openai_lastAuthFailureStatusCode"
         static let realtimeModeEnabled = "openai_realtimeModeEnabled"
         static let realtimeUseClassicSTT = "openai_realtimeUseClassicSTT"
         static let realtimeModel = "openai_realtimeModel"
@@ -27,7 +30,7 @@ enum OpenAISettings {
 
     private static var _cachedApiKey: String?
     private static var _cacheLoaded = false
-    private static var _invalidatedApiKey: String?
+    private static var _invalidatedKeyFingerprint: String?
     private static var _lastAuthFailureStatusCode: Int?
 
     enum APIKeyStatus: Equatable {
@@ -49,8 +52,7 @@ enum OpenAISettings {
                     KeychainStore.delete(forKey: keychainAccount, service: keychainService)
                 }
                 _cachedApiKey = ""
-                _invalidatedApiKey = nil
-                _lastAuthFailureStatusCode = nil
+                clearInvalidatedKeyState()
                 defaults.removeObject(forKey: Key.keySavedAt)
             } else {
                 #if DEBUG
@@ -59,9 +61,9 @@ enum OpenAISettings {
                 if KeychainStore.useKeychain {
                     _ = KeychainStore.set(normalized, forKey: keychainAccount, service: keychainService)
                 }
-                if _invalidatedApiKey != normalized {
-                    _invalidatedApiKey = nil
-                    _lastAuthFailureStatusCode = nil
+                let newFingerprint = keyFingerprint(for: normalized)
+                if _invalidatedKeyFingerprint != newFingerprint {
+                    clearInvalidatedKeyState()
                 }
                 _cachedApiKey = normalized
                 defaults.set(Date(), forKey: Key.keySavedAt)
@@ -81,6 +83,7 @@ enum OpenAISettings {
     /// Both fall back to `OPENAI_API_KEY` env var when no persisted key exists.
     private static func loadApiKeyCache() {
         defer { _cacheLoaded = true }
+        loadInvalidatedKeyStateIfNeeded()
 
         #if DEBUG
         if let key = DevSecretsStore.shared.get("dev.openai.apiKey"),
@@ -204,7 +207,8 @@ enum OpenAISettings {
     static var apiKeyStatus: APIKeyStatus {
         let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return .missing }
-        if _invalidatedApiKey == normalized {
+        let fingerprint = keyFingerprint(for: normalized)
+        if _invalidatedKeyFingerprint == fingerprint {
             return .invalid
         }
         return .ready
@@ -222,20 +226,21 @@ enum OpenAISettings {
         guard statusCode == 401 || statusCode == 403 else { return }
         let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return }
-        _invalidatedApiKey = normalized
+        _invalidatedKeyFingerprint = keyFingerprint(for: normalized)
         _lastAuthFailureStatusCode = statusCode
+        defaults.set(_invalidatedKeyFingerprint, forKey: Key.invalidatedKeyFingerprint)
+        defaults.set(statusCode, forKey: Key.lastAuthFailureStatusCode)
     }
 
     static func clearInvalidatedAPIKeyIfNeeded() {
         let normalized = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
-            _invalidatedApiKey = nil
-            _lastAuthFailureStatusCode = nil
+            clearInvalidatedKeyState()
             return
         }
-        if _invalidatedApiKey != normalized {
-            _invalidatedApiKey = nil
-            _lastAuthFailureStatusCode = nil
+        let fingerprint = keyFingerprint(for: normalized)
+        if _invalidatedKeyFingerprint != fingerprint {
+            clearInvalidatedKeyState()
         }
     }
 
@@ -243,13 +248,40 @@ enum OpenAISettings {
         _lastAuthFailureStatusCode
     }
 
+    /// Explicit user-triggered re-check hook for Settings UI.
+    static func retryInvalidatedAPIKey() {
+        clearInvalidatedKeyState()
+    }
+
+    private static func loadInvalidatedKeyStateIfNeeded() {
+        _invalidatedKeyFingerprint = defaults.string(forKey: Key.invalidatedKeyFingerprint)
+        if let value = defaults.object(forKey: Key.lastAuthFailureStatusCode) as? NSNumber {
+            _lastAuthFailureStatusCode = value.intValue
+        } else {
+            _lastAuthFailureStatusCode = nil
+        }
+    }
+
+    private static func clearInvalidatedKeyState() {
+        _invalidatedKeyFingerprint = nil
+        _lastAuthFailureStatusCode = nil
+        defaults.removeObject(forKey: Key.invalidatedKeyFingerprint)
+        defaults.removeObject(forKey: Key.lastAuthFailureStatusCode)
+    }
+
+    private static func keyFingerprint(for key: String) -> String {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return "" }
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
     // MARK: - Testing Support
 
     static func _resetCacheForTesting() {
         _cachedApiKey = nil
         _cacheLoaded = false
-        _invalidatedApiKey = nil
-        _lastAuthFailureStatusCode = nil
+        clearInvalidatedKeyState()
     }
 }
 

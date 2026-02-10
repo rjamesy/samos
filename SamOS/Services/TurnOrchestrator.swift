@@ -2242,13 +2242,13 @@ final class TurnOrchestrator {
         } else if let e = error as? OpenAIRouter.OpenAIError {
             switch e {
             case .notConfigured:
-                msg = "OpenAI API key missing/invalid. Add or update it in Settings."
+                msg = missingOpenAIKeyMessage()
             case .invalidAPIKey:
-                msg = "OpenAI API key missing/invalid. Add or update it in Settings."
+                msg = rejectedOpenAIKeyMessage(statusCode: OpenAISettings.authFailureStatusCode)
             case .badResponse(let code):
                 if code == 401 || code == 403 {
                     OpenAISettings.markAPIKeyRejected(statusCode: code)
-                    msg = "OpenAI API key missing/invalid. Add or update it in Settings."
+                    msg = rejectedOpenAIKeyMessage(statusCode: code)
                 } else {
                     msg = "OpenAI returned an error (HTTP \(code)). Please try again."
                 }
@@ -2264,6 +2264,20 @@ final class TurnOrchestrator {
         }
         #endif
         return Plan(steps: [.talk(say: msg)])
+    }
+
+    private func missingOpenAIKeyMessage() -> String {
+        "OpenAI API key isn't set. Open SamOS Settings -> OpenAI and paste your key."
+    }
+
+    private func rejectedOpenAIKeyMessage(statusCode: Int?) -> String {
+        let statusText: String
+        if let statusCode, statusCode == 401 || statusCode == 403 {
+            statusText = "\(statusCode)"
+        } else {
+            statusText = "401/403"
+        }
+        return "OpenAI rejected the request (\(statusText)). Please check your API key in Settings -> OpenAI (it may be missing, invalid, expired, or revoked)."
     }
 
     private func fallbackResult(_ error: Error) -> TurnResult {

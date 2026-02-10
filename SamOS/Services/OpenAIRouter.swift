@@ -119,7 +119,24 @@ final class OpenAIAPILogStore {
                       statusCode: Int?,
                       latencyMs: Int?,
                       error: String,
-                      responseData: Data?) {
+                      responseData: Data?,
+                      extraPayload: [String: Any]? = nil) {
+        var payload: Any? = parsedPayload(from: responseData)
+        if let extraPayload {
+            if var dict = payload as? [String: Any] {
+                for (key, value) in extraPayload {
+                    dict[key] = value
+                }
+                payload = dict
+            } else if let existingPayload = payload {
+                payload = [
+                    "response": existingPayload,
+                    "meta": extraPayload
+                ]
+            } else {
+                payload = extraPayload
+            }
+        }
         log(
             phase: "error",
             requestID: requestID,
@@ -130,7 +147,7 @@ final class OpenAIAPILogStore {
             statusCode: statusCode,
             latencyMs: latencyMs,
             error: error,
-            payload: parsedPayload(from: responseData)
+            payload: payload
         )
     }
 
@@ -386,7 +403,7 @@ enum PromptBuilder {
         You are Sam, a friendly voice assistant inside a macOS app called SamOS.
         Return EXACTLY ONE valid JSON object and nothing else.
         The "action" field MUST be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP.
-        Think step by step internally before choosing the final JSON action, but never reveal chain-of-thought.
+        think step by step internally before choosing the final JSON action, but never reveal chain-of-thought.
         Never output markdown or prose outside JSON.
         """
 
@@ -713,20 +730,26 @@ struct RealOpenAITransport: OpenAITransport {
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: model,
-                reason: "OpenAI API key missing/invalid",
-                payload: ["message_count": messages.count]
+                reason: "OpenAI API key missing",
+                payload: [
+                    "message_count": messages.count,
+                    "authorization_header_present": false
+                ]
             )
             throw OpenAIRouter.OpenAIError.notConfigured
         case .invalid:
+            let statusCode = OpenAISettings.authFailureStatusCode
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.chat",
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: model,
-                reason: "OpenAI API key missing/invalid",
+                reason: "OpenAI API key rejected",
                 payload: [
                     "message_count": messages.count,
-                    "last_auth_failure_status": OpenAISettings.authFailureStatusCode as Any
+                    "last_auth_failure_status": statusCode as Any,
+                    "auth_error_code": statusCode as Any,
+                    "authorization_header_present": false
                 ]
             )
             throw OpenAIRouter.OpenAIError.invalidAPIKey
@@ -807,7 +830,11 @@ struct RealOpenAITransport: OpenAITransport {
                     statusCode: http.statusCode,
                     latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
                     error: "HTTP \(http.statusCode)",
-                    responseData: responseData
+                    responseData: responseData,
+                    extraPayload: [
+                        "auth_error_code": http.statusCode,
+                        "authorization_header_present": authHeaderPresent
+                    ]
                 )
                 loggedTerminal = true
                 if http.statusCode == 401 || http.statusCode == 403 {
@@ -839,7 +866,11 @@ struct RealOpenAITransport: OpenAITransport {
                     statusCode: nil,
                     latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
                     error: error.localizedDescription,
-                    responseData: nil
+                    responseData: nil,
+                    extraPayload: [
+                        "auth_error_code": OpenAISettings.authFailureStatusCode as Any,
+                        "authorization_header_present": authHeaderPresent
+                    ]
                 )
             }
             throw error
@@ -853,7 +884,11 @@ struct RealOpenAITransport: OpenAITransport {
                 statusCode: nil,
                 latencyMs: Int(Date().timeIntervalSince(startedAt) * 1000),
                 error: error.localizedDescription,
-                responseData: nil
+                responseData: nil,
+                extraPayload: [
+                    "auth_error_code": OpenAISettings.authFailureStatusCode as Any,
+                    "authorization_header_present": authHeaderPresent
+                ]
             )
             throw OpenAIRouter.OpenAIError.requestFailed(error.localizedDescription)
         }
@@ -961,7 +996,11 @@ final class OpenAIRouter {
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "OpenAI API key not configured"
-            case .invalidAPIKey: return "OpenAI API key missing/invalid"
+            case .invalidAPIKey:
+                if let code = OpenAISettings.authFailureStatusCode {
+                    return "OpenAI rejected request (HTTP \(code))"
+                }
+                return "OpenAI rejected request (HTTP 401/403)"
             case .requestFailed(let msg): return "OpenAI request failed: \(msg)"
             case .badResponse(let code): return "OpenAI returned HTTP \(code)"
             }
@@ -997,20 +1036,26 @@ final class OpenAIRouter {
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: routeModel,
-                reason: "OpenAI API key missing/invalid",
-                payload: ["input_preview": String(input.prefix(160))]
+                reason: "OpenAI API key missing",
+                payload: [
+                    "input_preview": String(input.prefix(160)),
+                    "authorization_header_present": false
+                ]
             )
             throw OpenAIError.notConfigured
         case .invalid:
+            let statusCode = OpenAISettings.authFailureStatusCode
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.routePlan",
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
                 model: routeModel,
-                reason: "OpenAI API key missing/invalid",
+                reason: "OpenAI API key rejected",
                 payload: [
                     "input_preview": String(input.prefix(160)),
-                    "last_auth_failure_status": OpenAISettings.authFailureStatusCode as Any
+                    "last_auth_failure_status": statusCode as Any,
+                    "auth_error_code": statusCode as Any,
+                    "authorization_header_present": false
                 ]
             )
             throw OpenAIError.invalidAPIKey

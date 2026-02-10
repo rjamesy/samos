@@ -463,17 +463,25 @@ final class OllamaRouter {
                         "PLAN.steps must be an array of step objects like {\"step\":\"tool\",...}, not strings or primitives."
                     ])
                 }
+                let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name.lowercased() })
                 let malformed = steps.compactMap { $0 as? [String: Any] }.filter { step in
-                    step["step"] == nil && step["type"] == nil && step["name"] == nil
+                    let hasStepType = step["step"] != nil || step["type"] != nil
+                    guard !hasStepType else { return false }
+                    guard let name = step["name"] as? String else { return true }
+                    return !canNormalizeMissingStepWithName(name, toolNames: toolNames)
                 }
                 if !malformed.isEmpty {
                     throw OllamaError.schemaMismatch(raw: jsonString, reasons: [
-                        "Each PLAN step object must include either \"step\" (or \"type\") OR a tool \"name\" key."
+                        "Each PLAN step object must include either \"step\" (or \"type\") OR a known tool \"name\" key."
                     ])
                 }
             }
 
             let normalized = normalizeActionJSON(dict)
+            let strictReasons = strictPlanSchemaViolations(normalized)
+            if !strictReasons.isEmpty {
+                throw OllamaError.schemaMismatch(raw: jsonString, reasons: strictReasons)
+            }
             let normalizedData = (try? JSONSerialization.data(withJSONObject: normalized)) ?? jsonData
             if let plan = try? JSONDecoder().decode(Plan.self, from: normalizedData) {
                 return plan
@@ -501,20 +509,53 @@ final class OllamaRouter {
            let steps = dict["steps"] as? [[String: Any]] {
             var reasons: [String] = []
             for (index, step) in steps.enumerated() {
-                let rawStep = (step["step"] as? String ?? step["type"] as? String ?? "").lowercased()
-                if rawStep.isEmpty && step["name"] == nil {
-                    reasons.append("missing step type at steps[\(index)]")
-                    continue
+                let rawStep = normalizeToken(step["step"] as? String ?? step["type"] as? String ?? "")
+                let rawName = normalizeToken(step["name"] as? String ?? "")
+                var inferredStepType = rawStep
+                var inferredToolName = rawName
+
+                if inferredStepType.isEmpty {
+                    if rawName.isEmpty {
+                        reasons.append("missing step type at steps[\(index)]")
+                        continue
+                    }
+                    if canNormalizeMissingStepWithName(rawName, toolNames: toolNames) {
+                        inferredStepType = "tool"
+                        inferredToolName = rawName
+                    } else {
+                        reasons.append("missing step type at steps[\(index)]")
+                        continue
+                    }
                 }
 
-                if !rawStep.isEmpty,
-                   !allowedStepTypes.contains(rawStep),
-                   !toolNames.contains(rawStep) {
-                    reasons.append("bad step type '\(rawStep)' at steps[\(index)]")
+                if inferredStepType != "tool" && !allowedStepTypes.contains(inferredStepType) {
+                    if canNormalizeStepAliasToTool(inferredStepType) {
+                        let aliasToolName = inferredStepType
+                        inferredStepType = "tool"
+                        if inferredToolName.isEmpty {
+                            inferredToolName = aliasToolName
+                        }
+                    } else {
+                        reasons.append("bad step type '\(inferredStepType)' at steps[\(index)]")
+                        continue
+                    }
                 }
 
-                let inferredToolName = (step["name"] as? String)?.lowercased()
-                    ?? (toolNames.contains(rawStep) ? rawStep : nil)
+                if inferredStepType == "tool" {
+                    if inferredToolName.isEmpty {
+                        if canNormalizeStepAliasToTool(rawStep) {
+                            inferredToolName = rawStep
+                        } else {
+                            reasons.append("missing tool name at steps[\(index)]")
+                            continue
+                        }
+                    }
+                    if !isKnownToolName(inferredToolName, toolNames: toolNames) {
+                        reasons.append("unknown tool '\(inferredToolName)' at steps[\(index)]")
+                        continue
+                    }
+                }
+
                 if inferredToolName == "show_text" {
                     guard let args = step["args"] as? [String: Any] else {
                         reasons.append("bad args key at steps[\(index)] for show_text")
@@ -522,9 +563,12 @@ final class OllamaRouter {
                     }
                     let hasMarkdown = !(args["markdown"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     let hasText = !(args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    let hasContent = !(args["content"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     if hasText && !hasMarkdown {
                         reasons.append("bad args key 'text' at steps[\(index)] for show_text (expected 'markdown')")
-                    } else if !hasMarkdown && !hasText {
+                    } else if hasContent && !hasMarkdown {
+                        reasons.append("bad args key 'content' at steps[\(index)] for show_text (expected 'markdown')")
+                    } else if !hasMarkdown && !hasText && !hasContent {
                         reasons.append("missing args.markdown at steps[\(index)] for show_text")
                     }
                 }
@@ -544,6 +588,64 @@ final class OllamaRouter {
             "You returned a JSON object with keys [\(keys)] but no \"action\" field.",
             "The \"action\" field is REQUIRED and must be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP."
         ]
+    }
+
+    private func strictPlanSchemaViolations(_ dict: [String: Any]) -> [String] {
+        guard let action = (dict["action"] as? String)?.uppercased(),
+              action == "PLAN",
+              let steps = dict["steps"] as? [[String: Any]] else {
+            return []
+        }
+
+        let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name.lowercased() })
+        var reasons: [String] = []
+        for (index, step) in steps.enumerated() {
+            let stepType = normalizeToken(step["step"] as? String ?? step["type"] as? String ?? "")
+            let name = normalizeToken(step["name"] as? String ?? "")
+
+            if stepType == "tool" {
+                if name.isEmpty {
+                    reasons.append("missing tool name at steps[\(index)]")
+                } else if !isKnownToolName(name, toolNames: toolNames) {
+                    reasons.append("unknown tool '\(name)' at steps[\(index)]")
+                }
+                continue
+            }
+
+            if stepType.isEmpty && !name.isEmpty && !canNormalizeMissingStepWithName(name, toolNames: toolNames) {
+                reasons.append("unknown tool '\(name)' at steps[\(index)]")
+                continue
+            }
+
+            if !stepType.isEmpty && !Set(["talk", "ask", "delegate", "tool"]).contains(stepType) {
+                if canNormalizeStepAliasToTool(stepType) {
+                    if !isKnownToolName(stepType, toolNames: toolNames) {
+                        reasons.append("unknown tool '\(stepType)' at steps[\(index)]")
+                    }
+                } else {
+                    reasons.append("bad step type '\(stepType)' at steps[\(index)]")
+                }
+            }
+        }
+        return reasons
+    }
+
+    private func canNormalizeMissingStepWithName(_ name: String, toolNames: Set<String>) -> Bool {
+        isKnownToolName(name, toolNames: toolNames)
+    }
+
+    private func canNormalizeStepAliasToTool(_ stepType: String) -> Bool {
+        Self.planStepToolAliasAllowlist.contains(normalizeToken(stepType))
+    }
+
+    private func isKnownToolName(_ name: String, toolNames: Set<String>) -> Bool {
+        let normalized = normalizeToken(name)
+        guard !normalized.isEmpty else { return false }
+        return toolNames.contains(normalized) || Self.planStepToolAliasAllowlist.contains(normalized)
+    }
+
+    private func normalizeToken(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     // MARK: - JSON Parsing
@@ -595,6 +697,20 @@ final class OllamaRouter {
         "reply", "answer", "hi", "hey", "output", "content"
     ]
 
+    /// Narrow allowlist for alias-style PLAN step normalization.
+    /// Prevents over-salvaging arbitrary step values into tool calls.
+    private static let planStepToolAliasAllowlist: Set<String> = [
+        "show_text",
+        "show_image",
+        "get_time",
+        "get_weather",
+        "find_recipe",
+        "find_video",
+        "find_image",
+        "find_files",
+        "learn_website"
+    ]
+
     /// Attempts to rescue a non-schema JSON object as TALK if it looks conversational.
     /// Strict whitelist: dict must have 1-3 keys, all lowercase keys must be in the
     /// conversational whitelist, and at least one value must be a short human sentence.
@@ -624,7 +740,7 @@ final class OllamaRouter {
     /// Normalizes common LLM deviations from the expected Action JSON schema.
     func normalizeActionJSON(_ input: [String: Any]) -> [String: Any] {
         var dict = input
-        let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name })
+        let toolNames = Set(ToolRegistry.shared.allTools.map { $0.name.lowercased() })
         var actionRaw = (dict["action"] as? String ?? "").lowercased()
 
         // Coerce args from JSON string to object (LLM sometimes returns args as a string)
@@ -741,12 +857,14 @@ final class OllamaRouter {
             step["args"] = args
         }
 
-        if step["step"] == nil, step["name"] != nil {
+        if step["step"] == nil,
+           let name = step["name"] as? String,
+           canNormalizeMissingStepWithName(name, toolNames: toolNames) {
             step["step"] = "tool"
         }
 
-        let rawStepType = (step["step"] as? String ?? "").lowercased()
-        if toolNames.contains(rawStepType) {
+        let rawStepType = normalizeToken(step["step"] as? String ?? "")
+        if canNormalizeStepAliasToTool(rawStepType) {
             if step["name"] == nil {
                 step["name"] = rawStepType
             }
@@ -799,10 +917,14 @@ final class OllamaRouter {
         var normalized = args
         if name == "show_text" {
             let markdown = (normalized["markdown"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if markdown.isEmpty,
-               let text = normalized["text"] as? String,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                normalized["markdown"] = text
+            if markdown.isEmpty {
+                if let text = normalized["text"] as? String,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    normalized["markdown"] = text
+                } else if let content = normalized["content"] as? String,
+                          !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    normalized["markdown"] = content
+                }
             }
         }
         return normalized

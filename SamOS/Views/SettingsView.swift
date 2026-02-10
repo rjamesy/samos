@@ -484,7 +484,8 @@ struct SettingsView: View {
                 }
 
             LabeledContent("Status") {
-                if OpenAISettings.isConfigured {
+                let keyStatus = OpenAISettings.apiKeyStatus
+                if keyStatus == .ready {
                     VStack(alignment: .trailing, spacing: 2) {
                         if openaiRealtimeModeEnabled {
                             let sttMode = openaiRealtimeUseClassicSTT ? "Classic STT" : "Realtime STT"
@@ -508,6 +509,15 @@ struct SettingsView: View {
                         Text(OpenAISettings.isYouTubeConfigured ? "YouTube API configured" : "YouTube API not configured")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                    }
+                } else if keyStatus == .invalid {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text("API key rejected (401/403)")
+                            .foregroundColor(.orange)
+                        Button("Re-check Key") {
+                            OpenAISettings.retryInvalidatedAPIKey()
+                        }
+                        .buttonStyle(.borderless)
                     }
                 } else {
                     Text("API key required").foregroundColor(.secondary)

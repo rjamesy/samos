@@ -1134,7 +1134,9 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: Self.followUpSettleDelayNs)
             guard !Task.isCancelled else { return }
             // Let AudioCaptureService endpoint speech naturally to avoid dropping short replies.
-            self.voicePipeline.startFollowUpCapture(noSpeechTimeoutMs: nil)
+            self.voicePipeline.startFollowUpCapture(
+                noSpeechTimeoutMs: self.questionAutoListenNoSpeechTimeoutMs
+            )
         }
     }
 
