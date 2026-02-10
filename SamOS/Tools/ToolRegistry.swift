@@ -1114,6 +1114,7 @@ struct FindRecipeTool: Tool {
         "https://www.simplyrecipes.com/search?q=%@",
         "https://www.recipetineats.com/?s=%@"
     ]
+    private static let mealDBSearchTemplate = "https://www.themealdb.com/api/json/v1/1/search.php?s=%@"
     private static let allowedRecipeHosts: Set<String> = [
         "taste.com.au",
         "bbcgoodfood.com",
@@ -1263,6 +1264,32 @@ struct FindRecipeTool: Tool {
             )
         }
 
+        if let mealDBFallback = fetchMealDBRecipeMatch(query: intent.canonicalQuery) {
+            markRecipeShown(url: mealDBFallback.url, cacheKey: intent.cacheKey)
+            let formatted = buildRecipeMarkdown(
+                query: intent.canonicalQuery,
+                sourceTitle: mealDBFallback.title,
+                sourceURL: mealDBFallback.url,
+                ingredients: mealDBFallback.ingredients,
+                steps: mealDBFallback.steps,
+                alternatives: []
+            )
+            return structuredMarkdownPayload(
+                kind: "recipe",
+                spoken: "I found a \(intent.canonicalQuery) recipe for you.",
+                formatted: formatted
+            )
+        }
+
+        if let generated = fetchOpenAIGeneratedRecipe(query: intent.canonicalQuery) {
+            let formatted = buildGeneratedRecipeMarkdown(query: intent.canonicalQuery, generated: generated)
+            return structuredMarkdownPayload(
+                kind: "recipe",
+                spoken: "I put together a practical \(intent.canonicalQuery) recipe for you.",
+                formatted: formatted
+            )
+        }
+
         let fallback = """
         # Recipe Search
 
@@ -1306,6 +1333,13 @@ struct FindRecipeTool: Tool {
     private struct OpenAIRecipeHints {
         let domains: [String]
         let queryVariants: [String]
+    }
+
+    struct OpenAIGeneratedRecipe {
+        let title: String
+        let ingredients: [String]
+        let steps: [String]
+        let note: String?
     }
 
     private func parseQueryIntent(from rawQuery: String) -> ParsedRecipeIntent {
@@ -1538,6 +1572,125 @@ struct FindRecipeTool: Tool {
         return domains
     }
 
+    private func fetchMealDBRecipeMatch(query: String) -> RecipeMatch? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        guard let url = URL(string: String(format: Self.mealDBSearchTemplate, encoded)),
+              let data = fetchData(url: url, timeout: 8) else {
+            return nil
+        }
+
+        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let meals = envelope["meals"] as? [[String: Any]],
+              !meals.isEmpty else {
+            return nil
+        }
+
+        let queryTokens = query
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count >= 3 }
+        let rankedMeals = meals.sorted { lhs, rhs in
+            let lTitle = (lhs["strMeal"] as? String ?? "").lowercased()
+            let rTitle = (rhs["strMeal"] as? String ?? "").lowercased()
+            let lScore = queryTokens.reduce(0) { partial, token in
+                partial + (lTitle.contains(token) ? 1 : 0)
+            }
+            let rScore = queryTokens.reduce(0) { partial, token in
+                partial + (rTitle.contains(token) ? 1 : 0)
+            }
+            if lScore != rScore { return lScore > rScore }
+            return lTitle.count < rTitle.count
+        }
+
+        for meal in rankedMeals.prefix(3) {
+            if let parsed = mealDBRecipeMatch(from: meal) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    private func mealDBRecipeMatch(from meal: [String: Any]) -> RecipeMatch? {
+        guard let parsed = parseMealDBRecipePreview(from: meal) else { return nil }
+        return RecipeMatch(
+            url: parsed.sourceURL,
+            title: parsed.title,
+            ingredients: parsed.ingredients,
+            steps: parsed.steps,
+            score: 180
+        )
+    }
+
+    func parseMealDBRecipePreview(from meal: [String: Any]) -> (title: String, sourceURL: URL, ingredients: [String], steps: [String])? {
+        let title = (meal["strMeal"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+
+        var ingredients: [String] = []
+        for index in 1...20 {
+            let ingredientKey = "strIngredient\(index)"
+            let measureKey = "strMeasure\(index)"
+            let ingredient = (meal[ingredientKey] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if ingredient.isEmpty { continue }
+            let measure = (meal[measureKey] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let combined = measure.isEmpty ? ingredient : "\(measure) \(ingredient)"
+            ingredients.append(combined.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression))
+        }
+
+        let instructions = (meal["strInstructions"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let steps = splitInstructionSteps(instructions)
+        guard !ingredients.isEmpty, !steps.isEmpty else { return nil }
+
+        let sourceCandidate = (meal["strSource"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let idMeal = (meal["idMeal"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceURL = URL(string: sourceCandidate).flatMap { url in
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                return url
+            }
+            return nil
+        } ?? URL(string: "https://www.themealdb.com/meal/\(idMeal)")
+
+        guard let sourceURL else { return nil }
+        return (
+            title: title,
+            sourceURL: sourceURL,
+            ingredients: Array(ingredients.prefix(12)),
+            steps: Array(steps.prefix(10))
+        )
+    }
+
+    func splitInstructionSteps(_ text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let lineSteps = trimmed
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 10 }
+            .map { normalizeStepLine($0) }
+            .filter { !$0.isEmpty }
+        if lineSteps.count >= 3 {
+            return Array(lineSteps.prefix(10))
+        }
+
+        let sentenceSeparated = trimmed
+            .replacingOccurrences(of: #"\r\n?"#, with: "\n", options: .regularExpression)
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .components(separatedBy: ". ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 12 }
+            .map { step -> String in
+                let punctuated = step.hasSuffix(".") ? step : "\(step)."
+                return normalizeStepLine(punctuated)
+            }
+        return Array(sentenceSeparated.prefix(10))
+    }
+
     private func fetchOpenAIRecipeSearchHints(query: String) -> OpenAIRecipeHints? {
         guard OpenAISettings.isConfigured else { return nil }
         guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else { return nil }
@@ -1646,6 +1799,175 @@ struct FindRecipeTool: Tool {
         return OpenAIRecipeHints(domains: domains, queryVariants: variants)
     }
 
+    private func fetchOpenAIGeneratedRecipe(query: String) -> OpenAIGeneratedRecipe? {
+        guard OpenAISettings.isConfigured else { return nil }
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else { return nil }
+
+        let system = """
+        You generate practical cooking recipes.
+        Return strict JSON only:
+        {"title":"...","ingredients":["..."],"steps":["..."],"note":"..."}
+        Rules:
+        - Use 6-14 ingredients and 4-10 steps.
+        - Keep steps concise and actionable.
+        - Do not include markdown.
+        - If unsure, return your best common version of the dish.
+        """
+        let user = "Dish request: \(query)"
+        let requestBody: [String: Any] = [
+            "model": OpenAISettings.generalModel,
+            "messages": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": user]
+            ],
+            "temperature": 0.2,
+            "max_tokens": 520,
+            "response_format": ["type": "json_object"]
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 7
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(OpenAISettings.apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+
+        let requestID = OpenAIAPILogStore.shared.logHTTPRequest(
+            service: "FindRecipeTool.fetchOpenAIGeneratedRecipe",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.generalModel,
+            timeoutSeconds: request.timeoutInterval,
+            payload: requestBody
+        )
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseCode: Int?
+        var responseError: String?
+        let startedAt = Date()
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            responseData = data
+            responseCode = (response as? HTTPURLResponse)?.statusCode
+            responseError = error?.localizedDescription
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 8)
+        let latencyMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        guard let status = responseCode,
+              status >= 200,
+              status < 300,
+              let responseData else {
+            OpenAIAPILogStore.shared.logHTTPError(
+                requestID: requestID,
+                service: "FindRecipeTool.fetchOpenAIGeneratedRecipe",
+                endpoint: url.absoluteString,
+                method: "POST",
+                model: OpenAISettings.generalModel,
+                statusCode: responseCode,
+                latencyMs: latencyMs,
+                error: responseError ?? "No response",
+                responseData: responseData
+            )
+            return nil
+        }
+
+        OpenAIAPILogStore.shared.logHTTPResponse(
+            requestID: requestID,
+            service: "FindRecipeTool.fetchOpenAIGeneratedRecipe",
+            endpoint: url.absoluteString,
+            method: "POST",
+            model: OpenAISettings.generalModel,
+            statusCode: status,
+            latencyMs: latencyMs,
+            responseData: responseData
+        )
+
+        guard let envelope = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              let choices = envelope["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            return nil
+        }
+
+        let raw = content
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = raw.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return parseOpenAIGeneratedRecipe(from: payload)
+    }
+
+    func parseOpenAIGeneratedRecipe(from payload: [String: Any]) -> OpenAIGeneratedRecipe? {
+        let preferredTitle = (payload["title"] as? String ?? payload["name"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = preferredTitle.isEmpty ? "Recipe" : preferredTitle
+        let ingredients = normalizeOpenAIIngredientList(payload["ingredients"])
+        let steps = normalizeOpenAISteps(payload["steps"] ?? payload["instructions"] ?? payload["method"])
+        guard !ingredients.isEmpty, !steps.isEmpty else { return nil }
+
+        let note = (payload["note"] as? String ?? payload["tips"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return OpenAIGeneratedRecipe(
+            title: title,
+            ingredients: ingredients,
+            steps: steps,
+            note: note.isEmpty ? nil : note
+        )
+    }
+
+    private func normalizeOpenAIIngredientList(_ value: Any?) -> [String] {
+        var items: [String] = []
+        if let list = value as? [String] {
+            items = list
+        } else if let list = value as? [Any] {
+            items = list.compactMap { $0 as? String }
+        } else if let single = value as? String {
+            items = single
+                .components(separatedBy: .newlines)
+                .flatMap { line in
+                    line.split(separator: ",").map(String.init)
+                }
+        }
+
+        let normalized = items
+            .map { normalizeListLine($0) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 && $0.count <= 120 }
+        return Array(normalized.prefix(14))
+    }
+
+    private func normalizeOpenAISteps(_ value: Any?) -> [String] {
+        if let list = value as? [String] {
+            let normalized = list
+                .map { normalizeStepLine($0) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.count >= 8 && $0.count <= 220 }
+            if !normalized.isEmpty {
+                return Array(normalized.prefix(10))
+            }
+        } else if let list = value as? [Any] {
+            let normalized = list
+                .compactMap { $0 as? String }
+                .map { normalizeStepLine($0) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.count >= 8 && $0.count <= 220 }
+            if !normalized.isEmpty {
+                return Array(normalized.prefix(10))
+            }
+        } else if let text = value as? String {
+            return Array(splitInstructionSteps(text).prefix(10))
+        }
+        return []
+    }
+
     private func extractIngredients(from lines: [String]) -> [String] {
         if let idx = lines.firstIndex(where: { $0.lowercased().contains("ingredients") }) {
             let section = Array(lines.dropFirst(idx + 1).prefix(30))
@@ -1751,6 +2073,32 @@ struct FindRecipeTool: Tool {
         return String(markdown.prefix(1_180))
     }
 
+    private func buildGeneratedRecipeMarkdown(query: String, generated: OpenAIGeneratedRecipe) -> String {
+        var lines: [String] = []
+        lines.append("# Recipe: \(generated.title)")
+        lines.append("")
+        lines.append("- Source: OpenAI generated fallback (no reliable recipe page was reachable)")
+        lines.append("")
+        lines.append("## Ingredients")
+        for ingredient in generated.ingredients.prefix(14) {
+            lines.append("- \(ingredient)")
+        }
+        lines.append("")
+        lines.append("## Steps")
+        for (index, step) in generated.steps.prefix(10).enumerated() {
+            lines.append("\(index + 1). \(step)")
+        }
+        if let note = generated.note {
+            lines.append("")
+            lines.append("## Note")
+            lines.append("- \(note)")
+        }
+        lines.append("")
+        lines.append("_Want another option? Ask: `show another recipe for \(query)`_")
+        lines.append("_To restart options: `reset recipe history for \(query)`_")
+        return String(lines.joined(separator: "\n").prefix(1_180))
+    }
+
     private func extractTitle(fromHTML html: String) -> String? {
         let range = NSRange(html.startIndex..., in: html)
         guard let match = Self.titleRegex.firstMatch(in: html, options: [], range: range),
@@ -1794,8 +2142,15 @@ struct FindRecipeTool: Tool {
     }
 
     private func fetchHTML(url: URL) -> String? {
+        guard let data = fetchData(url: url, timeout: 8) else { return nil }
+        let body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        guard let body, !body.isEmpty else { return nil }
+        return body
+    }
+
+    private func fetchData(url: URL, timeout: TimeInterval) -> Data? {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 8
+        request.timeoutInterval = timeout
         request.httpMethod = "GET"
         request.setValue(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -1804,19 +2159,18 @@ struct FindRecipeTool: Tool {
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
 
         let semaphore = DispatchSemaphore(value: 0)
-        var body: String?
+        var payload: Data?
 
         URLSession.shared.dataTask(with: request) { data, response, _ in
             defer { semaphore.signal() }
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
                   let data = data else { return }
-            body = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+            payload = data
         }.resume()
 
-        _ = semaphore.wait(timeout: .now() + 10)
-        guard let body, !body.isEmpty else { return nil }
-        return body
+        _ = semaphore.wait(timeout: .now() + timeout + 2)
+        return payload
     }
 
     private func recipePromptPayload(slot: String, spoken: String, formatted: String) -> OutputItem {

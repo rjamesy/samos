@@ -301,6 +301,69 @@ final class ImageParsingTests: XCTestCase {
         XCTAssertTrue(resolved?.absoluteString.contains("/recipes/") == true)
     }
 
+    func testFindRecipeParsesMealDBRecipePreview() {
+        let tool = FindRecipeTool()
+        let sampleMeal: [String: Any] = [
+            "idMeal": "52874",
+            "strMeal": "Beef and Mustard Pie",
+            "strSource": "https://www.bbcgoodfood.com/recipes/314159/beef-and-mustard-pie",
+            "strInstructions": """
+            Heat the oven to 200C.
+            Brown the beef in a pan, then add onion and mustard.
+            Simmer with stock for 40 minutes.
+            Transfer to a dish, cover with pastry, and bake until golden.
+            """,
+            "strIngredient1": "Beef",
+            "strMeasure1": "500g",
+            "strIngredient2": "Onion",
+            "strMeasure2": "1",
+            "strIngredient3": "Mustard",
+            "strMeasure3": "2 tbsp"
+        ]
+
+        let preview = tool.parseMealDBRecipePreview(from: sampleMeal)
+        XCTAssertNotNil(preview)
+        XCTAssertEqual(preview?.title, "Beef and Mustard Pie")
+        XCTAssertEqual(preview?.sourceURL.host, "www.bbcgoodfood.com")
+        XCTAssertTrue(preview?.ingredients.first?.contains("500g Beef") == true)
+        XCTAssertGreaterThanOrEqual(preview?.steps.count ?? 0, 3)
+    }
+
+    func testFindRecipeParsesOpenAIGeneratedRecipePreview() {
+        let tool = FindRecipeTool()
+        let payload: [String: Any] = [
+            "title": "Butter Chicken",
+            "ingredients": """
+            500g chicken thigh
+            2 tbsp butter
+            1 cup tomato puree
+            1/2 cup cream
+            """,
+            "instructions": """
+            Marinate the chicken with spices. Sear the chicken until lightly browned.
+            Melt butter in a pan and add tomato puree. Simmer for 10 minutes, then add cream.
+            Return chicken to the sauce and cook through. Serve with rice or naan.
+            """,
+            "note": "Adjust chili to taste."
+        ]
+
+        let recipe = tool.parseOpenAIGeneratedRecipe(from: payload)
+        XCTAssertNotNil(recipe)
+        XCTAssertEqual(recipe?.title, "Butter Chicken")
+        XCTAssertTrue(recipe?.ingredients.contains(where: { $0.contains("500g chicken thigh") }) == true)
+        XCTAssertGreaterThanOrEqual(recipe?.steps.count ?? 0, 3)
+        XCTAssertEqual(recipe?.note, "Adjust chili to taste.")
+    }
+
+    func testFindRecipeSplitsInstructionParagraphIntoSteps() {
+        let tool = FindRecipeTool()
+        let steps = tool.splitInstructionSteps("""
+        Heat oil in a pan. Add onions and cook until soft. Stir in garlic and ginger. Add chicken and cook through. Add sauce and simmer for 10 minutes. Serve with rice.
+        """)
+        XCTAssertGreaterThanOrEqual(steps.count, 4)
+        XCTAssertTrue(steps.first?.lowercased().contains("heat oil") == true)
+    }
+
     func testShowTextAcceptsTextAlias() {
         guard let tool = ToolRegistry.shared.get("show_text") else {
             return XCTFail("show_text tool missing")

@@ -2715,4 +2715,87 @@ final class RouterPipelineTests: XCTestCase {
             XCTFail("Should not throw: \(error)")
         }
     }
+
+    // MARK: - P) OpenAI key persistence/isolation hardening
+
+    func testOpenAISettingsUsesTestIsolatedStorageNamespaces() {
+        #if DEBUG
+        XCTAssertTrue(
+            OpenAISettings._debugEffectiveKeychainServiceForTesting().hasSuffix(".tests"),
+            "XCTest runs must not touch production OpenAI keychain entries"
+        )
+        XCTAssertTrue(
+            OpenAISettings._debugEffectiveDevSecretKeyForTesting().hasSuffix(".tests"),
+            "XCTest runs must not touch production debug secret entries"
+        )
+        XCTAssertTrue(OpenAISettings._debugShouldUseKeychainStorageForTesting())
+        #else
+        return
+        #endif
+    }
+
+    func testOpenAIKeyPersistsAcrossCacheResetInTestsNamespace() {
+        let key = "sk-test-\(UUID().uuidString)"
+        OpenAISettings.apiKey = key
+        OpenAISettings._resetCacheForTesting()
+        XCTAssertEqual(OpenAISettings.apiKey, key)
+    }
+
+    func testOpenAIKeychainPreferredOverDebugFallbackWhenBothExist() {
+        #if DEBUG
+        let service = OpenAISettings._debugEffectiveKeychainServiceForTesting()
+        let devKey = OpenAISettings._debugEffectiveDevSecretKeyForTesting()
+
+        _ = KeychainStore.set("keychain-live-value", forKey: "apiKey", service: service)
+        DevSecretsStore.shared.set(devKey, "dev-fallback-value")
+
+        OpenAISettings._resetCacheForTesting()
+        XCTAssertEqual(OpenAISettings.apiKey, "keychain-live-value")
+
+        _ = KeychainStore.delete(forKey: "apiKey", service: service)
+        DevSecretsStore.shared.delete(devKey)
+        #else
+        return
+        #endif
+    }
+
+    @MainActor
+    func testLiveOpenAIRecipeTurnSmoke() async throws {
+        let shouldRun = ProcessInfo.processInfo.environment["RUN_LIVE_OPENAI_SMOKE"] == "1"
+            || FileManager.default.fileExists(atPath: "/tmp/run_live_openai_smoke")
+        guard shouldRun else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_SMOKE=1 to run live OpenAI smoke tests")
+        }
+
+        // Read the app's production keychain entry and mirror it into the test-isolated namespace.
+        let productionKey = KeychainStore.get(forKey: "apiKey", service: "com.samos.openai")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !productionKey.isEmpty else {
+            throw XCTSkip("No production OpenAI key found in Keychain")
+        }
+
+        OpenAISettings.apiKey = productionKey
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = productionKey
+
+        let originalUseOllama = M2Settings.useOllama
+        defer { M2Settings.useOllama = originalUseOllama }
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("i want to cook butter chicken tonight", history: [])
+        XCTAssertEqual(result.llmProvider, .openai, "Live recipe turn should route through OpenAI")
+
+        let markdownOutputs = result.appendedOutputs.filter { $0.kind == .markdown }.map(\.payload)
+        XCTAssertFalse(markdownOutputs.isEmpty, "Expected recipe output markdown")
+        let merged = markdownOutputs.joined(separator: "\n").lowercased()
+        XCTAssertFalse(
+            merged.contains("couldn't fetch a reliable recipe page"),
+            "Recipe tool should return usable recipe content"
+        )
+        XCTAssertTrue(merged.contains("ingredients") || merged.contains("recipe"))
+    }
 }
