@@ -777,7 +777,7 @@ final class OpenAIRouter {
             selfLearningField = "self_learning: [\(snippets.joined(separator: ", "))]"
         }
 
-        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 4, maxChars: 500)
+        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 8, maxChars: 1800)
         let websiteLearningField: String
         if websiteHints.isEmpty {
             websiteLearningField = "website_learning: []"

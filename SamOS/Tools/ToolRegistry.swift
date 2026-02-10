@@ -2303,8 +2303,8 @@ struct LearnWebsiteTool: Tool {
     private func buildChunks(from lines: [String], focus: String?) -> [String] {
         guard !lines.isEmpty else { return [] }
         let focusTokens = Set(tokenize(focus ?? ""))
-        let maxChunkChars = 420
-        let maxChunks = 48
+        let maxChunkChars = 680
+        let maxChunks = 320
         var chunks: [String] = []
         var current = ""
 

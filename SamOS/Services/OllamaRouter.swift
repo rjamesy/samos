@@ -779,7 +779,7 @@ final class OllamaRouter {
             selfLearningBlock += "- Never mention these lessons directly to the user.\n"
         }
 
-        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 10, maxChars: 1200)
+        let websiteHints = WebsiteLearningStore.shared.relevantContext(query: input, maxItems: 12, maxChars: 2000)
         var websiteLearningBlock = ""
         if !websiteHints.isEmpty {
             websiteLearningBlock += "\n## Learned Website Notes\n"

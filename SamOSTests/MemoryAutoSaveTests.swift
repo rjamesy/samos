@@ -310,6 +310,30 @@ final class WebsiteLearningStoreTests: XCTestCase {
         XCTAssertTrue(lines[0].contains("Home Brewing"), "Semantic retrieval should prefer topical match over pure recency")
     }
 
+    func testWebsiteLearningContextUsesStoredChunksForDetailedRecall() {
+        let store = makeLearningStore()
+        _ = store.saveLearnedPage(
+            url: "https://example.com/brew-log",
+            title: "Brew Lab Notes",
+            summary: "General brewing notes.",
+            highlights: ["Fermentation notes"],
+            chunks: [
+                "Hydrometer calibration drift can skew gravity readings by 2-3 points if not corrected before transfer.",
+                "Keep sanitizer contact time above one minute on all hoses."
+            ]
+        )
+
+        let lines = store.relevantContext(
+            query: "how do I fix hydrometer calibration drift",
+            maxItems: 1,
+            maxChars: 260
+        )
+
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].lowercased().contains("hydrometer calibration drift"),
+                      "Chunk-level retrieval should surface detailed learned text, not only summaries.")
+    }
+
     func testLearnWebsiteToolStoresAndReturnsStructuredPayload() {
         let learningStore = makeLearningStore()
         let memoryStore = makeMemoryStore()

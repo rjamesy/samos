@@ -1006,7 +1006,7 @@ final class WebsiteLearningStore {
         }
     }
 
-    /// Compact lines for prompt injection with size limits.
+    /// Chunk-first RAG lines for prompt injection with size limits.
     func relevantContext(query: String, maxItems: Int = 3, maxChars: Int = 320) -> [String] {
         queue.sync {
             guard !records.isEmpty else { return [] }
@@ -1014,22 +1014,25 @@ final class WebsiteLearningStore {
             struct WebsiteContextItem {
                 let text: String
                 let updatedAt: Date
+                let isSummary: Bool
             }
 
             var candidates: [WebsiteContextItem] = []
-            candidates.reserveCapacity(records.count * 4)
+            candidates.reserveCapacity(records.count * 16)
             for record in records {
                 candidates.append(
                     WebsiteContextItem(
                         text: "[web \(record.host)] \(record.title): \(record.summary)",
-                        updatedAt: record.updatedAt
+                        updatedAt: record.updatedAt,
+                        isSummary: true
                     )
                 )
-                for chunk in record.chunks.prefix(24) {
+                for chunk in record.chunks {
                     candidates.append(
                         WebsiteContextItem(
                             text: "[web \(record.host)] \(record.title): \(chunk)",
-                            updatedAt: record.updatedAt
+                            updatedAt: record.updatedAt,
+                            isSummary: false
                         )
                     )
                 }
@@ -1043,21 +1046,26 @@ final class WebsiteLearningStore {
                 },
                 recencyDate: { $0.updatedAt },
                 extraBoost: { item in
-                    min(0.08, Double(item.text.count) / 1000.0)
+                    let lengthBoost = min(0.08, Double(item.text.count) / 1000.0)
+                    let summaryBoost = item.isSummary ? 0.05 : 0.0
+                    return lengthBoost + summaryBoost
                 },
-                limit: max(1, maxItems * 4),
-                minScore: 0.08
+                limit: max(8, maxItems * 10),
+                minScore: 0.05
             )
 
             var selected: [String] = []
             var usedChars = 0
             let cappedItems = max(1, maxItems)
+            var seen: Set<String> = []
 
             for entry in ranked {
                 let item = entry.item
                 guard selected.count < cappedItems else { break }
                 let rawLine = item.text
-                let line = rawLine.count > 220 ? String(rawLine.prefix(217)) + "..." : rawLine
+                let line = rawLine.count > 420 ? String(rawLine.prefix(417)) + "..." : rawLine
+                let key = line.lowercased()
+                if !seen.insert(key).inserted { continue }
                 if selected.isEmpty {
                     guard line.count <= maxChars else { continue }
                 } else if usedChars + line.count > maxChars {
@@ -1065,6 +1073,19 @@ final class WebsiteLearningStore {
                 }
                 selected.append(line)
                 usedChars += line.count
+            }
+
+            if selected.isEmpty {
+                for record in records.prefix(cappedItems) {
+                    let fallback = "[web \(record.host)] \(record.title): \(record.summary)"
+                    if selected.isEmpty {
+                        guard fallback.count <= maxChars else { continue }
+                    } else if usedChars + fallback.count > maxChars {
+                        break
+                    }
+                    selected.append(fallback)
+                    usedChars += fallback.count
+                }
             }
 
             return selected

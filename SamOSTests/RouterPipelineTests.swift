@@ -570,6 +570,66 @@ final class RouterPipelineTests: XCTestCase {
                       "System prompt should include CoT directive")
     }
 
+    @MainActor
+    func testToolResultFeedbackLoopSynthesizesFinalAnswer() async {
+        let initial = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"show_text","args":{"markdown":"# Weather\\n- Rain chance: 62%\\n- Bring an umbrella"}}]}
+        """
+        let feedback = """
+        {"action":"TALK","say":"Rain chance is high, so bring an umbrella."}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(initial), .success(feedback)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("is it raining?", history: [])
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Feedback pass should perform one re-entry call")
+        XCTAssertFalse(result.appendedOutputs.isEmpty, "Tool output should still render in canvas")
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.contains("umbrella") }),
+                      "Final assistant line should synthesize the tool output")
+    }
+
+    @MainActor
+    func testToolResultFeedbackLoopSupportsMultiDepthToolReentry() async {
+        let initial = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"show_text","args":{"markdown":"# Step One\\n- Base output"}}]}
+        """
+        let followupTool = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"show_text","args":{"markdown":"# Step Two\\n- Follow-up output"}}]}
+        """
+        let finalTalk = """
+        {"action":"TALK","say":"I combined both results and finished the task."}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(initial), .success(followupTool), .success(finalTalk)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("finish this with tool re-entry", history: [])
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 3, "Feedback loop should support an additional tool pass before final talk")
+        XCTAssertGreaterThanOrEqual(result.appendedOutputs.count, 2, "Both tool passes should contribute output")
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.contains("finished") }))
+    }
+
     // MARK: - Weather/Time Tool Choice
 
     @MainActor

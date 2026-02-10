@@ -74,9 +74,9 @@ final class TurnOrchestrator {
     private var followUpQuestionIndex = 0
     private let openAIRouteTimeoutSeconds: Double = 5.0
     private let openAIImageRepairTimeoutSeconds: Double = 3.0
-    private let toolFeedbackLoopMaxDepth = 1
+    private let toolFeedbackLoopMaxDepth = 3
     private let maxRephraseBudgetMs = 700
-    private let maxToolFeedbackBudgetMs = 600
+    private let maxToolFeedbackBudgetMs = 1800
 
     var pendingSlot: PendingSlot? = nil
 
@@ -291,13 +291,6 @@ final class TurnOrchestrator {
             result.triggerFollowUpCapture = true
         }
 
-        applyCanvasPresentationPolicy(&result)
-        applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
-        applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
-        applyKnowledgeAttribution(&result,
-                                  userInput: originalInput,
-                                  provider: provider,
-                                  localKnowledgeContext: localKnowledgeContext)
         await applyToolResultFeedbackLoop(
             &result,
             originalInput: originalInput,
@@ -306,6 +299,13 @@ final class TurnOrchestrator {
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
+        applyCanvasPresentationPolicy(&result)
+        applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
+        applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
+        applyKnowledgeAttribution(&result,
+                                  userInput: originalInput,
+                                  provider: provider,
+                                  localKnowledgeContext: localKnowledgeContext)
         rememberAssistantLines(result.appendedChat)
         return result
     }
@@ -420,13 +420,6 @@ final class TurnOrchestrator {
             result.triggerFollowUpCapture = true
         }
 
-        applyCanvasPresentationPolicy(&result)
-        applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
-        applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
-        applyKnowledgeAttribution(&result,
-                                  userInput: originalInput,
-                                  provider: provider,
-                                  localKnowledgeContext: localKnowledgeContext)
         await applyToolResultFeedbackLoop(
             &result,
             originalInput: originalInput,
@@ -435,6 +428,13 @@ final class TurnOrchestrator {
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
+        applyCanvasPresentationPolicy(&result)
+        applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
+        applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
+        applyKnowledgeAttribution(&result,
+                                  userInput: originalInput,
+                                  provider: provider,
+                                  localKnowledgeContext: localKnowledgeContext)
         rememberAssistantLines(result.appendedChat)
         return result
     }
@@ -632,26 +632,46 @@ final class TurnOrchestrator {
                                              depth: Int,
                                              turnStartedAt: Date) async {
         guard depth < toolFeedbackLoopMaxDepth else { return }
-        guard elapsedMs(since: turnStartedAt) < maxToolFeedbackBudgetMs else { return }
-        guard shouldRunToolFeedbackLoop(result) else { return }
-        guard let synthesized = await synthesizeToolAwareAnswer(
-            from: result,
-            originalInput: originalInput,
-            history: history,
-            provider: provider
-        ) else { return }
 
-        let normalizedSynthesized = normalizeForComparison(synthesized)
-        let existing = result.appendedChat
-            .filter { $0.role == .assistant }
-            .map(\.text)
-            .map(normalizeForComparison)
-        guard !existing.contains(normalizedSynthesized) else { return }
+        var loopDepth = depth
+        var seenPlanFingerprints: Set<String> = []
 
-        let line = synthesized.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return }
-        result.appendedChat.append(ChatMessage(role: .assistant, text: line, llmProvider: provider))
-        result.spokenLines.append(line)
+        while loopDepth < toolFeedbackLoopMaxDepth {
+            guard elapsedMs(since: turnStartedAt) < maxToolFeedbackBudgetMs else { break }
+            guard shouldRunToolFeedbackLoop(result) else { break }
+            guard let feedbackPlan = await synthesizeToolAwarePlan(
+                from: result,
+                originalInput: originalInput,
+                history: history,
+                provider: provider
+            ) else { break }
+
+            let fingerprint = feedbackPlanFingerprint(feedbackPlan)
+            guard seenPlanFingerprints.insert(fingerprint).inserted else { break }
+
+            if let talk = talkOnlyLine(from: feedbackPlan) {
+                upsertToolFeedbackTalkLine(talk, result: &result, provider: provider)
+                break
+            }
+
+            let hasToolStep = feedbackPlan.steps.contains { step in
+                if case .tool = step { return true }
+                return false
+            }
+            guard hasToolStep else { break }
+
+            let exec = await PlanExecutor.shared.execute(
+                feedbackPlan,
+                originalInput: originalInput,
+                pendingSlotName: pendingSlot?.slotName
+            )
+
+            mergeToolFeedbackExecution(exec, into: &result, provider: provider, originalInput: originalInput)
+            if result.triggerFollowUpCapture {
+                break
+            }
+            loopDepth += 1
+        }
     }
 
     private func shouldRunToolFeedbackLoop(_ result: TurnResult) -> Bool {
@@ -664,14 +684,36 @@ final class TurnOrchestrator {
             .map(\.text)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard assistantLines.isEmpty else { return false }
-        return true
+        if assistantLines.isEmpty { return true }
+        return assistantLines.allSatisfy(isLikelyCanvasConfirmation)
     }
 
-    private func synthesizeToolAwareAnswer(from result: TurnResult,
-                                           originalInput: String,
-                                           history: [ChatMessage],
-                                           provider: LLMProvider) async -> String? {
+    private func isLikelyCanvasConfirmation(_ text: String) -> Bool {
+        let normalized = normalizeForComparison(text)
+        guard !normalized.isEmpty else { return false }
+
+        let canned = canvasConfirmations.map(normalizeForComparison)
+        if canned.contains(normalized) { return true }
+
+        let genericStarts = [
+            "here you go",
+            "done",
+            "i ve put the details up here",
+            "i ve laid this out on screen",
+            "i ll find",
+            "i ll check",
+            "i ll look"
+        ]
+        if genericStarts.contains(where: { normalized.hasPrefix($0) }) && normalized.count <= 80 {
+            return true
+        }
+        return false
+    }
+
+    private func synthesizeToolAwarePlan(from result: TurnResult,
+                                         originalInput: String,
+                                         history: [ChatMessage],
+                                         provider: LLMProvider) async -> Plan? {
         let toolLines = result.executedToolSteps.map { step in
             let argsPreview = step.args
                 .sorted { $0.key < $1.key }
@@ -682,9 +724,14 @@ final class TurnOrchestrator {
 
         let outputLines = result.appendedOutputs.enumerated().map { index, item in
             let clipped = item.payload.replacingOccurrences(of: "\n", with: " ")
-            let preview = clipped.count > 220 ? String(clipped.prefix(217)) + "..." : clipped
+            let preview = clipped.count > 460 ? String(clipped.prefix(457)) + "..." : clipped
             return "- output[\(index + 1)] kind=\(item.kind.rawValue): \(preview)"
         }.joined(separator: "\n")
+
+        let assistantLines = result.appendedChat
+            .filter { $0.role == .assistant }
+            .map { "- \($0.text.replacingOccurrences(of: "\n", with: " "))" }
+            .joined(separator: "\n")
 
         let synthesisPrompt = """
         [TOOL_RESULT_FEEDBACK]
@@ -693,9 +740,15 @@ final class TurnOrchestrator {
         \(toolLines.isEmpty ? "- (none)" : toolLines)
         Tool outputs:
         \(outputLines.isEmpty ? "- (none)" : outputLines)
+        Current assistant lines:
+        \(assistantLines.isEmpty ? "- (none)" : assistantLines)
 
-        Write one concise final answer for the user using the tool results above.
-        Return TALK JSON only. Do NOT call tools.
+        Decide the best next action using the tool results above.
+        - If there is enough information, return TALK with one concise final answer.
+        - If one more tool call is required, return a PLAN with concrete tool step(s).
+        - Do NOT repeat an identical tool call that already ran with the same args.
+        - Never return CAPABILITY_GAP in this feedback pass.
+        Output valid JSON only.
         """
 
         let plan: Plan?
@@ -712,8 +765,85 @@ final class TurnOrchestrator {
             plan = nil
         }
 
-        guard let plan else { return nil }
-        return talkOnlyLine(from: plan)
+        return plan
+    }
+
+    private func feedbackPlanFingerprint(_ plan: Plan) -> String {
+        plan.steps.map { step in
+            switch step {
+            case .talk(let say):
+                return "talk:\(normalizeForComparison(say))"
+            case .ask(let slot, let prompt):
+                return "ask:\(slot.lowercased()):\(normalizeForComparison(prompt))"
+            case .delegate(let task, let context, let say):
+                return "delegate:\(normalizeForComparison(task)):\(normalizeForComparison(context ?? "")):\(normalizeForComparison(say ?? ""))"
+            case .tool(let name, let args, let say):
+                let orderedArgs = args
+                    .sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value.stringValue)" }
+                    .joined(separator: ",")
+                return "tool:\(name.lowercased()){\(orderedArgs)}:\(normalizeForComparison(say ?? ""))"
+            }
+        }.joined(separator: "|")
+    }
+
+    private func mergeToolFeedbackExecution(_ exec: PlanExecutionResult,
+                                            into result: inout TurnResult,
+                                            provider: LLMProvider,
+                                            originalInput: String) {
+        let stampedChat = exec.chatMessages.map { msg -> ChatMessage in
+            guard msg.role == .assistant else { return msg }
+            var stamped = msg
+            stamped.llmProvider = provider
+            return stamped
+        }
+        result.appendedChat.append(contentsOf: stampedChat)
+        result.spokenLines.append(contentsOf: exec.spokenLines)
+        result.appendedOutputs.append(contentsOf: exec.outputItems)
+        result.executedToolSteps.append(contentsOf: exec.executedToolSteps)
+        result.triggerFollowUpCapture = result.triggerFollowUpCapture || exec.triggerFollowUpCapture
+
+        if let req = exec.pendingSlotRequest {
+            pendingSlot = PendingSlot(slotName: req.slot, prompt: req.prompt, originalUserText: originalInput)
+            result.triggerFollowUpCapture = true
+        }
+    }
+
+    private func upsertToolFeedbackTalkLine(_ line: String,
+                                            result: inout TurnResult,
+                                            provider: LLMProvider) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let normalized = normalizeForComparison(trimmed)
+        let assistantIndices = result.appendedChat.indices.filter { result.appendedChat[$0].role == .assistant }
+        if assistantIndices.contains(where: { normalizeForComparison(result.appendedChat[$0].text) == normalized }) {
+            return
+        }
+
+        if let lastIndex = assistantIndices.last,
+           isLikelyCanvasConfirmation(result.appendedChat[lastIndex].text) {
+            let prior = result.appendedChat[lastIndex].text
+            result.appendedChat[lastIndex] = ChatMessage(
+                id: result.appendedChat[lastIndex].id,
+                ts: result.appendedChat[lastIndex].ts,
+                role: .assistant,
+                text: trimmed,
+                llmProvider: provider,
+                isEphemeral: result.appendedChat[lastIndex].isEphemeral,
+                usedMemory: result.appendedChat[lastIndex].usedMemory,
+                usedLocalKnowledge: result.appendedChat[lastIndex].usedLocalKnowledge
+            )
+            if let spokenIndex = result.spokenLines.lastIndex(of: prior) {
+                result.spokenLines[spokenIndex] = trimmed
+            } else {
+                result.spokenLines.append(trimmed)
+            }
+            return
+        }
+
+        result.appendedChat.append(ChatMessage(role: .assistant, text: trimmed, llmProvider: provider))
+        result.spokenLines.append(trimmed)
     }
 
     private func talkOnlyLine(from plan: Plan) -> String? {
