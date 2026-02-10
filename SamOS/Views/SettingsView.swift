@@ -46,7 +46,8 @@ struct SettingsView: View {
     // OpenAI
     @State private var openaiApiKey: String = OpenAISettings.apiKey
     @State private var youtubeApiKey: String = OpenAISettings.youtubeAPIKey
-    @State private var openaiModel: String = OpenAISettings.model
+    @State private var openaiGeneralModel: String = OpenAISettings.generalModel
+    @State private var openaiEscalationModel: String = OpenAISettings.escalationModel
     @State private var openaiRealtimeModeEnabled: Bool = OpenAISettings.realtimeModeEnabled
     @State private var openaiRealtimeUseClassicSTT: Bool = OpenAISettings.realtimeUseClassicSTT
     @State private var openaiRealtimeModel: String = OpenAISettings.realtimeModel
@@ -431,11 +432,29 @@ struct SettingsView: View {
                     OpenAISettings.youtubeAPIKey = newValue
                 }
 
-            TextField("Model", text: $openaiModel)
-                .textFieldStyle(.roundedBorder)
-                .onChange(of: openaiModel) { _, newValue in
-                    OpenAISettings.model = newValue
+            Picker("General Model", selection: $openaiGeneralModel) {
+                ForEach(OpenAISettings.generalModelOptions, id: \.self) { model in
+                    Text(model).tag(model)
                 }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: openaiGeneralModel) { _, newValue in
+                OpenAISettings.generalModel = newValue
+            }
+
+            Picker("Escalation Model (Complex Tasks)", selection: $openaiEscalationModel) {
+                ForEach(OpenAISettings.escalationModelOptions, id: \.self) { model in
+                    Text(model).tag(model)
+                }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: openaiEscalationModel) { _, newValue in
+                OpenAISettings.escalationModel = newValue
+            }
+
+            Text("Complex requests automatically use the escalation model.")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             Toggle("Realtime Mode (WebSocket transcription)", isOn: $openaiRealtimeModeEnabled)
                 .onChange(of: openaiRealtimeModeEnabled) { _, newValue in
@@ -480,6 +499,12 @@ struct SettingsView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
+                        Text("General: \(OpenAISettings.generalModel)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("Escalation: \(OpenAISettings.escalationModel)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                         Text(OpenAISettings.isYouTubeConfigured ? "YouTube API configured" : "YouTube API not configured")
                             .font(.caption2)
                             .foregroundColor(.secondary)
@@ -487,6 +512,16 @@ struct SettingsView: View {
                 } else {
                     Text("API key required").foregroundColor(.secondary)
                 }
+            }
+        }
+        .onAppear {
+            if !OpenAISettings.generalModelOptions.contains(openaiGeneralModel) {
+                openaiGeneralModel = OpenAISettings.generalModelOptions.first ?? "gpt-4o-mini"
+                OpenAISettings.generalModel = openaiGeneralModel
+            }
+            if !OpenAISettings.escalationModelOptions.contains(openaiEscalationModel) {
+                openaiEscalationModel = OpenAISettings.escalationModelOptions.first ?? "gpt-4o"
+                OpenAISettings.escalationModel = openaiEscalationModel
             }
         }
     }

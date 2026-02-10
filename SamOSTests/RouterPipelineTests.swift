@@ -7,10 +7,12 @@ final class FakeOpenAITransport: OpenAITransport {
     var queuedResponses: [Result<String, Error>] = []
     private(set) var chatCallCount = 0
     private(set) var chatCallLog: [[[String: String]]] = []
+    private(set) var chatModelLog: [String] = []
 
     func chat(messages: [[String: String]], model: String) async throws -> String {
         chatCallCount += 1
         chatCallLog.append(messages)
+        chatModelLog.append(model)
         guard !queuedResponses.isEmpty else {
             throw OpenAIRouter.OpenAIError.requestFailed("No queued response")
         }
@@ -476,17 +478,23 @@ final class RouterPipelineTests: XCTestCase {
 
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
+    private var savedGeneralModel: String = ""
+    private var savedEscalationModel: String = ""
 
     override func setUp() {
         super.setUp()
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
+        savedGeneralModel = OpenAISettings.generalModel
+        savedEscalationModel = OpenAISettings.escalationModel
     }
 
     override func tearDown() {
         // Restore original settings
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
+        OpenAISettings.generalModel = savedGeneralModel
+        OpenAISettings.escalationModel = savedEscalationModel
         OpenAISettings._resetCacheForTesting()
         super.tearDown()
     }
@@ -628,6 +636,118 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOpenAI.chatCallCount, 3, "Feedback loop should support an additional tool pass before final talk")
         XCTAssertGreaterThanOrEqual(result.appendedOutputs.count, 2, "Both tool passes should contribute output")
         XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.contains("finished") }))
+    }
+
+    @MainActor
+    func testCompoundToolOnlyRequestShowsProgressThenReasonedAnswer() async {
+        let initial = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"Tokyo"},"say":"Let me check the time in Tokyo."}]}
+        """
+        let feedback = """
+        {"action":"TALK","say":"It is a reasonable time in Tokyo, but late evening in London, so only call if it's urgent."}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(initial), .success(feedback)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn(
+            "Check Tokyo time, then tell me if it's a good time to call London.",
+            history: []
+        )
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Compound tool-only requests should trigger feedback reasoning")
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text == "Let me check the time in Tokyo." }),
+                      "Progress line from tool say should be surfaced for multi-clause requests")
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.lowercased().contains("london") }),
+                      "Final synthesized answer should address the second clause")
+    }
+
+    @MainActor
+    func testComplexRequestUsesEscalationModel() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings.generalModel = "gpt-4o-mini"
+        OpenAISettings.escalationModel = "gpt-4o"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        _ = await orchestrator.processTurn("Check Tokyo time, then tell me if it's a good time to call London.", history: [])
+        XCTAssertEqual(fakeOpenAI.chatModelLog.first, "gpt-4o")
+    }
+
+    @MainActor
+    func testSimpleRequestUsesGeneralModelAndShowsModelInKnowledgeUsage() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings.generalModel = "gpt-4o-mini"
+        OpenAISettings.escalationModel = "gpt-4o"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hi sam", history: [])
+        XCTAssertEqual(fakeOpenAI.chatModelLog.first, "gpt-4o-mini")
+        XCTAssertEqual(result.knowledgeAttribution?.aiModelUsed, "gpt-4o-mini")
+    }
+
+    @MainActor
+    func testCompoundToolOnlyRequestRetriesWhenFeedbackTalkIsIncomplete() async {
+        let initial = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{"place":"Tokyo"},"say":"Let me check the time in Tokyo."}]}
+        """
+        let incomplete = """
+        {"action":"TALK","say":"It's 6:06 pm."}
+        """
+        let repaired = """
+        {"action":"TALK","say":"It's 6:06 pm in Tokyo, and it's quite late in London, so call only if it's urgent."}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(initial), .success(incomplete), .success(repaired)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn(
+            "Check Tokyo time, then tell me if it's a good time to call London.",
+            history: []
+        )
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 3, "Incomplete feedback talk should trigger one more repair attempt")
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text == "Let me check the time in Tokyo." }))
+        XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.lowercased().contains("london") }))
+        XCTAssertFalse(result.appendedChat.contains(where: { $0.role == .assistant && $0.text == "It's 6:06 pm." }),
+                       "Incomplete feedback talk should not be committed when repair succeeds")
     }
 
     // MARK: - Weather/Time Tool Choice
@@ -936,6 +1056,9 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOllama.chatCallCount, 0, "Ollama should NOT be called when OpenAI configured")
         XCTAssertEqual(result.llmProvider, .none, "Should return friendly fallback")
         XCTAssertTrue(result.appendedChat.contains { $0.text.contains("couldn't reach OpenAI") })
+        XCTAssertEqual(result.knowledgeAttribution?.localKnowledgePercent, 0)
+        XCTAssertEqual(result.knowledgeAttribution?.matchedLocalItems, 0)
+        XCTAssertEqual(result.usedMemoryHints, false, "Fallback provider should not mark memory-hint usage")
     }
 
     // MARK: - C) OpenAI TALK with time claim accepted (no validation repair)

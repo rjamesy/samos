@@ -1020,17 +1020,22 @@ final class WebsiteLearningStore {
             var candidates: [WebsiteContextItem] = []
             candidates.reserveCapacity(records.count * 16)
             for record in records {
-                candidates.append(
-                    WebsiteContextItem(
-                        text: "[web \(record.host)] \(record.title): \(record.summary)",
-                        updatedAt: record.updatedAt,
-                        isSummary: true
-                    )
-                )
-                for chunk in record.chunks {
+                let summaryLine = "[web \(record.host)] \(record.title): \(record.summary)"
+                if !isLowValueWebsiteText(summaryLine) {
                     candidates.append(
                         WebsiteContextItem(
-                            text: "[web \(record.host)] \(record.title): \(chunk)",
+                            text: summaryLine,
+                            updatedAt: record.updatedAt,
+                            isSummary: true
+                        )
+                    )
+                }
+                for chunk in record.chunks {
+                    let chunkLine = "[web \(record.host)] \(record.title): \(chunk)"
+                    if isLowValueWebsiteText(chunkLine) { continue }
+                    candidates.append(
+                        WebsiteContextItem(
+                            text: chunkLine,
                             updatedAt: record.updatedAt,
                             isSummary: false
                         )
@@ -1090,6 +1095,16 @@ final class WebsiteLearningStore {
 
             return selected
         }
+    }
+
+    private func isLowValueWebsiteText(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let signals = [
+            "loading your experience", "this won't take long", "we're getting things ready",
+            "we are getting things ready", "checking your browser", "enable javascript",
+            "please wait", "just a moment"
+        ]
+        return signals.contains { lower.contains($0) }
     }
 
     private func sortRecordsNewestFirst() {

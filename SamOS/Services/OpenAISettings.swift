@@ -12,6 +12,7 @@ enum OpenAISettings {
 
     private enum Key {
         static let model = "openai_model"
+        static let escalationModel = "openai_escalation_model"
         static let keySavedAt = "openai_keySavedAt"
         static let realtimeModeEnabled = "openai_realtimeModeEnabled"
         static let realtimeUseClassicSTT = "openai_realtimeUseClassicSTT"
@@ -103,9 +104,34 @@ enum OpenAISettings {
 
     // MARK: - Model
 
-    static var model: String {
+    static let generalModelOptions: [String] = [
+        "gpt-4o-mini",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-4.1"
+    ]
+
+    static let escalationModelOptions: [String] = [
+        "gpt-4o",
+        "gpt-4.1"
+    ]
+
+    /// General/default chat model used for most requests.
+    static var generalModel: String {
         get { defaults.string(forKey: Key.model) ?? "gpt-4o-mini" }
         set { defaults.set(newValue, forKey: Key.model) }
+    }
+
+    /// Higher-quality model used for complex tasks.
+    static var escalationModel: String {
+        get { defaults.string(forKey: Key.escalationModel) ?? "gpt-4o" }
+        set { defaults.set(newValue, forKey: Key.escalationModel) }
+    }
+
+    /// Backward-compatible alias.
+    static var model: String {
+        get { generalModel }
+        set { generalModel = newValue }
     }
 
     static var realtimeModeEnabled: Bool {

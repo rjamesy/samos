@@ -10,6 +10,7 @@ struct TurnResult {
     var usedMemoryHints: Bool = false
     var llmProvider: LLMProvider = .none
     var knowledgeAttribution: KnowledgeAttribution?
+    var aiModelUsed: String?
     var executedToolSteps: [(name: String, args: [String: String])] = []
     var routerMs: Int?
 }
@@ -68,6 +69,14 @@ final class TurnOrchestrator {
         "Should I add anything else?"
     ]
     private static let numberedListRegex = try! NSRegularExpression(pattern: #"^\d+[\.)]\s"#, options: [])
+    private static let coverageEntityRegex = try! NSRegularExpression(pattern: #"\b[A-Z][a-zA-Z]{2,}\b"#, options: [])
+    private static let coverageStopwords: Set<String> = [
+        "the", "a", "an", "and", "or", "but", "if", "then", "also", "after", "while",
+        "what", "when", "where", "why", "how", "is", "are", "was", "were", "be", "to",
+        "for", "of", "in", "on", "at", "by", "with", "without", "from", "into", "about",
+        "tell", "show", "check", "find", "learn", "need", "good", "time", "call", "me", "you",
+        "your", "my", "it", "this", "that"
+    ]
     private var turnCounter = 0
     private var lastMemoryAckTurn: Int?
     private var lastFollowUpTurn: Int?
@@ -121,7 +130,7 @@ final class TurnOrchestrator {
                 return result
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider, routerMs) = await routePlan(text, history: history, pendingSlot: slot, reason: .pendingSlotReply)
+                let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(text, history: history, pendingSlot: slot, reason: .pendingSlotReply)
                 let plan = await maybeRephraseRepeatedTalk(rawPlan,
                                                            userInput: text,
                                                            history: history,
@@ -148,6 +157,7 @@ final class TurnOrchestrator {
                                          originalInput: text,
                                          history: history,
                                          provider: provider,
+                                         aiModelUsed: aiModelUsed,
                                          routerMs: routerMs,
                                          localKnowledgeContext: localKnowledgeContext,
                                          hasMemoryHints: hasMemoryHints,
@@ -158,7 +168,7 @@ final class TurnOrchestrator {
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider, routerMs) = await routePlan(text, history: history, reason: .userChat)
+        let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(text, history: history, reason: .userChat)
         let plan = await maybeRephraseRepeatedTalk(rawPlan,
                                                    userInput: text,
                                                    history: history,
@@ -168,6 +178,7 @@ final class TurnOrchestrator {
                                  originalInput: text,
                                  history: history,
                                  provider: provider,
+                                 aiModelUsed: aiModelUsed,
                                  routerMs: routerMs,
                                  localKnowledgeContext: localKnowledgeContext,
                                  hasMemoryHints: hasMemoryHints,
@@ -182,24 +193,31 @@ final class TurnOrchestrator {
     /// No provider hopping. If JSON parses, accept it. No validation repair loops.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
-                           reason: LLMCallReason = .userChat) async -> (Plan, LLMProvider, Int) {
+                           reason: LLMCallReason = .userChat) async -> (Plan, LLMProvider, Int, String?) {
 
         // A) OpenAI ONLY (when configured — no Ollama fallback)
         if OpenAISettings.isConfigured {
             let start = CFAbsoluteTimeGetCurrent()
+            let selectedModel = selectOpenAIModel(for: text, reason: reason)
             do {
-                let plan = try await withTimeout(openAIRouteTimeoutSeconds) {
-                    try await self.openAIRouter.routePlan(text, history: history, pendingSlot: pendingSlot)
+                let timeoutSeconds = openAIRouteTimeoutSecondsFor(input: text, reason: reason)
+                let plan = try await withTimeout(timeoutSeconds) {
+                    try await self.openAIRouter.routePlan(
+                        text,
+                        history: history,
+                        pendingSlot: pendingSlot,
+                        modelOverride: selectedModel
+                    )
                 }
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
-                return (plan, .openai, ms)
+                return (plan, .openai, ms, selectedModel)
 
             } catch {
                 // OpenAI failed — do NOT fall back to Ollama (it poisons answers + doubles latency)
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                return (friendlyFallbackPlan(error), .none, ms)
+                return (friendlyFallbackPlan(error), .none, ms, nil)
             }
         }
 
@@ -210,13 +228,13 @@ final class TurnOrchestrator {
 
         // C) Nothing configured — MockRouter
         let action = mockRouter.route(text)
-        return (Plan.fromAction(action), .none, 0)
+        return (Plan.fromAction(action), .none, 0, nil)
     }
 
     /// Ollama attempt — single call, no validation repair.
     private func ollamaFallback(_ text: String, history: [ChatMessage],
                                 pendingSlot: PendingSlot?,
-                                reason: LLMCallReason) async -> (Plan, LLMProvider, Int) {
+                                reason: LLMCallReason) async -> (Plan, LLMProvider, Int, String?) {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let plan = try await withTimeout(4.0) {
@@ -224,11 +242,11 @@ final class TurnOrchestrator {
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-            return (plan, .ollama, ms)
+            return (plan, .ollama, ms, nil)
         } catch {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-            return (friendlyFallbackPlan(error), .none, ms)
+            return (friendlyFallbackPlan(error), .none, ms, nil)
         }
     }
 
@@ -238,6 +256,7 @@ final class TurnOrchestrator {
                              originalInput: String,
                              history: [ChatMessage],
                              provider: LLMProvider,
+                             aiModelUsed: String?,
                              routerMs: Int,
                              localKnowledgeContext: LocalKnowledgeContext,
                              hasMemoryHints: Bool,
@@ -248,6 +267,7 @@ final class TurnOrchestrator {
 
         var result = TurnResult()
         result.llmProvider = provider
+        result.aiModelUsed = aiModelUsed
         result.executedToolSteps = exec.executedToolSteps
         result.routerMs = routerMs
 
@@ -263,7 +283,7 @@ final class TurnOrchestrator {
         result.spokenLines = exec.spokenLines
         result.appendedOutputs = exec.outputItems
         result.triggerFollowUpCapture = exec.triggerFollowUpCapture
-        result.usedMemoryHints = hasMemoryHints
+        result.usedMemoryHints = hasMemoryHints && provider != .none
 
         // Auto-repair: image_url slot means the image probe failed.
         // Retry once via LLM without bothering the user.
@@ -274,6 +294,7 @@ final class TurnOrchestrator {
             let retryResult = await autoRepairImage(originalInput: originalInput,
                                                     history: history,
                                                     failureReason: req.prompt,
+                                                    aiModelUsed: aiModelUsed,
                                                     localKnowledgeContext: localKnowledgeContext,
                                                     hasMemoryHints: hasMemoryHints,
                                                     turnIndex: turnIndex,
@@ -291,11 +312,19 @@ final class TurnOrchestrator {
             result.triggerFollowUpCapture = true
         }
 
+        let forceToolFeedback = shouldForceToolFeedback(for: originalInput, plan: plan)
+        if forceToolFeedback,
+           let progress = firstToolProgressLine(from: plan) {
+            prependAssistantProgressLine(progress, into: &result, provider: provider)
+        }
+
         await applyToolResultFeedbackLoop(
             &result,
             originalInput: originalInput,
             history: history,
             provider: provider,
+            aiModelUsed: aiModelUsed,
+            force: forceToolFeedback,
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
@@ -305,6 +334,7 @@ final class TurnOrchestrator {
         applyKnowledgeAttribution(&result,
                                   userInput: originalInput,
                                   provider: provider,
+                                  aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
         rememberAssistantLines(result.appendedChat)
         return result
@@ -317,6 +347,7 @@ final class TurnOrchestrator {
     private func autoRepairImage(originalInput: String,
                                  history: [ChatMessage],
                                  failureReason: String,
+                                 aiModelUsed: String?,
                                  localKnowledgeContext: LocalKnowledgeContext,
                                  hasMemoryHints: Bool,
                                  turnIndex: Int,
@@ -333,12 +364,18 @@ final class TurnOrchestrator {
             #endif
             do {
                 let plan = try await withTimeout(openAIImageRepairTimeoutSeconds) {
-                    try await self.openAIRouter.routePlan(originalInput, history: [], repairReasons: repairReasons)
+                    try await self.openAIRouter.routePlan(
+                        originalInput,
+                        history: [],
+                        repairReasons: repairReasons,
+                        modelOverride: aiModelUsed
+                    )
                 }
                 return await executeImageRepair(plan,
                                                 originalInput: originalInput,
                                                 history: history,
                                                 provider: .openai,
+                                                aiModelUsed: aiModelUsed,
                                                 localKnowledgeContext: localKnowledgeContext,
                                                 hasMemoryHints: hasMemoryHints,
                                                 turnIndex: turnIndex,
@@ -361,6 +398,7 @@ final class TurnOrchestrator {
                                                 originalInput: originalInput,
                                                 history: history,
                                                 provider: .ollama,
+                                                aiModelUsed: nil,
                                                 localKnowledgeContext: localKnowledgeContext,
                                                 hasMemoryHints: hasMemoryHints,
                                                 turnIndex: turnIndex,
@@ -380,6 +418,7 @@ final class TurnOrchestrator {
                                     originalInput: String,
                                     history: [ChatMessage],
                                     provider: LLMProvider,
+                                    aiModelUsed: String?,
                                     localKnowledgeContext: LocalKnowledgeContext,
                                     hasMemoryHints: Bool,
                                     turnIndex: Int,
@@ -394,6 +433,7 @@ final class TurnOrchestrator {
             #endif
             var result = TurnResult()
             result.llmProvider = provider
+            result.aiModelUsed = aiModelUsed
             let msg = "I couldn't find a working image for that — sorry about that."
             result.appendedChat = [ChatMessage(role: .assistant, text: msg, llmProvider: provider)]
             result.spokenLines = [msg]
@@ -402,6 +442,7 @@ final class TurnOrchestrator {
 
         var result = TurnResult()
         result.llmProvider = provider
+        result.aiModelUsed = aiModelUsed
         result.appendedChat = exec.chatMessages.map { msg in
             if msg.role == .assistant {
                 var stamped = msg
@@ -413,11 +454,17 @@ final class TurnOrchestrator {
         result.spokenLines = exec.spokenLines
         result.appendedOutputs = exec.outputItems
         result.triggerFollowUpCapture = exec.triggerFollowUpCapture
-        result.usedMemoryHints = hasMemoryHints
+        result.usedMemoryHints = hasMemoryHints && provider != .none
 
         if let req = exec.pendingSlotRequest {
             pendingSlot = PendingSlot(slotName: req.slot, prompt: req.prompt, originalUserText: originalInput)
             result.triggerFollowUpCapture = true
+        }
+
+        let forceToolFeedback = shouldForceToolFeedback(for: originalInput, plan: plan)
+        if forceToolFeedback,
+           let progress = firstToolProgressLine(from: plan) {
+            prependAssistantProgressLine(progress, into: &result, provider: provider)
         }
 
         await applyToolResultFeedbackLoop(
@@ -425,6 +472,8 @@ final class TurnOrchestrator {
             originalInput: originalInput,
             history: history,
             provider: provider,
+            aiModelUsed: aiModelUsed,
+            force: forceToolFeedback,
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
@@ -434,6 +483,7 @@ final class TurnOrchestrator {
         applyKnowledgeAttribution(&result,
                                   userInput: originalInput,
                                   provider: provider,
+                                  aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
         rememberAssistantLines(result.appendedChat)
         return result
@@ -629,28 +679,45 @@ final class TurnOrchestrator {
                                              originalInput: String,
                                              history: [ChatMessage],
                                              provider: LLMProvider,
+                                             aiModelUsed: String?,
+                                             force: Bool,
                                              depth: Int,
                                              turnStartedAt: Date) async {
         guard depth < toolFeedbackLoopMaxDepth else { return }
 
         var loopDepth = depth
         var seenPlanFingerprints: Set<String> = []
+        var pendingCoverageTokens = force ? requiredCoverageTokens(for: originalInput) : []
+        var deferredTalkLine: String?
+        var committedTalk = false
 
         while loopDepth < toolFeedbackLoopMaxDepth {
             guard elapsedMs(since: turnStartedAt) < maxToolFeedbackBudgetMs else { break }
-            guard shouldRunToolFeedbackLoop(result) else { break }
+            guard shouldRunToolFeedbackLoop(result, force: force) else { break }
             guard let feedbackPlan = await synthesizeToolAwarePlan(
                 from: result,
                 originalInput: originalInput,
                 history: history,
-                provider: provider
+                provider: provider,
+                aiModelUsed: aiModelUsed,
+                requiredCoverageTokens: pendingCoverageTokens
             ) else { break }
 
             let fingerprint = feedbackPlanFingerprint(feedbackPlan)
             guard seenPlanFingerprints.insert(fingerprint).inserted else { break }
 
             if let talk = talkOnlyLine(from: feedbackPlan) {
+                if force, !pendingCoverageTokens.isEmpty {
+                    let missing = missingCoverageTokens(in: talk, required: pendingCoverageTokens)
+                    if !missing.isEmpty {
+                        deferredTalkLine = deferredTalkLine ?? talk
+                        pendingCoverageTokens = missing
+                        loopDepth += 1
+                        continue
+                    }
+                }
                 upsertToolFeedbackTalkLine(talk, result: &result, provider: provider)
+                committedTalk = true
                 break
             }
 
@@ -672,9 +739,15 @@ final class TurnOrchestrator {
             }
             loopDepth += 1
         }
+
+        if force,
+           !committedTalk,
+           let deferredTalkLine {
+            upsertToolFeedbackTalkLine(deferredTalkLine, result: &result, provider: provider)
+        }
     }
 
-    private func shouldRunToolFeedbackLoop(_ result: TurnResult) -> Bool {
+    private func shouldRunToolFeedbackLoop(_ result: TurnResult, force: Bool) -> Bool {
         guard !result.executedToolSteps.isEmpty else { return false }
         guard !result.triggerFollowUpCapture else { return false }
         guard !result.appendedOutputs.isEmpty else { return false }
@@ -684,8 +757,51 @@ final class TurnOrchestrator {
             .map(\.text)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        if force { return true }
         if assistantLines.isEmpty { return true }
         return assistantLines.allSatisfy(isLikelyCanvasConfirmation)
+    }
+
+    private func shouldForceToolFeedback(for userInput: String, plan: Plan) -> Bool {
+        let hasOnlyToolSteps = !plan.steps.isEmpty && plan.steps.allSatisfy { step in
+            if case .tool = step { return true }
+            return false
+        }
+        guard hasOnlyToolSteps else { return false }
+        return isMultiClauseRequest(userInput)
+    }
+
+    private func isMultiClauseRequest(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let markers = [" then ", " and ", " also ", " after ", " while ", " if ", ", then ", ";"]
+        if markers.contains(where: { lower.contains($0) }) { return true }
+        let questionCount = lower.filter { $0 == "?" }.count
+        if questionCount > 1 { return true }
+        return lower.count > 80
+    }
+
+    private func firstToolProgressLine(from plan: Plan) -> String? {
+        for step in plan.steps {
+            if case .tool(_, _, let say) = step,
+               let line = say?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !line.isEmpty {
+                return line
+            }
+        }
+        return nil
+    }
+
+    private func prependAssistantProgressLine(_ line: String,
+                                              into result: inout TurnResult,
+                                              provider: LLMProvider) {
+        let normalized = normalizeForComparison(line)
+        guard !normalized.isEmpty else { return }
+        if result.appendedChat.contains(where: { $0.role == .assistant && normalizeForComparison($0.text) == normalized }) {
+            return
+        }
+        let progress = ChatMessage(role: .assistant, text: line, llmProvider: provider)
+        result.appendedChat.insert(progress, at: 0)
+        result.spokenLines.insert(line, at: 0)
     }
 
     private func isLikelyCanvasConfirmation(_ text: String) -> Bool {
@@ -713,7 +829,9 @@ final class TurnOrchestrator {
     private func synthesizeToolAwarePlan(from result: TurnResult,
                                          originalInput: String,
                                          history: [ChatMessage],
-                                         provider: LLMProvider) async -> Plan? {
+                                         provider: LLMProvider,
+                                         aiModelUsed: String?,
+                                         requiredCoverageTokens: [String]) async -> Plan? {
         let toolLines = result.executedToolSteps.map { step in
             let argsPreview = step.args
                 .sorted { $0.key < $1.key }
@@ -733,6 +851,18 @@ final class TurnOrchestrator {
             .map { "- \($0.text.replacingOccurrences(of: "\n", with: " "))" }
             .joined(separator: "\n")
 
+        let coverageGuidance: String
+        if requiredCoverageTokens.isEmpty {
+            coverageGuidance = "- (none)"
+        } else {
+            let joined = requiredCoverageTokens.joined(separator: ", ")
+            coverageGuidance = """
+            - This is a multi-part user request.
+            - Final TALK must explicitly address these entities/topics: \(joined)
+            - If current tool outputs are insufficient to address all required topics, run another concrete tool step first.
+            """
+        }
+
         let synthesisPrompt = """
         [TOOL_RESULT_FEEDBACK]
         User request: \(originalInput)
@@ -744,6 +874,8 @@ final class TurnOrchestrator {
         \(assistantLines.isEmpty ? "- (none)" : assistantLines)
 
         Decide the best next action using the tool results above.
+        Coverage requirements:
+        \(coverageGuidance)
         - If there is enough information, return TALK with one concise final answer.
         - If one more tool call is required, return a PLAN with concrete tool step(s).
         - Do NOT repeat an identical tool call that already ran with the same args.
@@ -755,7 +887,11 @@ final class TurnOrchestrator {
         switch provider {
         case .openai:
             plan = try? await withTimeout(0.9) {
-                try await self.openAIRouter.routePlan(synthesisPrompt, history: history)
+                try await self.openAIRouter.routePlan(
+                    synthesisPrompt,
+                    history: history,
+                    modelOverride: aiModelUsed
+                )
             }
         case .ollama:
             plan = try? await withTimeout(0.8) {
@@ -858,6 +994,60 @@ final class TurnOrchestrator {
 
         guard talkLines.count == 1 else { return nil }
         return talkLines[0]
+    }
+
+    private func requiredCoverageTokens(for userInput: String) -> [String] {
+        let entities = capitalizedEntityTokens(in: userInput)
+        if entities.count >= 2 {
+            return Array(entities.prefix(4))
+        }
+
+        let lower = userInput.lowercased()
+        let markers = [" then ", " and ", " also ", " after ", " while ", " if ", ", then ", ";"]
+        let tail: String
+        if let range = markers
+            .compactMap({ marker in lower.range(of: marker) })
+            .min(by: { $0.lowerBound < $1.lowerBound }) {
+            tail = String(lower[range.upperBound...])
+        } else {
+            tail = lower
+        }
+
+        let tailTokens = coverageTokens(from: tail)
+            .filter { !Self.coverageStopwords.contains($0) }
+            .filter { $0.count >= 4 }
+
+        let merged = entities + tailTokens.filter { !entities.contains($0) }
+        if !merged.isEmpty {
+            return Array(merged.prefix(4))
+        }
+        return Array(tailTokens.prefix(2))
+    }
+
+    private func missingCoverageTokens(in talk: String, required: [String]) -> [String] {
+        let present = Set(coverageTokens(from: talk))
+        return required.filter { !present.contains($0) }
+    }
+
+    private func coverageTokens(from text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+    }
+
+    private func capitalizedEntityTokens(in text: String) -> [String] {
+        let range = NSRange(text.startIndex..., in: text)
+        let matches = Self.coverageEntityRegex.matches(in: text, range: range)
+        var output: [String] = []
+        for match in matches {
+            guard let matchRange = Range(match.range, in: text) else { continue }
+            let token = text[matchRange].lowercased()
+            guard !Self.coverageStopwords.contains(token) else { continue }
+            if !output.contains(token) {
+                output.append(token)
+            }
+        }
+        return output
     }
 
     private func applyResponsePolish(_ result: inout TurnResult, plan: Plan, hasMemoryHints: Bool, turnIndex: Int) {
@@ -977,7 +1167,21 @@ final class TurnOrchestrator {
     private func applyKnowledgeAttribution(_ result: inout TurnResult,
                                            userInput: String,
                                            provider: LLMProvider,
+                                           aiModelUsed: String?,
                                            localKnowledgeContext: LocalKnowledgeContext) {
+        guard provider != .none else {
+            result.knowledgeAttribution = KnowledgeAttribution(
+                localKnowledgePercent: 0,
+                openAIFillPercent: 0,
+                matchedLocalItems: 0,
+                consideredLocalItems: 0,
+                provider: provider,
+                aiModelUsed: aiModelUsed,
+                evidence: []
+            )
+            return
+        }
+
         guard let assistantText = result.appendedChat.last(where: { $0.role == .assistant })?.text else {
             return
         }
@@ -986,6 +1190,7 @@ final class TurnOrchestrator {
             userInput: userInput,
             assistantText: assistantText,
             provider: provider,
+            aiModelUsed: aiModelUsed,
             localSnippets: localKnowledgeContext.items
         )
         result.knowledgeAttribution = attribution
@@ -1135,6 +1340,61 @@ final class TurnOrchestrator {
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
         return Set(values)
+    }
+
+    private func selectOpenAIModel(for input: String, reason: LLMCallReason) -> String {
+        let general = OpenAISettings.generalModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackGeneral = general.isEmpty ? "gpt-4o-mini" : general
+        let escalation = OpenAISettings.escalationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackEscalation = escalation.isEmpty ? "gpt-4o" : escalation
+        guard shouldUseEscalationModel(for: input, reason: reason) else {
+            return fallbackGeneral
+        }
+        return fallbackEscalation
+    }
+
+    private func shouldUseEscalationModel(for input: String, reason: LLMCallReason) -> Bool {
+        switch reason {
+        case .alarmTriggered, .alarmRepeat, .snoozeExpired:
+            return false
+        default:
+            break
+        }
+
+        if isMultiClauseRequest(input) { return true }
+        if input.count > 120 { return true }
+
+        let lower = input.lowercased()
+        let complexityMarkers = [
+            "step by step",
+            "compare",
+            "analyze",
+            "analyse",
+            "tradeoff",
+            "pros and cons",
+            "plan",
+            "design",
+            "architecture",
+            "debug",
+            "investigate",
+            "why"
+        ]
+        if complexityMarkers.contains(where: { lower.contains($0) }) { return true }
+
+        let sentenceBreaks = input.filter { $0 == "." || $0 == "?" || $0 == "!" }.count
+        if sentenceBreaks >= 2 && input.count > 70 { return true }
+        return false
+    }
+
+    private func openAIRouteTimeoutSecondsFor(input: String, reason: LLMCallReason) -> Double {
+        guard reason == .userChat else { return openAIRouteTimeoutSeconds }
+        if isMultiClauseRequest(input) {
+            return 6.8
+        }
+        if input.count > 120 {
+            return 6.2
+        }
+        return openAIRouteTimeoutSeconds
     }
 
     private func friendlyFallbackPlan(_ error: Error? = nil) -> Plan {

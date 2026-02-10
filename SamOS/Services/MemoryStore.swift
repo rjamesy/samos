@@ -561,6 +561,7 @@ final class MemoryStore {
         let all = listMemories().filter { row in
             if isExpired(row) { return false }
             if row.type == .checkin && row.isResolved { return false }
+            if isLowValueWebsiteMemory(row) { return false }
             return true
         }
         if all.isEmpty { return [] }
@@ -612,6 +613,17 @@ final class MemoryStore {
         )
 
         return expandedRanked.map(\.item)
+    }
+
+    private func isLowValueWebsiteMemory(_ row: MemoryRow) -> Bool {
+        guard (row.source ?? "").lowercased() == "website_learning" else { return false }
+        let lower = row.content.lowercased()
+        let signals = [
+            "loading your experience", "this won't take long", "we're getting things ready",
+            "we are getting things ready", "checking your browser", "enable javascript",
+            "please wait", "just a moment"
+        ]
+        return signals.contains { lower.contains($0) }
     }
 
     /// Compact top-k recall context with strict size limits.

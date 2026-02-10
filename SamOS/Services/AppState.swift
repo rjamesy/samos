@@ -761,6 +761,11 @@ final class AppState: ObservableObject {
             "- Local matches: \(attribution.matchedLocalItems)/\(attribution.consideredLocalItems)"
         ]
 
+        if let model = attribution.aiModelUsed?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            lines.append("- AI Model Used: \(model)")
+        }
+
         if attribution.provider != .openai {
             lines.append("- Response provider: \(attribution.provider.rawValue)")
         }

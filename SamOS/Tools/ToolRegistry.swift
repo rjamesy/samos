@@ -2178,7 +2178,7 @@ struct LearnWebsiteTool: Tool {
             chunks: learned.chunks
         )
 
-        if memoryStore.isAvailable {
+        if memoryStore.isAvailable && !isLowValueLearningSummary(record.summary) {
             let note = "From \(record.host): \(record.summary)"
             _ = memoryStore.upsertMemory(
                 type: .note,
@@ -2357,9 +2357,25 @@ struct LearnWebsiteTool: Tool {
         let lower = line.lowercased()
         let blocked = [
             "cookie", "privacy policy", "terms of service", "all rights reserved",
-            "javascript", "sign in", "subscribe", "accept all", "manage preferences"
+            "javascript", "sign in", "subscribe", "accept all", "manage preferences",
+            "loading your experience", "this won't take long", "we're getting things ready",
+            "we are getting things ready", "enable javascript", "please wait", "loading…",
+            "loading ..."
         ]
         return blocked.contains { lower.contains($0) }
+    }
+
+    private func isLowValueLearningSummary(_ summary: String) -> Bool {
+        let lower = summary.lowercased()
+        let noiseSignals = [
+            "loading your experience", "this won't take long", "we're getting things ready",
+            "we are getting things ready", "enable javascript", "please wait", "checking your browser",
+            "before you continue", "just a moment", "loading"
+        ]
+        let hitCount = noiseSignals.reduce(0) { partial, signal in
+            partial + (lower.contains(signal) ? 1 : 0)
+        }
+        return hitCount >= 1
     }
 
     private func tokenize(_ text: String) -> [String] {

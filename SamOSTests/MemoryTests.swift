@@ -195,6 +195,35 @@ final class MemoryTests: XCTestCase {
         )
     }
 
+    func testSearchSkipsLowValueWebsiteLearningNoise() {
+        let noisy = MemoryStore.shared.addMemory(
+            type: .note,
+            content: "From www.cheeseshop.com: Loading your experience... This won't take long. We're getting things ready",
+            source: "website_learning"
+        )
+        let valid = MemoryStore.shared.addMemory(
+            type: .note,
+            content: "From wikipedia.org: Tokyo is 9 hours ahead of UTC.",
+            source: "website_learning"
+        )
+        defer {
+            if let id = noisy?.id { MemoryStore.shared.deleteMemory(idOrPrefix: id.uuidString) }
+            if let id = valid?.id { MemoryStore.shared.deleteMemory(idOrPrefix: id.uuidString) }
+        }
+
+        let noiseQuery = MemoryStore.shared.searchMemories(query: "this took long")
+        XCTAssertFalse(
+            noiseQuery.contains(where: { $0.content.lowercased().contains("loading your experience") }),
+            "Boilerplate website-loading memories should not be returned."
+        )
+
+        let realQuery = MemoryStore.shared.searchMemories(query: "tokyo utc")
+        XCTAssertTrue(
+            realQuery.contains(where: { $0.content.lowercased().contains("tokyo is 9 hours") }),
+            "Legitimate website learning notes should remain searchable."
+        )
+    }
+
     func testTokenizeStripsStopwords() {
         let tokens = MemoryStore.shared.tokenize("What is my dog's name?")
         XCTAssertFalse(tokens.contains("what"))

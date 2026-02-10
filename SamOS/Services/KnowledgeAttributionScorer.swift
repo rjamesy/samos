@@ -48,6 +48,7 @@ struct KnowledgeAttribution: Equatable {
     let matchedLocalItems: Int
     let consideredLocalItems: Int
     let provider: LLMProvider
+    let aiModelUsed: String?
     let evidence: [KnowledgeEvidence]
 
     init(localKnowledgePercent: Int,
@@ -55,12 +56,14 @@ struct KnowledgeAttribution: Equatable {
          matchedLocalItems: Int,
          consideredLocalItems: Int,
          provider: LLMProvider,
+         aiModelUsed: String? = nil,
          evidence: [KnowledgeEvidence] = []) {
         self.localKnowledgePercent = localKnowledgePercent
         self.openAIFillPercent = openAIFillPercent
         self.matchedLocalItems = matchedLocalItems
         self.consideredLocalItems = consideredLocalItems
         self.provider = provider
+        self.aiModelUsed = aiModelUsed
         self.evidence = evidence
     }
 
@@ -93,6 +96,7 @@ enum KnowledgeAttributionScorer {
     static func score(userInput: String,
                       assistantText: String,
                       provider: LLMProvider,
+                      aiModelUsed: String? = nil,
                       localSnippets: [KnowledgeSourceSnippet]) -> KnowledgeAttribution {
         let snippets = dedupeSnippets(localSnippets)
         guard !snippets.isEmpty else {
@@ -101,7 +105,8 @@ enum KnowledgeAttributionScorer {
                 openAIFillPercent: provider == .openai ? 100 : 0,
                 matchedLocalItems: 0,
                 consideredLocalItems: 0,
-                provider: provider
+                provider: provider,
+                aiModelUsed: aiModelUsed
             )
         }
 
@@ -133,7 +138,8 @@ enum KnowledgeAttributionScorer {
                 openAIFillPercent: provider == .openai ? 100 : 0,
                 matchedLocalItems: 0,
                 consideredLocalItems: snippets.count,
-                provider: provider
+                provider: provider,
+                aiModelUsed: aiModelUsed
             )
         }
 
@@ -178,6 +184,7 @@ enum KnowledgeAttributionScorer {
             matchedLocalItems: matched.count,
             consideredLocalItems: snippets.count,
             provider: provider,
+            aiModelUsed: aiModelUsed,
             evidence: evidence
         )
     }

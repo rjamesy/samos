@@ -599,13 +599,15 @@ final class OpenAIRouter {
                    pendingSlot: PendingSlot? = nil,
                    repairReasons: [String]? = nil,
                    repairRawSnippet: String? = nil,
-                   alarmContext: AlarmContext? = nil) async throws -> Plan {
+                   alarmContext: AlarmContext? = nil,
+                   modelOverride: String? = nil) async throws -> Plan {
+        let routeModel = normalizedRouteModel(modelOverride)
         guard OpenAISettings.isConfigured else {
             OpenAIAPILogStore.shared.logBlockedRequest(
                 service: "OpenAIRouter.routePlan",
                 endpoint: "https://api.openai.com/v1/chat/completions",
                 method: "POST",
-                model: OpenAISettings.model,
+                model: routeModel,
                 reason: "OpenAI API key not configured",
                 payload: ["input_preview": String(input.prefix(160))]
             )
@@ -619,7 +621,7 @@ final class OpenAIRouter {
                                             alarmContext: alarmContext)
         parser.appendRepairBlock(to: &messages, repairReasons: repairReasons, rawSnippet: repairRawSnippet)
 
-        let responseText = try await transport.chat(messages: messages, model: OpenAISettings.model)
+        let responseText = try await transport.chat(messages: messages, model: routeModel)
 
         #if DEBUG
         print("[OpenAIRouter] Raw response: \(responseText)")
@@ -642,7 +644,8 @@ final class OpenAIRouter {
                         pendingSlot: pendingSlot,
                         repairReasons: reasons,
                         repairRawSnippet: responseText,
-                        alarmContext: alarmContext
+                        alarmContext: alarmContext,
+                        modelOverride: routeModel
                     )
                 }
                 return fallbackPlanForUnexpectedCapabilityEscalation(userInput: input)
@@ -728,6 +731,11 @@ final class OpenAIRouter {
             let capped = String(trimmed.prefix(240))
             return Plan(steps: [.talk(say: capped)])
         }
+    }
+
+    private func normalizedRouteModel(_ override: String?) -> String {
+        let trimmed = override?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? OpenAISettings.generalModel : trimmed
     }
 
     // MARK: - Light System Prompt
