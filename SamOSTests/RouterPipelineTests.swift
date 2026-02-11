@@ -46,6 +46,10 @@ final class ScriptedConversationRunnerTests: XCTestCase {
     }
 
     func testRunScriptedConversationRunner() async {
+        let savedToneProfile = TonePreferenceStore.shared.loadProfile()
+        defer { TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile) }
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+
         let longHealth = """
         I hear you, that sounds uncomfortable. To narrow this down: when did this start, where exactly is the pain, how severe is it from 1-10, and have you had vomiting, fever, diarrhea, blood, or trouble keeping fluids down? For now, sip water regularly, avoid heavy meals, and rest while tracking changes. Red flags: severe or worsening pain, blood, black stools, persistent vomiting, fainting, or a rigid belly.
         """
@@ -232,6 +236,186 @@ final class ScriptedConversationRunnerTests: XCTestCase {
         }
 
         XCTAssertTrue(failed.isEmpty, "Scripted runner failures: \(failed)")
+    }
+
+    func testAffectScriptedRunnerCases() async {
+        let savedToneProfile = TonePreferenceStore.shared.loadProfile()
+        defer { TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile) }
+
+        struct AffectCase {
+            let input: String
+            let expectedAffect: ConversationAffect
+            let responseJSON: String
+            let taskMarkers: [String]
+        }
+
+        let cases: [AffectCase] = [
+            AffectCase(
+                input: "This wifi is ridiculous, it keeps dropping",
+                expectedAffect: .frustrated,
+                responseJSON: #"{"action":"TALK","say":"Yeah, that's really frustrating. Let's restart the router, run a quick ping test, and check if drops happen on all devices."}"#,
+                taskMarkers: ["restart", "router", "ping"]
+            ),
+            AffectCase(
+                input: "I'm worried about this chest tightness",
+                expectedAffect: .anxious,
+                responseJSON: #"{"action":"TALK","say":"I get why that feels worrying. Is the chest tightness severe, getting worse, or paired with shortness of breath or fainting? If yes, seek urgent care now."}"#,
+                taskMarkers: ["shortness of breath", "urgent care", "severe"]
+            ),
+            AffectCase(
+                input: "I don't feel like doing anything today",
+                expectedAffect: .sad,
+                responseJSON: #"{"action":"TALK","say":"I'm sorry, that sounds heavy. Want a quick reset plan for today, or do you want to talk for a minute first?"}"#,
+                taskMarkers: ["quick reset plan", "talk for a minute"]
+            ),
+            AffectCase(
+                input: "THIS THING IS BROKEN",
+                expectedAffect: .angry,
+                responseJSON: #"{"action":"TALK","say":"I can tell this is really intense. Let's slow it down: what changed right before it broke, and what error do you see now?"}"#,
+                taskMarkers: ["what changed", "error"]
+            ),
+            AffectCase(
+                input: "Yay it finally worked!!!",
+                expectedAffect: .excited,
+                responseJSON: #"{"action":"TALK","say":"That's awesome! Nice momentum here: run one more validation test, then save this as your baseline setup."}"#,
+                taskMarkers: ["validation test", "baseline setup"]
+            )
+        ]
+
+        let savedApiKey = OpenAISettings.apiKey
+        let savedUseOllama = M2Settings.useOllama
+        let savedAffectMirroringEnabled = M2Settings.affectMirroringEnabled
+        let savedUseEmotionalTone = M2Settings.useEmotionalTone
+        defer {
+            OpenAISettings.apiKey = savedApiKey
+            M2Settings.useOllama = savedUseOllama
+            M2Settings.affectMirroringEnabled = savedAffectMirroringEnabled
+            M2Settings.useEmotionalTone = savedUseEmotionalTone
+            OpenAISettings._resetCacheForTesting()
+        }
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+
+        for scripted in cases {
+            let fakeOpenAI = FakeOpenAITransport()
+            fakeOpenAI.queuedResponses = [.success(scripted.responseJSON)]
+            let fakeOllama = FakeOllamaTransportForPipeline()
+            let ollamaRouter = OllamaRouter(transport: fakeOllama)
+            let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+            let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+            let result = await orchestrator.processTurn(scripted.input, history: [])
+            let context = orchestrator.debugLastPromptContext()
+            XCTAssertEqual(
+                context?.affect.affect,
+                scripted.expectedAffect,
+                "Expected affect \(scripted.expectedAffect.rawValue) for input: \(scripted.input)"
+            )
+
+            let assistantText = result.appendedChat.last(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+            XCTAssertFalse(assistantText.isEmpty, "Expected assistant output for input: \(scripted.input)")
+            XCTAssertLessThanOrEqual(emotionalSentenceCount(in: assistantText), 1, "Expected <=1 emotional sentence")
+            XCTAssertTrue(
+                scripted.taskMarkers.contains(where: { assistantText.contains($0) }),
+                "Expected task logic markers in output: \(assistantText)"
+            )
+            XCTAssertFalse(containsTherapyLanguage(assistantText), "Output should avoid unsolicited therapy language")
+        }
+    }
+
+    func testToneLearningScenarioDontBeCheerfulThenFrustratedProblemReport() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Understood. I'll keep it grounded and direct."}"#),
+            .success(#"{"action":"TALK","say":"That sounds frustrating. Restart the router, run a quick network check, and confirm whether all devices are dropping."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        let savedApiKey = OpenAISettings.apiKey
+        let savedUseOllama = M2Settings.useOllama
+        let savedAffectMirroringEnabled = M2Settings.affectMirroringEnabled
+        let savedUseEmotionalTone = M2Settings.useEmotionalTone
+        let savedToneProfile = TonePreferenceStore.shared.loadProfile()
+        defer {
+            OpenAISettings.apiKey = savedApiKey
+            M2Settings.useOllama = savedUseOllama
+            M2Settings.affectMirroringEnabled = savedAffectMirroringEnabled
+            M2Settings.useEmotionalTone = savedUseEmotionalTone
+            TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile)
+            OpenAISettings._resetCacheForTesting()
+        }
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        var tone = TonePreferenceProfile.neutralDefaults
+        tone.enabled = true
+        TonePreferenceStore.shared.replaceProfileForTesting(tone)
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("don't be so cheerful", history: history)
+        history.append(ChatMessage(role: .user, text: "don't be so cheerful"))
+        history.append(contentsOf: first.appendedChat)
+
+        let updatedProfile = TonePreferenceStore.shared.loadProfile()
+        XCTAssertTrue(updatedProfile.avoidCheerfulWhenUpset)
+
+        let second = await orchestrator.processTurn("This wifi is ridiculous, it keeps dropping", history: history)
+        let secondText = (second.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        XCTAssertFalse(containsCheerfulLanguage(secondText), "Opening should stay grounded after cheerful-feedback update")
+        XCTAssertTrue(secondText.contains("restart") || secondText.contains("router") || secondText.contains("network"),
+                      "Response should remain practically helpful")
+    }
+
+    private func emotionalSentenceCount(in text: String) -> Int {
+        let emotionalMarkers = [
+            "frustrating",
+            "worrying",
+            "unsettling",
+            "sorry",
+            "heavy",
+            "intense",
+            "awesome",
+            "great news",
+            "love that energy"
+        ]
+        let sentences = text
+            .split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return sentences.reduce(0) { partial, sentence in
+            partial + (emotionalMarkers.contains(where: { sentence.contains($0) }) ? 1 : 0)
+        }
+    }
+
+    private func containsTherapyLanguage(_ text: String) -> Bool {
+        let banned = [
+            "anxiety disorder",
+            "depression",
+            "diagnosis",
+            "diagnose",
+            "mental illness"
+        ]
+        return banned.contains { text.contains($0) }
+    }
+
+    private func containsCheerfulLanguage(_ text: String) -> Bool {
+        let cheerful = ["yay", "awesome", "great news", "love that energy", "woo"]
+        return cheerful.contains(where: { text.contains($0) })
     }
 }
 
@@ -689,10 +873,14 @@ final class ImageProbeToolsRuntime: ToolsRuntimeProtocol {
 
 // MARK: - Router Pipeline Tests
 
+@MainActor
 final class RouterPipelineTests: XCTestCase {
 
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
+    private var savedAffectMirroringEnabled: Bool = false
+    private var savedUseEmotionalTone: Bool = true
+    private var savedToneProfile: TonePreferenceProfile = .neutralDefaults
     private var savedGeneralModel: String = ""
     private var savedEscalationModel: String = ""
 
@@ -700,6 +888,10 @@ final class RouterPipelineTests: XCTestCase {
         super.setUp()
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
+        savedAffectMirroringEnabled = M2Settings.affectMirroringEnabled
+        savedUseEmotionalTone = M2Settings.useEmotionalTone
+        savedToneProfile = TonePreferenceStore.shared.loadProfile()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
         savedGeneralModel = OpenAISettings.generalModel
         savedEscalationModel = OpenAISettings.escalationModel
     }
@@ -708,6 +900,9 @@ final class RouterPipelineTests: XCTestCase {
         // Restore original settings
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
+        M2Settings.affectMirroringEnabled = savedAffectMirroringEnabled
+        M2Settings.useEmotionalTone = savedUseEmotionalTone
+        TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile)
         OpenAISettings.generalModel = savedGeneralModel
         OpenAISettings.escalationModel = savedEscalationModel
         OpenAISettings._resetCacheForTesting()
@@ -743,6 +938,136 @@ final class RouterPipelineTests: XCTestCase {
     private let websiteLearningActionJSON = """
     {"action":"TOOL","name":"learn_website","args":{"url":"https://swift.org","focus":"packages"},"say":"I'll learn from that page."}
     """
+
+    @MainActor
+    private func captureAffectPrompt(for input: String,
+                                     toneProfile: TonePreferenceProfile? = nil) async throws -> (systemPrompt: String, modeMessage: String) {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(validTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = false
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        if let toneProfile {
+            TonePreferenceStore.shared.replaceProfileForTesting(toneProfile)
+        } else {
+            TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        }
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        _ = await orchestrator.processTurn(input, history: [])
+        let messages = try XCTUnwrap(fakeOpenAI.chatCallLog.first)
+        let systemPrompt = try XCTUnwrap(messages.first(where: { $0["role"] == "system" })?["content"])
+        let modeMessage = try XCTUnwrap(messages.first(where: { ($0["content"] ?? "").contains("[MODE]") })?["content"])
+        return (systemPrompt, modeMessage)
+    }
+
+    // MARK: - Affect Prompt Guidance
+
+    @MainActor
+    func testAffectGuidanceInjectedFrustrated() async throws {
+        let captured = try await captureAffectPrompt(for: "This wifi is ridiculous, it keeps dropping again.")
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 4: AFFECT_GUIDANCE]"))
+        XCTAssertTrue(captured.systemPrompt.contains("validate frustration"))
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"frustrated\""))
+    }
+
+    @MainActor
+    func testAffectGuidanceInjectedAnxious() async throws {
+        let captured = try await captureAffectPrompt(for: "I'm worried about this chest tightness.")
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 4: AFFECT_GUIDANCE]"))
+        XCTAssertTrue(captured.systemPrompt.contains("Be calming and steady."))
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"anxious\""))
+    }
+
+    @MainActor
+    func testAffectGuidanceInjectedSad() async throws {
+        let captured = try await captureAffectPrompt(for: "I don't feel like doing anything today.")
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 4: AFFECT_GUIDANCE]"))
+        XCTAssertTrue(captured.systemPrompt.contains("Be warm and gentle."))
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"sad\""))
+    }
+
+    @MainActor
+    func testAffectGuidanceInjectedAngry() async throws {
+        let captured = try await captureAffectPrompt(for: "THIS IS BULLSHIT and it keeps happening again")
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 4: AFFECT_GUIDANCE]"))
+        XCTAssertTrue(captured.systemPrompt.contains("De-escalate and redirect"))
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"angry\""))
+    }
+
+    @MainActor
+    func testAffectGuidanceInjectedExcited() async throws {
+        let captured = try await captureAffectPrompt(for: "Yay it finally worked!!!")
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 4: AFFECT_GUIDANCE]"))
+        XCTAssertTrue(captured.systemPrompt.contains("Match positive energy."))
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"excited\""))
+    }
+
+    @MainActor
+    func testTonePreferencesInjectedWhenEnabled() async throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.directness = 0.70
+        profile.warmth = 0.40
+        profile.curiosity = 0.50
+        profile.reassurance = 0.40
+        profile.humor = 0.20
+        profile.formality = 0.30
+        profile.hedging = 0.35
+        profile.preferOneQuestionMax = true
+
+        let captured = try await captureAffectPrompt(
+            for: "This wifi is ridiculous, it keeps dropping again.",
+            toneProfile: profile
+        )
+        XCTAssertTrue(captured.systemPrompt.contains("[BLOCK 5: TONE_PREFERENCES]"))
+        XCTAssertTrue(captured.systemPrompt.contains("d=0.70"))
+        XCTAssertTrue(captured.systemPrompt.contains("one_q_max=true"))
+
+        if let toneBlock = extractSystemBlock(named: "[BLOCK 5: TONE_PREFERENCES]", from: captured.systemPrompt) {
+            XCTAssertLessThanOrEqual(toneBlock.count, 490, "Tone block should remain compact")
+        } else {
+            XCTFail("Expected tone preferences block")
+        }
+    }
+
+    @MainActor
+    func testTonePreferencesNotInjectedWhenDisabled() async throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = false
+        let captured = try await captureAffectPrompt(
+            for: "This wifi is ridiculous, it keeps dropping again.",
+            toneProfile: profile
+        )
+        XCTAssertFalse(captured.systemPrompt.contains("TONE_PREFERENCES"))
+    }
+
+    @MainActor
+    func testPreferencesAffectGuidanceInteraction() async throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.warmth = 0.20
+        profile.reassurance = 0.35
+        let captured = try await captureAffectPrompt(
+            for: "This wifi is ridiculous, it keeps dropping again.",
+            toneProfile: profile
+        )
+        XCTAssertTrue(captured.modeMessage.contains("\"affect\":{\"affect\":\"frustrated\""))
+        XCTAssertTrue(captured.systemPrompt.contains("frustrated+low warmth: brief validation then steps."))
+    }
+
+    private func extractSystemBlock(named marker: String, from prompt: String) -> String? {
+        let pieces = prompt.components(separatedBy: "\n\n")
+        return pieces.first(where: { $0.contains(marker) })
+    }
 
     // MARK: - A) OpenAI success does not call Ollama
 

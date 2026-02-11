@@ -17,6 +17,9 @@ enum M2Settings {
         static let silenceDurationMs = "m2_silenceDurationMs"
         static let captureBeepEnabled = "m2_captureBeepEnabled"
         static let userName = "m2_userName"
+        static let affectMirroringEnabled = "m3_affectMirroringEnabled"
+        static let useEmotionalTone = "m3_useEmotionalTone"
+        static let toneLearningNoticeShown = "m3_toneLearningNoticeShown"
         static let useOllama = "m3_useOllama"
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
@@ -167,6 +170,26 @@ enum M2Settings {
     }
 
     // MARK: - Ollama (M3)
+
+    /// Rollout gate for affect-aware tone mirroring. Defaults to OFF.
+    static var affectMirroringEnabled: Bool {
+        get { defaults.bool(forKey: Key.affectMirroringEnabled) }
+        set { defaults.set(newValue, forKey: Key.affectMirroringEnabled) }
+    }
+
+    /// User preference for emotional tone adaptation when affect mirroring is enabled.
+    static var useEmotionalTone: Bool {
+        get {
+            if defaults.object(forKey: Key.useEmotionalTone) == nil { return true }
+            return defaults.bool(forKey: Key.useEmotionalTone)
+        }
+        set { defaults.set(newValue, forKey: Key.useEmotionalTone) }
+    }
+
+    static var toneLearningNoticeShown: Bool {
+        get { defaults.bool(forKey: Key.toneLearningNoticeShown) }
+        set { defaults.set(newValue, forKey: Key.toneLearningNoticeShown) }
+    }
 
     static var useOllama: Bool {
         get { defaults.bool(forKey: Key.useOllama) }

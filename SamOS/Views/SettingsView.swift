@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Foundation
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -32,9 +33,14 @@ struct SettingsView: View {
     @State private var captureBeepEnabled: Bool = M2Settings.captureBeepEnabled
 
     // Router
+    @State private var useEmotionalTone: Bool = M2Settings.useEmotionalTone
     @State private var useOllama: Bool = M2Settings.useOllama
     @State private var ollamaEndpoint: String = M2Settings.ollamaEndpoint
     @State private var ollamaModel: String = M2Settings.ollamaModel
+
+    // Tone learning
+    @State private var toneProfile: TonePreferenceProfile = TonePreferenceStore.shared.loadProfile()
+    @State private var showToneLearningNote = false
 
     // Voice Output (ElevenLabs)
     @State private var elevenLabsApiKey: String = ElevenLabsSettings.apiKey
@@ -108,6 +114,7 @@ struct SettingsView: View {
                 switch selectedTab {
                 case .general:
                     generalSection
+                    toneLearningSection
                     securitySection
 
                 case .audioVisual:
@@ -140,9 +147,15 @@ struct SettingsView: View {
             appState.refreshAutonomousLearningDebug()
             appState.refreshCameraDebug()
             installedSkills = SkillStore.shared.loadInstalled()
+            toneProfile = TonePreferenceStore.shared.loadProfile()
         }
         .onDisappear {
             appState.resumeListeningAfterSettings()
+        }
+        .alert("Tone Learning Enabled", isPresented: $showToneLearningNote) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Sam can adapt to your preferred style (direct vs warm). Stored locally. You can reset anytime.")
         }
     }
 
@@ -153,6 +166,54 @@ struct SettingsView: View {
                 .onChange(of: userName) { _, newValue in
                     M2Settings.userName = newValue
                 }
+
+            Toggle("Use emotional tone", isOn: $useEmotionalTone)
+                .onChange(of: useEmotionalTone) { _, newValue in
+                    M2Settings.useEmotionalTone = newValue
+                }
+
+            if !M2Settings.affectMirroringEnabled {
+                Text("Emotional mirroring rollout is currently off. This preference will apply once enabled.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var toneLearningSection: some View {
+        Section("Tone Learning") {
+            Toggle("Enable tone learning", isOn: Binding(
+                get: { toneProfile.enabled },
+                set: { newValue in
+                    toneProfile.enabled = newValue
+                    toneProfile = TonePreferenceStore.shared.updateEnabled(newValue)
+                    if newValue && !M2Settings.toneLearningNoticeShown {
+                        M2Settings.toneLearningNoticeShown = true
+                        showToneLearningNote = true
+                    }
+                }
+            ))
+
+            Button("Reset tone preferences", role: .destructive) {
+                toneProfile = TonePreferenceStore.shared.resetProfile()
+            }
+
+            LabeledContent("Directness") { Text(String(format: "%.2f", toneProfile.directness)) }
+            LabeledContent("Warmth") { Text(String(format: "%.2f", toneProfile.warmth)) }
+            LabeledContent("Curiosity") { Text(String(format: "%.2f", toneProfile.curiosity)) }
+            LabeledContent("Reassurance") { Text(String(format: "%.2f", toneProfile.reassurance)) }
+            LabeledContent("Humor") { Text(String(format: "%.2f", toneProfile.humor)) }
+            LabeledContent("Formality") { Text(String(format: "%.2f", toneProfile.formality)) }
+            LabeledContent("Hedging") { Text(String(format: "%.2f", toneProfile.hedging)) }
+            LabeledContent("Avoid cheerful when upset") { Text(toneProfile.avoidCheerfulWhenUpset ? "On" : "Off") }
+            LabeledContent("Avoid therapy language") { Text(toneProfile.avoidTherapyLanguage ? "On" : "Off") }
+            LabeledContent("Prefer bullet steps") { Text(toneProfile.preferBulletSteps ? "On" : "Off") }
+            LabeledContent("Prefer short openers") { Text(toneProfile.preferShortOpeners ? "On" : "Off") }
+            LabeledContent("Prefer one question max") { Text(toneProfile.preferOneQuestionMax ? "On" : "Off") }
+
+            Text("Stored locally on this Mac. No cloud sync.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

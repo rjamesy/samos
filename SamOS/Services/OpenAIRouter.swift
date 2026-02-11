@@ -333,6 +333,63 @@ final class OpenAIAPILogStore {
     ]
 }
 
+enum PromptToneInjector {
+    private static let maxToneChars = 450
+
+    static func makeToneBlock(profile: TonePreferenceProfile,
+                              affect: AffectMetadata?) -> String {
+        let normalized = normalizedProfile(profile)
+        var lines: [String] = [
+            "User tone preferences:",
+            "- d=\(fmt(normalized.directness)) w=\(fmt(normalized.warmth)) c=\(fmt(normalized.curiosity)) r=\(fmt(normalized.reassurance)) h=\(fmt(normalized.humor)) f=\(fmt(normalized.formality)) g=\(fmt(normalized.hedging))",
+            "- flags: cheerful_upset=\(flag(normalized.avoidCheerfulWhenUpset)) therapy=\(flag(normalized.avoidTherapyLanguage)) bullets=\(flag(normalized.preferBulletSteps)) short_opener=\(flag(normalized.preferShortOpeners)) one_q_max=\(flag(normalized.preferOneQuestionMax))",
+        ]
+
+        var prioritizedRules: [String] = []
+
+        if normalized.avoidCheerfulWhenUpset, let affect, affect.affect != .neutral {
+            prioritizedRules.append("- non-neutral affect: avoid cheerful phrasing; keep tone grounded.")
+        }
+        if (affect?.affect == .frustrated) && normalized.warmth <= 0.40 {
+            prioritizedRules.append("- frustrated+low warmth: brief validation then steps.")
+        }
+        if (affect?.affect == .anxious) && normalized.reassurance <= 0.40 {
+            prioritizedRules.append("- anxious+low reassurance: stay calm and practical; avoid over-validation.")
+        }
+        if normalized.preferOneQuestionMax {
+            prioritizedRules.append("- one_q_max=true: ask at most one question unless problem_report safety clarifiers are needed.")
+        }
+        if normalized.preferShortOpeners {
+            prioritizedRules.append("- short_opener=true: keep any emotional opener to one brief sentence.")
+        }
+        prioritizedRules.append("- rules: therapy=on => no diagnosis/therapy language; high directness => shorter phrasing with fewer hedges; low curiosity => max 1 question unless problem_report; use bullets in show_text for steps.")
+
+        for rule in prioritizedRules {
+            let candidate = (lines + [rule]).joined(separator: "\n")
+            guard candidate.count <= maxToneChars else { continue }
+            lines.append(rule)
+        }
+
+        let compact = lines.joined(separator: "\n")
+        if compact.count <= maxToneChars { return compact }
+        return String(compact.prefix(maxToneChars - 3)) + "..."
+    }
+
+    private static func normalizedProfile(_ profile: TonePreferenceProfile) -> TonePreferenceProfile {
+        var copy = profile
+        copy.clampKnobs()
+        return copy
+    }
+
+    private static func fmt(_ value: Double) -> String {
+        String(format: "%.2f", min(1.0, max(0.0, value)))
+    }
+
+    private static func flag(_ value: Bool) -> String {
+        value ? "true" : "false"
+    }
+}
+
 enum PromptBuilder {
     private static let maxPromptChars = 5600
     private static let websiteRetrievalThreshold = 0.23
@@ -368,6 +425,11 @@ enum PromptBuilder {
             : websiteHints.map { "- website_learning: \($0.replacingOccurrences(of: "\"", with: "'"))" }
 
         let modePolicy = dynamicModePolicy(promptContext?.mode)
+        let affectPolicy = dynamicAffectGuidance(promptContext?.affect)
+        let tonePolicy = promptContext?.tonePreferences.flatMap { profile -> String? in
+            guard profile.enabled else { return nil }
+            return PromptToneInjector.makeToneBlock(profile: profile, affect: promptContext?.affect)
+        }
         let budgetDirective: String
         if promptContext?.responseBudget != nil {
             budgetDirective = """
@@ -427,8 +489,20 @@ enum PromptBuilder {
         \(modePolicy)
         """
 
+        let affectBlock = """
+        [BLOCK 4: AFFECT_GUIDANCE]
+        \(affectPolicy)
+        """
+
+        let toneBlock: String? = tonePolicy.map { body in
+            """
+            [BLOCK 5: TONE_PREFERENCES]
+            \(body)
+            """
+        }
+
         let toolPolicy = """
-        [BLOCK 4: TOOL_POLICY]
+        [BLOCK 6: TOOL_POLICY]
         Available tools:
         \(cachedToolDescriptions)
         Installed skills (matched automatically, not tool names):
@@ -456,8 +530,15 @@ enum PromptBuilder {
         - Use website notes only when relevant to the user query. Do not invent details.
         """
 
+        var blocks = [coreSystem, stylePolicy, modeBlock, affectBlock]
+        if let toneBlock {
+            blocks.append(toneBlock)
+        }
+        blocks.append(toolPolicy)
+        blocks.append(localContext)
+
         return cappedPrompt(
-            blocks: [coreSystem, stylePolicy, modeBlock, toolPolicy, localContext],
+            blocks: blocks,
             maxChars: maxPromptChars
         )
     }
@@ -497,6 +578,40 @@ enum PromptBuilder {
             lines.append("- If severe/worsening or red flags, seek urgent care.")
         }
 
+        return lines.joined(separator: "\n")
+    }
+
+    static func dynamicAffectGuidance(_ affect: AffectMetadata?) -> String {
+        let metadata = affect ?? .neutral
+        var lines: [String] = [
+            "- Affect=\(metadata.affect.rawValue), intensity=\(metadata.clampedIntensity)."
+        ]
+
+        switch metadata.affect {
+        case .neutral:
+            lines.append("- Keep responses direct and solution-focused.")
+        case .frustrated:
+            lines.append("- Acknowledge briefly, validate frustration, then pivot to actionable steps.")
+        case .anxious:
+            lines.append("- Be calming and steady.")
+            lines.append("- Avoid alarmist language.")
+            lines.append("- Ask safety clarifiers when relevant.")
+        case .sad:
+            lines.append("- Be warm and gentle.")
+            lines.append("- Offer a choice: talk briefly or move into practical steps.")
+        case .angry:
+            lines.append("- Acknowledge intensity without matching it.")
+            lines.append("- De-escalate and redirect to concrete next actions.")
+        case .excited:
+            lines.append("- Match positive energy.")
+            lines.append("- Maintain momentum and clarity.")
+        }
+
+        lines.append("- Emotional acknowledgement: max 1 sentence.")
+        lines.append("- Never assume motives.")
+        lines.append("- Never over-psychologize or diagnose.")
+        lines.append("- If user mentions panic attack, suicidal, or hopeless language: offer a gentle disclaimer and suggest professional help; only urgent-emergency escalation if immediate danger is stated.")
+        lines.append("- Always continue with task logic, clarifiers, and practical next steps.")
         return lines.joined(separator: "\n")
     }
 
@@ -646,9 +761,9 @@ enum PromptBuilder {
         }
 
         // Then trim tool block examples only.
-        if let idx = mutable.firstIndex(where: { $0.hasPrefix("[BLOCK 4: TOOL_POLICY]") }) {
+        if let idx = mutable.firstIndex(where: { $0.contains("TOOL_POLICY]") }) {
             mutable[idx] = """
-            [BLOCK 4: TOOL_POLICY]
+            [BLOCK: TOOL_POLICY]
             Use available tools exactly by name.
             Prefer PLAN for tool work and missing fields.
             Weather -> get_weather; time -> get_time; URL learning -> learn_website; long detail -> show_text.

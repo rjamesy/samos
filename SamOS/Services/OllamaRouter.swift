@@ -305,7 +305,7 @@ final class OllamaRouter {
         if let context = promptContext {
             let modeLine = """
             [MODE]
-            {"intent":"\(context.mode.intent.rawValue)","domain":"\(context.mode.domain.rawValue)","urgency":"\(context.mode.urgency.rawValue)","needs_clarification":\(context.mode.needsClarification),"user_goal_hint":"\(context.mode.userGoalHint.rawValue)"}
+            {"intent":"\(context.mode.intent.rawValue)","domain":"\(context.mode.domain.rawValue)","urgency":"\(context.mode.urgency.rawValue)","needs_clarification":\(context.mode.needsClarification),"user_goal_hint":"\(context.mode.userGoalHint.rawValue)","affect":{"affect":"\(context.affect.affect.rawValue)","intensity":\(context.affect.clampedIntensity),"guidance":"\(context.affect.guidance)"}}
             """
             messages.append(["role": "system", "content": modeLine])
 

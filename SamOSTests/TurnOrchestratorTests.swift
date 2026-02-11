@@ -1,11 +1,23 @@
 import XCTest
 @testable import SamOS
 
+@MainActor
 final class TurnOrchestratorTests: XCTestCase {
+    private var savedToneProfile: TonePreferenceProfile = .neutralDefaults
+
+    override func setUp() {
+        super.setUp()
+        savedToneProfile = TonePreferenceStore.shared.loadProfile()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+    }
+
+    override func tearDown() {
+        TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile)
+        super.tearDown()
+    }
 
     // MARK: - Conversation Mode Classifier
 
-    @MainActor
     func testConversationModeClassifierCanonicalExamples() {
         let orchestrator = TurnOrchestrator()
 
@@ -31,7 +43,6 @@ final class TurnOrchestratorTests: XCTestCase {
         XCTAssertEqual(recall.intent, .memoryRecall)
     }
 
-    @MainActor
     func testConversationModeClassifierBatchCoverage() {
         let orchestrator = TurnOrchestrator()
         let samples: [(String, ConversationIntent, ConversationDomain)] = [
@@ -78,9 +89,182 @@ final class TurnOrchestratorTests: XCTestCase {
         }
     }
 
+    // MARK: - Affect Classifier
+
+    func testAffectNeutral() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("Set a timer for 15 minutes.")
+        XCTAssertEqual(affect.affect, .neutral)
+        XCTAssertEqual(affect.intensity, 0)
+    }
+
+    func testAffectFrustrated() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("This wifi is ridiculous, why does this always happen again?")
+        XCTAssertEqual(affect.affect, .frustrated)
+        XCTAssertEqual(affect.intensity, 2)
+    }
+
+    func testAffectAnxious() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("I'm worried and nervous about this chest tightness.")
+        XCTAssertEqual(affect.affect, .anxious)
+        XCTAssertEqual(affect.intensity, 2)
+    }
+
+    func testAffectSad() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("I don't feel like doing anything today. I'm down.")
+        XCTAssertEqual(affect.affect, .sad)
+        XCTAssertEqual(affect.intensity, 2)
+    }
+
+    func testAffectAngry() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("THIS IS BULLSHIT, WHY DOES THIS KEEP BREAKING AGAIN")
+        XCTAssertEqual(affect.affect, .angry)
+        XCTAssertEqual(affect.intensity, 3)
+    }
+
+    func testAffectExcited() {
+        let orchestrator = TurnOrchestrator()
+        let affect = orchestrator.debugDetectAffect("Yay this is awesome!!! I can't wait.")
+        XCTAssertEqual(affect.affect, .excited)
+        XCTAssertEqual(affect.intensity, 2)
+    }
+
+    func testAffectIntensityScaling() {
+        let orchestrator = TurnOrchestrator()
+
+        let low = orchestrator.debugDetectAffect("I'm worried.")
+        XCTAssertEqual(low.affect, .anxious)
+        XCTAssertEqual(low.intensity, 1)
+
+        let medium = orchestrator.debugDetectAffect("I'm annoyed and frustrated with this.")
+        XCTAssertEqual(medium.affect, .frustrated)
+        XCTAssertEqual(medium.intensity, 2)
+
+        let high = orchestrator.debugDetectAffect("THIS IS BULLSHIT and it keeps happening again")
+        XCTAssertEqual(high.affect, .angry)
+        XCTAssertEqual(high.intensity, 3)
+    }
+
+    // MARK: - Tone Learning
+
+    func testExplicitFeedbackMoreDirectUpdatesProfile() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let outcome = TonePreferenceLearner.learn(
+            from: "be more direct",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        let learned = try XCTUnwrap(outcome)
+        XCTAssertEqual(learned.reason, "more_direct")
+        XCTAssertEqual(learned.profile.directness, 0.65, accuracy: 0.0001)
+        XCTAssertEqual(learned.profile.hedging, 0.40, accuracy: 0.0001)
+    }
+
+    func testExplicitFeedbackStopQuestionsUpdatesCuriosityAndFlag() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let outcome = TonePreferenceLearner.learn(
+            from: "stop asking so many questions",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        let learned = try XCTUnwrap(outcome)
+        XCTAssertEqual(learned.reason, "stop_questions")
+        XCTAssertEqual(learned.profile.curiosity, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(learned.profile.preferOneQuestionMax, true)
+    }
+
+    func testExplicitFeedbackNoTherapyLanguageSetsConstraint() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.avoidTherapyLanguage = false
+        let outcome = TonePreferenceLearner.learn(
+            from: "don't talk like a therapist",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        let learned = try XCTUnwrap(outcome)
+        XCTAssertEqual(learned.reason, "no_therapy_language")
+        XCTAssertEqual(learned.profile.avoidTherapyLanguage, true)
+    }
+
+    func testImplicitFeedbackTooLongNudgesDirectness() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let outcome = TonePreferenceLearner.learn(
+            from: "too long",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        let learned = try XCTUnwrap(outcome)
+        XCTAssertEqual(learned.reason, "too_long")
+        XCTAssertEqual(learned.profile.directness, 0.55, accuracy: 0.0001)
+    }
+
+    func testNoLearningFromMedicalSymptoms() {
+        let orchestrator = TurnOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let input = "my chest pain and fever are getting worse"
+        let outcome = TonePreferenceLearner.learn(
+            from: input,
+            mode: orchestrator.debugClassify(input),
+            affect: orchestrator.debugDetectAffect(input),
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        XCTAssertNil(outcome)
+    }
+
+    func testUpdateClampAndDailyCap() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.directness = 0.95
+        profile.hedging = 0.02
+
+        let clamped = TonePreferenceLearner.learn(
+            from: "be more direct",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 0
+        )
+        let learned = try XCTUnwrap(clamped)
+        XCTAssertEqual(learned.profile.directness, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(learned.profile.hedging, 0.0, accuracy: 0.0001)
+
+        let blocked = TonePreferenceLearner.learn(
+            from: "be more direct",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesToday: 3
+        )
+        XCTAssertNil(blocked)
+    }
+
     // MARK: - Plan Execution
 
-    @MainActor
     func testTalkStepProducesChatAndSpoken() {
         let orchestrator = TurnOrchestrator()
         let plan = Plan(steps: [.talk(say: "Hey there!")])
@@ -92,7 +276,6 @@ final class TurnOrchestratorTests: XCTestCase {
         XCTAssertEqual(result.spokenLines, ["Hey there!"])
     }
 
-    @MainActor
     func testToolStepExecutes() {
         let orchestrator = TurnOrchestrator()
         let plan = Plan(steps: [
@@ -105,7 +288,6 @@ final class TurnOrchestratorTests: XCTestCase {
         XCTAssertFalse(result.appendedOutputs.isEmpty, "Should have output item")
     }
 
-    @MainActor
     func testAskStepSetsPendingSlotAndStops() {
         let orchestrator = TurnOrchestrator()
         let plan = Plan(steps: [
@@ -126,7 +308,6 @@ final class TurnOrchestratorTests: XCTestCase {
         XCTAssertEqual(orchestrator.pendingSlot?.originalUserText, "set an alarm")
     }
 
-    @MainActor
     func testDelegateStepProducesSystemMessage() {
         let orchestrator = TurnOrchestrator()
         let plan = Plan(steps: [
@@ -142,7 +323,6 @@ final class TurnOrchestratorTests: XCTestCase {
 
     // MARK: - PendingSlot Loop Breaker
 
-    @MainActor
     func testLoopBreakerClearsAfter3Attempts() async {
         let orchestrator = TurnOrchestrator()
 

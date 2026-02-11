@@ -51,6 +51,484 @@ enum ConversationUrgency: String, CaseIterable, Codable {
     case high
 }
 
+enum ConversationAffect: String, CaseIterable, Codable {
+    case neutral
+    case frustrated
+    case anxious
+    case sad
+    case angry
+    case excited
+}
+
+struct AffectMetadata: Codable, Equatable {
+    let affect: ConversationAffect
+    let intensity: Int
+
+    var guidance: String {
+        switch affect {
+        case .neutral:
+            return "Keep responses direct and solution-focused."
+        case .frustrated:
+            return "Acknowledge briefly, stay calm, ask clarifiers."
+        case .anxious:
+            return "Be calming and steady. Avoid alarmist language. Ask safety clarifiers when relevant."
+        case .sad:
+            return "Be warm and gentle. Offer a choice between talking and practical next steps."
+        case .angry:
+            return "Acknowledge intensity without matching it. De-escalate and redirect."
+        case .excited:
+            return "Match positive energy while maintaining momentum and clarity."
+        }
+    }
+
+    var clampedIntensity: Int {
+        min(3, max(0, intensity))
+    }
+
+    static let neutral = AffectMetadata(affect: .neutral, intensity: 0)
+}
+
+struct TonePreferenceProfile: Codable, Equatable {
+    var enabled: Bool
+    var lastUpdated: Date?
+
+    var directness: Double
+    var warmth: Double
+    var humor: Double
+    var curiosity: Double
+    var reassurance: Double
+    var formality: Double
+    var hedging: Double
+
+    var avoidCheerfulWhenUpset: Bool
+    var avoidTherapyLanguage: Bool
+    var preferBulletSteps: Bool
+    var preferShortOpeners: Bool
+    var preferOneQuestionMax: Bool
+
+    static var neutralDefaults: TonePreferenceProfile {
+        TonePreferenceProfile(
+            enabled: false,
+            lastUpdated: nil,
+            directness: 0.5,
+            warmth: 0.5,
+            humor: 0.3,
+            curiosity: 0.6,
+            reassurance: 0.5,
+            formality: 0.4,
+            hedging: 0.5,
+            avoidCheerfulWhenUpset: true,
+            avoidTherapyLanguage: true,
+            preferBulletSteps: true,
+            preferShortOpeners: true,
+            preferOneQuestionMax: false
+        )
+    }
+
+    mutating func clampKnobs() {
+        directness = TonePreferenceProfile.clamp01(directness)
+        warmth = TonePreferenceProfile.clamp01(warmth)
+        humor = TonePreferenceProfile.clamp01(humor)
+        curiosity = TonePreferenceProfile.clamp01(curiosity)
+        reassurance = TonePreferenceProfile.clamp01(reassurance)
+        formality = TonePreferenceProfile.clamp01(formality)
+        hedging = TonePreferenceProfile.clamp01(hedging)
+    }
+
+    private static func clamp01(_ value: Double) -> Double {
+        min(1.0, max(0.0, value))
+    }
+}
+
+private struct TonePreferencePersistedState: Codable {
+    static let schemaVersion = 1
+
+    var schemaVersion: Int
+    var profile: TonePreferenceProfile
+    var learningUpdateHistory: [Date]
+    var lastUpdateReason: String?
+
+    static var defaultState: TonePreferencePersistedState {
+        TonePreferencePersistedState(
+            schemaVersion: schemaVersion,
+            profile: .neutralDefaults,
+            learningUpdateHistory: [],
+            lastUpdateReason: nil
+        )
+    }
+}
+
+struct TonePreferenceLearningOutcome {
+    let source: String
+    let reason: String
+    let deltaSummary: String
+    let profile: TonePreferenceProfile
+}
+
+@MainActor
+final class TonePreferenceStore {
+    static let shared = TonePreferenceStore()
+
+    private let encoder: JSONEncoder
+    private let decoder: JSONDecoder
+    private let fileManager = FileManager.default
+    private var cachedState: TonePreferencePersistedState?
+
+    private init() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
+    }
+
+    func loadProfile() -> TonePreferenceProfile {
+        loadState().profile
+    }
+
+    func updateEnabled(_ enabled: Bool) -> TonePreferenceProfile {
+        var state = loadState()
+        state.profile.enabled = enabled
+        persist(state)
+        return state.profile
+    }
+
+    @discardableResult
+    func saveProfile(_ profile: TonePreferenceProfile) -> TonePreferenceProfile {
+        var state = loadState()
+        var clamped = profile
+        clamped.clampKnobs()
+        state.profile = clamped
+        persist(state)
+        return state.profile
+    }
+
+    @discardableResult
+    func applyLearningOutcome(_ outcome: TonePreferenceLearningOutcome, at now: Date) -> TonePreferenceProfile {
+        var state = loadState()
+        var updated = outcome.profile
+        updated.lastUpdated = now
+        updated.clampKnobs()
+        state.profile = updated
+        state.learningUpdateHistory = trimmedHistory(state.learningUpdateHistory + [now], now: now)
+        state.lastUpdateReason = outcome.reason
+        persist(state)
+        return state.profile
+    }
+
+    func updatesToday(now: Date = Date()) -> Int {
+        let history = loadState().learningUpdateHistory
+        return history.filter { Calendar.current.isDate($0, inSameDayAs: now) }.count
+    }
+
+    func debugLastUpdateReason() -> String? {
+        loadState().lastUpdateReason
+    }
+
+    @discardableResult
+    func resetProfile() -> TonePreferenceProfile {
+        var state = loadState()
+        let isEnabled = state.profile.enabled
+        state = .defaultState
+        state.profile.enabled = isEnabled
+        persist(state)
+        return state.profile
+    }
+
+    func replaceProfileForTesting(_ profile: TonePreferenceProfile,
+                                  learningUpdateHistory: [Date] = [],
+                                  lastUpdateReason: String? = nil) {
+        var clamped = profile
+        clamped.clampKnobs()
+        let state = TonePreferencePersistedState(
+            schemaVersion: TonePreferencePersistedState.schemaVersion,
+            profile: clamped,
+            learningUpdateHistory: learningUpdateHistory,
+            lastUpdateReason: lastUpdateReason
+        )
+        persist(state)
+    }
+
+    private func loadState() -> TonePreferencePersistedState {
+        if let cachedState {
+            return cachedState
+        }
+
+        guard let data = try? Data(contentsOf: storageURL),
+              let decoded = try? decoder.decode(TonePreferencePersistedState.self, from: data),
+              decoded.schemaVersion == TonePreferencePersistedState.schemaVersion else {
+            let fallback = TonePreferencePersistedState.defaultState
+            persist(fallback)
+            return fallback
+        }
+
+        var sanitized = decoded
+        sanitized.profile.clampKnobs()
+        sanitized.learningUpdateHistory = trimmedHistory(sanitized.learningUpdateHistory, now: Date())
+        cachedState = sanitized
+        return sanitized
+    }
+
+    private func persist(_ state: TonePreferencePersistedState) {
+        var mutable = state
+        mutable.profile.clampKnobs()
+        do {
+            try fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+            let data = try encoder.encode(mutable)
+            try data.write(to: storageURL, options: .atomic)
+            cachedState = mutable
+        } catch {
+            cachedState = mutable
+        }
+    }
+
+    private func trimmedHistory(_ history: [Date], now: Date) -> [Date] {
+        history.filter { now.timeIntervalSince($0) <= (7 * 24 * 60 * 60) }
+    }
+
+    private var storageDirectory: URL {
+        let fallback = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fallback
+        return base.appendingPathComponent("SamOS", isDirectory: true)
+    }
+
+    private var storageURL: URL {
+        storageDirectory.appendingPathComponent("tone_preferences.json", isDirectory: false)
+    }
+}
+
+enum TonePreferenceLearner {
+    private static let explicitDelta = 0.15
+    private static let implicitDelta = 0.05
+    private static let maxUpdatesPerDay = 3
+
+    static func learn(from userInput: String,
+                      mode: ConversationMode,
+                      affect: AffectMetadata,
+                      profile: TonePreferenceProfile,
+                      useEmotionalTone: Bool,
+                      updatesToday: Int) -> TonePreferenceLearningOutcome? {
+        guard profile.enabled, useEmotionalTone else { return nil }
+        guard updatesToday < maxUpdatesPerDay else { return nil }
+
+        let lower = normalized(userInput)
+        guard !lower.isEmpty else { return nil }
+
+        if let explicit = explicitUpdate(for: lower, affect: affect, profile: profile) {
+            return explicit
+        }
+
+        if shouldSkipImplicitLearning(for: lower, mode: mode) {
+            return nil
+        }
+        if let implicit = implicitUpdate(for: lower, profile: profile) {
+            return implicit
+        }
+        return nil
+    }
+
+    private static func explicitUpdate(for lower: String,
+                                       affect: AffectMetadata,
+                                       profile: TonePreferenceProfile) -> TonePreferenceLearningOutcome? {
+        if hasAny(lower, ["don't talk like a therapist", "dont talk like a therapist", "stop the therapy tone"]) {
+            var updated = profile
+            applyKnob(&updated.warmth, -0.05)
+            applyKnob(&updated.reassurance, -0.10)
+            updated.avoidTherapyLanguage = true
+            return outcome(source: "explicit_feedback",
+                           reason: "no_therapy_language",
+                           deltas: ["warmth-0.05", "reassurance-0.10", "avoidTherapyLanguage=true"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["stop asking so many questions", "ask fewer questions", "less questions"]) {
+            var updated = profile
+            applyKnob(&updated.curiosity, -explicitDelta)
+            updated.preferOneQuestionMax = true
+            return outcome(source: "explicit_feedback",
+                           reason: "stop_questions",
+                           deltas: ["curiosity-0.15", "preferOneQuestionMax=true"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["be more direct", "more direct please", "more direct"]) {
+            var updated = profile
+            applyKnob(&updated.directness, explicitDelta)
+            applyKnob(&updated.hedging, -0.10)
+            return outcome(source: "explicit_feedback",
+                           reason: "more_direct",
+                           deltas: ["directness+0.15", "hedging-0.10"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["don't patronize me", "dont patronize me", "don't do the sympathy thing", "dont do the sympathy thing"]) {
+            var updated = profile
+            applyKnob(&updated.warmth, -0.15)
+            applyKnob(&updated.reassurance, -0.10)
+            updated.avoidCheerfulWhenUpset = true
+            return outcome(source: "explicit_feedback",
+                           reason: "avoid_patronizing_tone",
+                           deltas: ["warmth-0.15", "reassurance-0.10", "avoidCheerfulWhenUpset=true"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["don't be so cheerful", "dont be so cheerful"]) {
+            var updated = profile
+            applyKnob(&updated.humor, -0.10)
+            updated.avoidCheerfulWhenUpset = true
+            if affect.affect == .frustrated || affect.affect == .angry || affect.affect == .sad || affect.affect == .anxious {
+                applyKnob(&updated.warmth, -0.05)
+            }
+            return outcome(source: "explicit_feedback",
+                           reason: "avoid_cheerful_when_upset",
+                           deltas: ["humor-0.10", "avoidCheerfulWhenUpset=true"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["be warmer", "be nicer", "more reassurance when anxious"]) {
+            var updated = profile
+            applyKnob(&updated.warmth, explicitDelta)
+            applyKnob(&updated.reassurance, 0.10)
+            return outcome(source: "explicit_feedback",
+                           reason: "increase_warmth",
+                           deltas: ["warmth+0.15", "reassurance+0.10"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["stop being so robotic"]) {
+            var updated = profile
+            applyKnob(&updated.warmth, 0.10)
+            applyKnob(&updated.formality, -0.10)
+            return outcome(source: "explicit_feedback",
+                           reason: "less_robotic",
+                           deltas: ["warmth+0.10", "formality-0.10"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["more detail"]) {
+            var updated = profile
+            applyKnob(&updated.directness, -0.10)
+            applyKnob(&updated.curiosity, 0.05)
+            return outcome(source: "explicit_feedback",
+                           reason: "more_detail",
+                           deltas: ["directness-0.10", "curiosity+0.05"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["less detail"]) {
+            var updated = profile
+            applyKnob(&updated.directness, explicitDelta)
+            return outcome(source: "explicit_feedback",
+                           reason: "less_detail",
+                           deltas: ["directness+0.15"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["use humor lightly"]) {
+            var updated = profile
+            applyKnob(&updated.humor, 0.10)
+            return outcome(source: "explicit_feedback",
+                           reason: "light_humor",
+                           deltas: ["humor+0.10"],
+                           updated: updated)
+        }
+
+        return nil
+    }
+
+    private static func implicitUpdate(for lower: String,
+                                       profile: TonePreferenceProfile) -> TonePreferenceLearningOutcome? {
+        if hasAny(lower, ["too long", "too much"]) {
+            var updated = profile
+            applyKnob(&updated.directness, implicitDelta)
+            applyKnob(&updated.hedging, -0.05)
+            return outcome(source: "implicit_feedback",
+                           reason: "too_long",
+                           deltas: ["directness+0.05", "hedging-0.05"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["that's not what i meant", "thats not what i meant"]) {
+            var updated = profile
+            applyKnob(&updated.curiosity, implicitDelta)
+            return outcome(source: "implicit_feedback",
+                           reason: "clarification_miss",
+                           deltas: ["curiosity+0.05"],
+                           updated: updated)
+        }
+
+        if hasAny(lower, ["just tell me what to do"]) {
+            var updated = profile
+            applyKnob(&updated.directness, implicitDelta)
+            applyKnob(&updated.curiosity, -implicitDelta)
+            return outcome(source: "implicit_feedback",
+                           reason: "just_tell_me",
+                           deltas: ["directness+0.05", "curiosity-0.05"],
+                           updated: updated)
+        }
+
+        return nil
+    }
+
+    private static func shouldSkipImplicitLearning(for lower: String, mode: ConversationMode) -> Bool {
+        if mode.domain == .health && mode.intent == .problemReport {
+            return true
+        }
+
+        let medicalMarkers = [
+            "chest pain", "chest tightness", "fever", "vomit", "vomiting", "diarrhea",
+            "nausea", "bleeding", "blood", "faint", "can't breathe", "cant breathe", "symptom"
+        ]
+        if hasAny(lower, medicalMarkers) {
+            return true
+        }
+
+        let crisisMarkers = [
+            "suicidal", "suicide", "self harm", "kill myself", "hopeless", "panic attack", "crisis"
+        ]
+        if hasAny(lower, crisisMarkers) {
+            return true
+        }
+
+        let confessionMarkers = [
+            "i feel worthless", "i am worthless", "my trauma", "i was abused", "grieving",
+            "i cheated", "deeply personal"
+        ]
+        return hasAny(lower, confessionMarkers)
+    }
+
+    private static func outcome(source: String,
+                                reason: String,
+                                deltas: [String],
+                                updated: TonePreferenceProfile) -> TonePreferenceLearningOutcome {
+        var profile = updated
+        profile.clampKnobs()
+        return TonePreferenceLearningOutcome(
+            source: source,
+            reason: reason,
+            deltaSummary: deltas.joined(separator: " "),
+            profile: profile
+        )
+    }
+
+    private static func applyKnob(_ value: inout Double, _ delta: Double) {
+        value = min(1.0, max(0.0, value + delta))
+    }
+
+    private static func normalized(_ input: String) -> String {
+        input
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func hasAny(_ haystack: String, _ needles: [String]) -> Bool {
+        needles.contains { haystack.contains($0) }
+    }
+}
+
 enum UserGoalHint: String, CaseIterable, Codable {
     case quickFix = "quick_fix"
     case understand
@@ -90,6 +568,8 @@ struct ResponseLengthBudget: Codable, Equatable {
 
 struct PromptRuntimeContext: Equatable {
     let mode: ConversationMode
+    let affect: AffectMetadata
+    let tonePreferences: TonePreferenceProfile?
     let sessionSummary: String
     let interactionStateJSON: String
     let responseBudget: ResponseLengthBudget
@@ -496,6 +976,252 @@ private enum ConversationModeClassifier {
     }
 }
 
+private enum ConversationAffectClassifier {
+    private struct AffectSignals {
+        var weak = 0
+        var strong = 0
+    }
+
+    private static let frustratedKeywords = [
+        "frustrat",
+        "fed up",
+        "annoyed",
+        "sick of",
+        "ridiculous",
+        "tired of",
+        "again?"
+    ]
+    private static let anxiousKeywords = [
+        "worried",
+        "nervous",
+        "scared",
+        "anxious",
+        "uneasy",
+        "stressed",
+        "panic"
+    ]
+    private static let angryPhrases = [
+        "this is bullshit",
+        "i'm pissed",
+        "im pissed",
+        "i am pissed",
+        "so angry"
+    ]
+    private static let strongSwears = [
+        "bullshit",
+        "fucking",
+        "fuck",
+        "shit",
+        "goddamn",
+        "damn it"
+    ]
+    private static let excitedKeywords = [
+        "yay",
+        "awesome",
+        "amazing",
+        "so excited",
+        "can't wait",
+        "cant wait"
+    ]
+
+    static func classify(_ input: String, history: [ChatMessage]) -> AffectMetadata {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .neutral }
+        let lower = trimmed.lowercased()
+
+        let repetitionSignal = hasRepetitionSignal(lower, history: history)
+        let capsSignal = hasAllCapsSegment(in: trimmed)
+        let strongLanguageSignal = hasAny(lower, strongSwears) || hasAny(lower, angryPhrases)
+
+        let frustrated = detectFrustratedSignals(lower, repetitionSignal: repetitionSignal)
+        let anxious = detectAnxiousSignals(lower)
+        let sad = detectSadSignals(lower)
+        let angry = detectAngrySignals(lower, capsSignal: capsSignal, strongLanguageSignal: strongLanguageSignal)
+        let excited = detectExcitedSignals(lower)
+
+        let ranked: [(ConversationAffect, AffectSignals)] = [
+            (.frustrated, frustrated),
+            (.anxious, anxious),
+            (.sad, sad),
+            (.angry, angry),
+            (.excited, excited)
+        ]
+
+        let affectPriority: [ConversationAffect] = [.angry, .anxious, .sad, .frustrated, .excited]
+        guard let best = ranked.max(by: { lhs, rhs in
+            let lhsScore = weightedScore(lhs.1)
+            let rhsScore = weightedScore(rhs.1)
+            if lhsScore == rhsScore {
+                let lhsPriority = affectPriority.firstIndex(of: lhs.0) ?? affectPriority.count
+                let rhsPriority = affectPriority.firstIndex(of: rhs.0) ?? affectPriority.count
+                return lhsPriority > rhsPriority
+            }
+            return lhsScore < rhsScore
+        }), weightedScore(best.1) > 0 else {
+            return .neutral
+        }
+
+        let intensity = intensityForSignals(
+            best.1,
+            capsSignal: capsSignal,
+            strongLanguageSignal: strongLanguageSignal,
+            repetitionSignal: repetitionSignal
+        )
+        return AffectMetadata(affect: best.0, intensity: intensity)
+    }
+
+    private static func detectFrustratedSignals(_ lower: String, repetitionSignal: Bool) -> AffectSignals {
+        var signals = AffectSignals()
+        signals.weak += countMatches(lower, frustratedKeywords)
+        if lower.contains("why does this always") || lower.contains("why is this always") {
+            signals.strong += 1
+        }
+        if lower.contains("again") && (lower.contains("why") || lower.contains("always") || lower.contains("keeps")) {
+            signals.weak += 1
+        }
+        if repetitionSignal {
+            signals.weak += 1
+        }
+        return signals
+    }
+
+    private static func detectAnxiousSignals(_ lower: String) -> AffectSignals {
+        var signals = AffectSignals()
+        signals.weak += countMatches(lower, anxiousKeywords)
+        if lower.contains("panic attack") {
+            signals.strong += 1
+        }
+        return signals
+    }
+
+    private static func detectSadSignals(_ lower: String) -> AffectSignals {
+        var signals = AffectSignals()
+        let emotionalFrame = hasAny(lower, [
+            "i feel",
+            "i'm feeling",
+            "im feeling",
+            "i am feeling",
+            "i don't feel",
+            "i dont feel",
+            "i'm",
+            "im ",
+            "i am "
+        ])
+
+        if lower.contains("don't feel like") || lower.contains("dont feel like") {
+            signals.strong += 1
+        }
+        if emotionalFrame {
+            if lower.contains(" sad") || lower.hasPrefix("sad") {
+                signals.weak += 1
+            }
+            if lower.contains(" lonely") || lower.hasPrefix("lonely") {
+                signals.weak += 1
+            }
+            if lower.contains(" empty") || lower.hasPrefix("empty") {
+                signals.weak += 1
+            }
+            if lower.contains("feeling down") || lower.contains("feel down") || lower.contains("i'm down") || lower.contains("im down") {
+                signals.weak += 1
+            }
+            if lower.contains(" exhausted") || lower.hasPrefix("exhausted") {
+                signals.weak += 1
+            }
+        }
+        return signals
+    }
+
+    private static func detectAngrySignals(_ lower: String,
+                                           capsSignal: Bool,
+                                           strongLanguageSignal: Bool) -> AffectSignals {
+        var signals = AffectSignals()
+        if capsSignal {
+            signals.strong += 1
+        }
+        if hasAny(lower, angryPhrases) {
+            signals.strong += 1
+        }
+        if strongLanguageSignal {
+            signals.strong += 1
+        }
+        return signals
+    }
+
+    private static func detectExcitedSignals(_ lower: String) -> AffectSignals {
+        var signals = AffectSignals()
+        signals.weak += countMatches(lower, excitedKeywords)
+        if lower.contains("!!!") {
+            signals.strong += 1
+        }
+        return signals
+    }
+
+    private static func weightedScore(_ signals: AffectSignals) -> Int {
+        signals.weak + (signals.strong * 2)
+    }
+
+    private static func intensityForSignals(_ signals: AffectSignals,
+                                            capsSignal: Bool,
+                                            strongLanguageSignal: Bool,
+                                            repetitionSignal: Bool) -> Int {
+        let total = signals.weak + signals.strong
+        if total == 0 {
+            return 0
+        }
+
+        var intensity = 1
+        if total >= 2 || signals.strong > 0 {
+            intensity = 2
+        }
+        if capsSignal && strongLanguageSignal && repetitionSignal {
+            intensity = 3
+        }
+        return min(3, max(0, intensity))
+    }
+
+    private static func hasRepetitionSignal(_ lower: String, history: [ChatMessage]) -> Bool {
+        if hasAny(lower, ["why does this always", "again?", "again", "still", "every time"]) {
+            return true
+        }
+
+        let recentUserTurns = history.reversed()
+            .filter { $0.role == .user }
+            .prefix(3)
+            .map { $0.text.lowercased() }
+        guard !recentUserTurns.isEmpty else { return false }
+
+        let complaintAnchors = [
+            "not working",
+            "keeps",
+            "dropping",
+            "broken",
+            "issue",
+            "problem"
+        ]
+
+        for anchor in complaintAnchors where lower.contains(anchor) {
+            if recentUserTurns.contains(where: { $0.contains(anchor) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func hasAllCapsSegment(in input: String) -> Bool {
+        input.range(of: #"\b[A-Z]{2,}(?:\s+[A-Z]{2,})+\b"#, options: .regularExpression) != nil
+    }
+
+    private static func countMatches(_ haystack: String, _ needles: [String]) -> Int {
+        needles.reduce(0) { partial, needle in
+            partial + (haystack.contains(needle) ? 1 : 0)
+        }
+    }
+
+    private static func hasAny(_ haystack: String, _ needles: [String]) -> Bool {
+        needles.contains { haystack.contains($0) }
+    }
+}
+
 @MainActor
 protocol TurnOrchestrating: AnyObject {
     var pendingSlot: PendingSlot? { get set }
@@ -526,6 +1252,7 @@ func withTimeout<T: Sendable>(_ seconds: Double, _ op: @Sendable @escaping () as
 final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
     private let openAIRouter: OpenAIRouter
+    private let tonePreferenceStore: TonePreferenceStore
     private let summaryService = SessionSummaryService()
     private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
@@ -577,6 +1304,7 @@ final class TurnOrchestrator {
         let ollama = OllamaRouter()
         self.ollamaRouter = ollama
         self.openAIRouter = OpenAIRouter(parser: ollama)
+        self.tonePreferenceStore = .shared
         self.memoryAckCooldownTurns = 20
         self.followUpCooldownTurns = 3
     }
@@ -588,6 +1316,7 @@ final class TurnOrchestrator {
          followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
         self.openAIRouter = openAIRouter
+        self.tonePreferenceStore = .shared
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
         self.followUpCooldownTurns = max(1, followUpCooldownTurns)
     }
@@ -600,6 +1329,29 @@ final class TurnOrchestrator {
         let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
         let mode = ConversationModeClassifier.classify(text)
+        let rawAffect = ConversationAffectClassifier.classify(text, history: history)
+        let affectMirroringEnabled = M2Settings.affectMirroringEnabled
+        let useEmotionalTone = M2Settings.useEmotionalTone
+        var toneProfile = tonePreferenceStore.loadProfile()
+        if let learningOutcome = TonePreferenceLearner.learn(
+            from: text,
+            mode: mode,
+            affect: rawAffect,
+            profile: toneProfile,
+            useEmotionalTone: useEmotionalTone,
+            updatesToday: tonePreferenceStore.updatesToday(now: now)
+        ) {
+            toneProfile = tonePreferenceStore.applyLearningOutcome(learningOutcome, at: now)
+            logToneLearning(outcome: learningOutcome, profile: toneProfile)
+        }
+        let effectiveToneProfile = (toneProfile.enabled && useEmotionalTone) ? toneProfile : nil
+        let effectiveAffect: AffectMetadata = (affectMirroringEnabled && useEmotionalTone)
+            ? rawAffect
+            : .neutral
+        logAffectClassification(raw: rawAffect,
+                                effective: effectiveAffect,
+                                featureEnabled: affectMirroringEnabled,
+                                userToneEnabled: useEmotionalTone)
         intentRepetitionTracker.record(mode.intent, at: now)
         purgeExpiredFacts(now: now)
         updateRecentFacts(with: text, mode: mode, now: now)
@@ -611,6 +1363,8 @@ final class TurnOrchestrator {
         )
         let promptContext = buildPromptRuntimeContext(
             mode: mode,
+            affect: effectiveAffect,
+            tonePreferences: effectiveToneProfile,
             userInput: text,
             history: history,
             sessionSummary: sessionSummary,
@@ -1118,6 +1872,8 @@ final class TurnOrchestrator {
     }
 
     private func buildPromptRuntimeContext(mode: ConversationMode,
+                                           affect: AffectMetadata,
+                                           tonePreferences: TonePreferenceProfile?,
                                            userInput: String,
                                            history: [ChatMessage],
                                            sessionSummary: String,
@@ -1132,6 +1888,11 @@ final class TurnOrchestrator {
             "active_topic": activeTopic,
             "last_assistant_question": lastAssistantQuestion ?? "",
             "last_question_answered": lastAssistantQuestionAnswered,
+            "affect": [
+                "affect": affect.affect.rawValue,
+                "intensity": affect.clampedIntensity,
+                "guidance": affect.guidance
+            ],
             "repetition_by_intent": repetition,
             "last_assistant_openers": Array(lastAssistantOpeners.suffix(2)),
             "recent_facts_ttl": Array(facts)
@@ -1139,6 +1900,8 @@ final class TurnOrchestrator {
         let interactionStateJSON = compactJSONString(from: compactState) ?? "{}"
         return PromptRuntimeContext(
             mode: mode,
+            affect: affect,
+            tonePreferences: tonePreferences,
             sessionSummary: sessionSummary,
             interactionStateJSON: interactionStateJSON,
             responseBudget: responseLengthBudget(for: mode, userInput: userInput, history: history)
@@ -1323,6 +2086,14 @@ final class TurnOrchestrator {
 
     func debugClassify(_ input: String) -> ConversationMode {
         ConversationModeClassifier.classify(input)
+    }
+
+    func debugDetectAffect(_ input: String, history: [ChatMessage] = []) -> AffectMetadata {
+        ConversationAffectClassifier.classify(input, history: history)
+    }
+
+    func debugToneProfile() -> TonePreferenceProfile {
+        tonePreferenceStore.loadProfile()
     }
     #endif
 
@@ -2167,6 +2938,35 @@ final class TurnOrchestrator {
         #if DEBUG
         print("[ROUTER] provider=\(provider) reason=\(reason) ms=\(ms) ok=\(ok)")
         #endif
+    }
+
+    private func logAffectClassification(raw: AffectMetadata,
+                                         effective: AffectMetadata,
+                                         featureEnabled: Bool,
+                                         userToneEnabled: Bool) {
+        #if DEBUG
+        print(
+            "[AFFECT] raw=\(raw.affect.rawValue):\(raw.clampedIntensity) " +
+            "effective=\(effective.affect.rawValue):\(effective.clampedIntensity) " +
+            "feature=\(featureEnabled) user_tone=\(userToneEnabled)"
+        )
+        #endif
+    }
+
+    private func logToneLearning(outcome: TonePreferenceLearningOutcome, profile: TonePreferenceProfile) {
+        #if DEBUG
+        print("[TONE_LEARN] reason=\(outcome.source).\(outcome.reason) delta=\(outcome.deltaSummary)")
+        print(
+            "[TONE_PROFILE] directness=\(formatToneValue(profile.directness)) " +
+            "warmth=\(formatToneValue(profile.warmth)) humor=\(formatToneValue(profile.humor)) " +
+            "curiosity=\(formatToneValue(profile.curiosity)) reassurance=\(formatToneValue(profile.reassurance)) " +
+            "formality=\(formatToneValue(profile.formality)) hedging=\(formatToneValue(profile.hedging))"
+        )
+        #endif
+    }
+
+    private func formatToneValue(_ value: Double) -> String {
+        String(format: "%.2f", value)
     }
 
     private func elapsedMs(since start: Date) -> Int {
