@@ -1936,7 +1936,7 @@ final class TurnOrchestrator {
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-            return (friendlyFallbackPlan(error), .none, ms, nil, "ollama_error_fallback")
+            return (friendlyFallbackPlan(error), .ollama, ms, nil, "ollama_error_fallback")
         }
     }
 
@@ -2464,7 +2464,10 @@ final class TurnOrchestrator {
             "what do you see",
             "what can you see",
             "describe the camera",
-            "describe what you see"
+            "describe what you see",
+            "show me what",
+            "what's in front of",
+            "what's happening"
         ]
         if describePhrases.contains(where: { lower.contains($0) }) {
             return .describe
@@ -2477,6 +2480,8 @@ final class TurnOrchestrator {
         if lower.contains("do you see")
             || lower.contains("can you see")
             || lower.contains("are there")
+            || lower.contains("who is in the room")
+            || lower.contains("who s in the room")
             || lower.range(of: #"\bis\s+the\b.*\b(open|closed|visible)\b"#, options: .regularExpression) != nil {
             return .visualQA(question: trimmed)
         }
@@ -2918,23 +2923,17 @@ final class TurnOrchestrator {
     private func classifyUnknownToolFailure(toolName: String, userText: String) -> CapabilityGapRequestKind {
         let toolLower = toolName.lowercased()
         let userLower = userText.lowercased()
-        let externalMarkers = [
-            "listings",
-            "showtimes",
-            "prices",
-            "weather",
-            "scores",
-            "news",
-            "availability",
-            "bookings",
-            "cinema",
-            "flights",
-            "tickets"
+        let buildMarkers = [
+            "automat",
+            "remind",
+            "notif",
+            "workflow",
+            "routine"
         ]
-        if externalMarkers.contains(where: { toolLower.contains($0) || userLower.contains($0) }) {
-            return .externalSource
+        if buildMarkers.contains(where: { toolLower.contains($0) || userLower.contains($0) }) {
+            return .capabilityBuild
         }
-        return .capabilityBuild
+        return .externalSource
     }
 
     private func canonicalEnrollmentPlanIfNeeded(toolName: String,
@@ -3068,10 +3067,25 @@ final class TurnOrchestrator {
         let normalized = normalizeForComparison(text)
         let phrases = [
             "i can t see",
+            "i cannot see",
             "i don t have the ability to see",
             "i do not have the ability to see",
             "i can t recognize images",
-            "i cannot recognize images"
+            "i cannot recognize images",
+            "i m unable to see",
+            "i am unable to see",
+            "i can t view",
+            "i cannot view",
+            "i have no visual",
+            "i don t have visual",
+            "i lack the ability to see",
+            "i m not able to see",
+            "i am not able to see",
+            "i can t look at",
+            "i cannot look at",
+            "i don t have eyes",
+            "i do not have eyes",
+            "i can t perceive"
         ]
         return phrases.contains(where: { normalized.contains($0) })
     }
@@ -4588,13 +4602,7 @@ final class TurnOrchestrator {
         return "OpenAI rejected the request (\(statusText)). Please check your API key in Settings -> OpenAI (it may be missing, invalid, expired, or revoked)."
     }
 
-    private func fallbackResult(_ error: Error) -> TurnResult {
-        var result = TurnResult()
-        let msg = "Sorry, I ran into an issue: \(error.localizedDescription)"
-        result.appendedChat.append(ChatMessage(role: .assistant, text: msg))
-        result.spokenLines.append(msg)
-        return result
-    }
+    // fallbackResult() removed — dead code; all error paths use friendlyFallbackPlan().
 }
 
 extension TurnOrchestrator: TurnOrchestrating {}

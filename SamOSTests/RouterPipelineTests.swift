@@ -4961,6 +4961,134 @@ final class StabilityRegressionTests: XCTestCase {
                           "Follow-up transcript should trigger a new turn without wake word")
     }
 
+    // MARK: - Lockdown audit regression tests
+
+    func testBlindnessGuardrailCatchesAlternativePhrasings() async {
+        let phrases = [
+            "I'm unable to see anything right now.",
+            "I am not able to see images.",
+            "I cannot view your surroundings.",
+            "I don't have eyes to look at things.",
+            "I lack the ability to see what's around you.",
+            "I can't perceive the environment."
+        ]
+
+        for phrase in phrases {
+            let fakeOpenAI = FakeOpenAITransport()
+            fakeOpenAI.queuedResponses = [
+                .success(#"{"action":"TALK","say":"\#(phrase)"}"#)
+            ]
+            let fakeOllama = FakeOllamaTransportForPipeline()
+            let camera = makeHealthyCamera()
+            camera.sceneDescription = CameraSceneDescription(summary: "A desk with a monitor.", labels: [], recognizedText: [], capturedAt: Date())
+
+            let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
+            let result = await orchestrator.processTurn("What's around me?", history: [])
+
+            let combined = combinedAssistantText(result).lowercased()
+            XCTAssertTrue(
+                result.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }),
+                "Blindness guardrail should catch: \(phrase)"
+            )
+            XCTAssertFalse(
+                combined.contains("unable to see") || combined.contains("can't view") || combined.contains("lack the ability"),
+                "Blindness claim should be replaced for: \(phrase)"
+            )
+        }
+    }
+
+    func testVisionQueryDetectsNewPatterns() async {
+        let queries = [
+            "Show me what's on the table",
+            "What's happening in the room?",
+            "Who is in the room?"
+        ]
+
+        for query in queries {
+            let fakeOpenAI = FakeOpenAITransport()
+            let fakeOllama = FakeOllamaTransportForPipeline()
+            let camera = makeHealthyCamera()
+            camera.sceneDescription = CameraSceneDescription(summary: "A desk and a monitor.", labels: [], recognizedText: [], capturedAt: Date())
+
+            configureOpenAIForTests()
+
+            let ollamaRouter = OllamaRouter(transport: fakeOllama)
+            let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+            let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+            let result = await orchestrator.processTurn(query, history: [])
+
+            let hasVisionTool = result.executedToolSteps.contains(where: {
+                $0.name == "describe_camera_view" || $0.name == "find_camera_objects" || $0.name == "camera_visual_qa"
+            })
+            XCTAssertTrue(hasVisionTool, "Vision query should route to camera tool for: \(query)")
+        }
+    }
+
+    func testUnknownToolDefaultsToExternalSource() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"check_inventory","args":{"item":"monitor"}}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        configureOpenAIForTests()
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Check if monitors are in stock", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.isEmpty, "Unknown tool must never be executed")
+        XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site",
+                       "Generic unknown tool should default to external-source ask, not capability-build")
+    }
+
+    func testUnknownToolAutomationGoesToCapabilityBuild() async {
+        let raw = """
+        {"action":"PLAN","steps":[{"step":"tool","name":"create_automation","args":{"trigger":"daily"}}]}
+        """
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(raw)]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        configureOpenAIForTests()
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Create an automation to remind me daily", history: [])
+
+        XCTAssertTrue(result.executedToolSteps.isEmpty, "Unknown tool must never be executed")
+        XCTAssertNotEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site",
+                          "Automation-related tool should NOT enter external-source ask flow")
+        let combined = combinedAssistantText(result).lowercased()
+        XCTAssertTrue(
+            combined.contains("can't do that directly") || combined.contains("learn") || combined.contains("build") || combined.contains("teach"),
+            "Automation-related unknown tool should suggest capability building, got: \(combined)"
+        )
+    }
+
+    func testOllamaErrorFallbackPreservesProvider() async {
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [.failure(URLError(.notConnectedToInternet))]
+
+        OpenAISettings.apiKey = ""
+        OpenAISettings._resetCacheForTesting()
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: FakeOpenAITransport())
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hello", history: [])
+
+        XCTAssertEqual(result.llmProvider, .ollama, "Ollama error fallback should preserve .ollama provider")
+    }
+
     // MARK: - Helpers
 
     private func configureOpenAIForTests() {
