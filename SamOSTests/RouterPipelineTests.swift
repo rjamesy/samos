@@ -3084,6 +3084,523 @@ final class RouterPipelineTests: XCTestCase {
         #endif
     }
 
+    // MARK: - Q) Live OpenAI tone validation
+
+    private func shouldRunLiveToneValidation() -> Bool {
+        ProcessInfo.processInfo.environment["RUN_LIVE_OPENAI_TONE_VALIDATION"] == "1"
+            || FileManager.default.fileExists(atPath: "/tmp/run_live_openai_tone")
+    }
+
+    private func requireLiveOpenAIKeyForTests() throws -> String {
+        let productionKey = KeychainStore.get(forKey: "apiKey", service: "com.samos.openai")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !productionKey.isEmpty else {
+            throw XCTSkip("No production OpenAI key found in Keychain")
+        }
+        OpenAISettings.apiKey = productionKey
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = productionKey
+        return productionKey
+    }
+
+    private func makeLiveOrchestrator() throws -> TurnOrchestrator {
+        _ = try requireLiveOpenAIKeyForTests()
+        M2Settings.useOllama = false
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter)
+        return TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+    }
+
+    private func firstSentence(in text: String) -> String {
+        text
+            .split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" })
+            .first
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+    }
+
+    private func isTransientModelFallback(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("had trouble generating a response")
+            || lower.contains("had trouble processing that")
+            || lower.contains("took too long")
+            || lower.contains("please try again")
+    }
+
+    private func processTurnWithLiveRetry(_ orchestrator: TurnOrchestrator,
+                                          _ text: String,
+                                          history: [ChatMessage],
+                                          retries: Int = 2) async throws -> TurnResult {
+        var lastResult = TurnResult()
+        for attempt in 0...retries {
+            let result = await orchestrator.processTurn(text, history: history)
+            lastResult = result
+            let assistantText = (result.appendedChat.last(where: { $0.role == .assistant })?.text ?? "")
+            if !isTransientModelFallback(assistantText) {
+                return result
+            }
+            if attempt == retries {
+                throw XCTSkip("Live model returned only transient fallback responses after \(retries + 1) attempts")
+            }
+        }
+        return lastResult
+    }
+
+    private func countQuestions(in text: String) -> Int {
+        text.reduce(0) { partial, ch in partial + (ch == "?" ? 1 : 0) }
+    }
+
+    private func assistantTextParts(from result: TurnResult) -> (opening: String, combined: String) {
+        let assistantLines = result.appendedChat
+            .filter { $0.role == .assistant }
+            .map { $0.text.lowercased() }
+        return (assistantLines.first ?? "", assistantLines.joined(separator: " "))
+    }
+
+    private func assertPromptBlockOrder(_ prompt: String, markers: [String], file: StaticString = #filePath, line: UInt = #line) {
+        var lastIndex = prompt.startIndex
+        for marker in markers {
+            guard let range = prompt.range(of: marker, range: lastIndex..<prompt.endIndex) else {
+                XCTFail("Missing block marker: \(marker)", file: file, line: line)
+                return
+            }
+            lastIndex = range.lowerBound
+        }
+    }
+
+    private func assertEmotionalOpening(_ text: String,
+                                        markers: [String],
+                                        allowGenericAcknowledgement: Bool = true,
+                                        file: StaticString = #filePath,
+                                        line: UInt = #line) {
+        let opening = firstSentence(in: text)
+        XCTAssertFalse(opening.isEmpty, file: file, line: line)
+        let genericMarkers = [
+            "that sounds",
+            "i get why",
+            "i can see why",
+            "i hear you",
+            "i'm sorry",
+            "im sorry",
+            "sorry you're dealing",
+            "sorry you’re dealing",
+            "sorry you're having trouble",
+            "sorry you’re having trouble",
+            "rough time"
+        ]
+        let markerMatch = markers.contains(where: { opening.contains($0) })
+        let genericMatch = allowGenericAcknowledgement && genericMarkers.contains(where: { opening.contains($0) })
+        XCTAssertTrue(markerMatch || genericMatch,
+                      "Opening sentence should contain expected affect marker. opening=\(opening)",
+                      file: file,
+                      line: line)
+    }
+
+    private func emotionalSentenceCount(in text: String) -> Int {
+        let emotionalMarkers = [
+            "frustrating",
+            "worrying",
+            "unsettling",
+            "sorry",
+            "heavy",
+            "intense",
+            "awesome",
+            "great news",
+            "love that energy"
+        ]
+        let sentences = text
+            .split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return sentences.reduce(0) { partial, sentence in
+            partial + (emotionalMarkers.contains(where: { sentence.contains($0) }) ? 1 : 0)
+        }
+    }
+
+    @MainActor
+    func testAffectMirroringEnabledOnly() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = false
+        TonePreferenceStore.shared.replaceProfileForTesting(profile, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        let result = try await processTurnWithLiveRetry(
+            orchestrator,
+            "This is ridiculous and annoying. Give me quick troubleshooting steps.",
+            history: []
+        )
+        XCTAssertEqual(result.llmProvider, .openai)
+
+        let assistantText = assistantTextParts(from: result).opening
+        assertEmotionalOpening(
+            assistantText,
+            markers: ["frustrat", "annoy", "i get", "i can see why", "that sounds", "sorry you're dealing with this"]
+        )
+
+        let context = try XCTUnwrap(orchestrator.debugLastPromptContext())
+        let prompt = PromptBuilder.buildSystemPrompt(forInput: "This is ridiculous and annoying. Give me quick troubleshooting steps.", promptContext: context, includeLongToolExamples: false)
+        XCTAssertTrue(prompt.contains("AFFECT_GUIDANCE"))
+        XCTAssertFalse(prompt.contains("TONE_PREFERENCES"))
+    }
+
+    @MainActor
+    func testMirroringWithoutLearning() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        let baseline = TonePreferenceProfile.neutralDefaults
+        TonePreferenceStore.shared.replaceProfileForTesting(baseline, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        _ = try await processTurnWithLiveRetry(orchestrator, "This is ridiculous and annoying", history: [])
+        let profileAfter = TonePreferenceStore.shared.loadProfile()
+        XCTAssertEqual(profileAfter, baseline, "Mirroring-only mode must not update tone profile")
+        XCTAssertNil(TonePreferenceStore.shared.debugLastUpdateReason())
+    }
+
+    @MainActor
+    func testToneLearningExplicitFeedback() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        TonePreferenceStore.shared.replaceProfileForTesting(profile, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        var history: [ChatMessage] = []
+        let first = try await processTurnWithLiveRetry(
+            orchestrator,
+            "Help me plan my day so I stop procrastinating.",
+            history: history
+        )
+        history.append(ChatMessage(role: .user, text: "Help me plan my day so I stop procrastinating."))
+        history.append(contentsOf: first.appendedChat)
+
+        let repair = try await processTurnWithLiveRetry(orchestrator, "be more direct", history: history)
+        history.append(ChatMessage(role: .user, text: "be more direct"))
+        history.append(contentsOf: repair.appendedChat)
+
+        let repairText = (repair.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        XCTAssertTrue(
+            repairText.contains("understood") || repairText.contains("got it") || repairText.contains("thanks for the feedback"),
+            "Expected tone-repair acknowledgement in live response: \(repairText)"
+        )
+
+        let updated = TonePreferenceStore.shared.loadProfile()
+        XCTAssertGreaterThanOrEqual(updated.directness - profile.directness, 0.10)
+
+        let second = try await processTurnWithLiveRetry(
+            orchestrator,
+            "Help me plan my day so I stop procrastinating.",
+            history: history
+        )
+        let secondText = (second.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        XCTAssertLessThanOrEqual(countQuestions(in: secondText), 1)
+
+        let context = try XCTUnwrap(orchestrator.debugLastPromptContext())
+        let prompt = PromptBuilder.buildSystemPrompt(forInput: "Help me plan my day so I stop procrastinating.", promptContext: context, includeLongToolExamples: false)
+        XCTAssertTrue(prompt.contains("TONE_PREFERENCES"))
+        XCTAssertTrue(prompt.contains("d=0.65") || prompt.contains("d=0.6"))
+    }
+
+    @MainActor
+    func testToneLearningReduceQuestions() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        TonePreferenceStore.shared.replaceProfileForTesting(profile, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        var history: [ChatMessage] = []
+        let feedbackTurn = try await processTurnWithLiveRetry(
+            orchestrator,
+            "don't ask so many questions anymore",
+            history: history
+        )
+        history.append(ChatMessage(role: .user, text: "don't ask so many questions anymore"))
+        history.append(contentsOf: feedbackTurn.appendedChat)
+
+        let updated = TonePreferenceStore.shared.loadProfile()
+        XCTAssertLessThanOrEqual(updated.curiosity, 0.45)
+        XCTAssertTrue(updated.preferOneQuestionMax)
+
+        let next = try await processTurnWithLiveRetry(orchestrator, "Help me improve my morning routine.", history: history)
+        let text = (next.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        XCTAssertLessThanOrEqual(countQuestions(in: text), 1, "Expected one question max after explicit feedback")
+
+        let context = try XCTUnwrap(orchestrator.debugLastPromptContext())
+        let prompt = PromptBuilder.buildSystemPrompt(forInput: "Help me improve my morning routine.", promptContext: context, includeLongToolExamples: false)
+        XCTAssertTrue(prompt.contains("TONE_PREFERENCES"))
+        XCTAssertTrue(prompt.contains("one_q_max=true"))
+    }
+
+    @MainActor
+    func testTonePreferencesResetLivePrompt() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.directness = 0.90
+        profile.warmth = 0.20
+        TonePreferenceStore.shared.replaceProfileForTesting(profile)
+        _ = TonePreferenceStore.shared.resetProfile()
+
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        _ = try await processTurnWithLiveRetry(orchestrator, "Help me plan my week.", history: [])
+
+        let context = try XCTUnwrap(orchestrator.debugLastPromptContext())
+        let prompt = PromptBuilder.buildSystemPrompt(forInput: "Help me plan my week.", promptContext: context, includeLongToolExamples: false)
+        XCTAssertTrue(prompt.contains("TONE_PREFERENCES"))
+        XCTAssertTrue(prompt.contains("d=0.50"), "Reset profile should render neutral defaults in prompt")
+        XCTAssertFalse(prompt.contains("d=0.90"), "Reset profile should not keep prior custom directness")
+    }
+
+    @MainActor
+    func testToneRepairImmediateAdjustment() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        TonePreferenceStore.shared.replaceProfileForTesting(profile, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        let result = try await processTurnWithLiveRetry(orchestrator, "that’s too emotional", history: [])
+        let text = (result.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        XCTAssertTrue(
+            text.contains("understood") || text.contains("got it") || text.contains("thanks for the feedback"),
+            "Expected immediate tone repair acknowledgement: \(text)"
+        )
+
+        let updated = TonePreferenceStore.shared.loadProfile()
+        XCTAssertGreaterThan(updated.directness, profile.directness)
+        XCTAssertLessThan(updated.warmth, profile.warmth)
+        XCTAssertLessThan(updated.reassurance, profile.reassurance)
+        XCTAssertTrue(updated.preferOneQuestionMax)
+    }
+
+    @MainActor
+    func testToneRepairNextTurnBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        TonePreferenceStore.shared.replaceProfileForTesting(profile, lastUpdateReason: nil)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+
+        var history: [ChatMessage] = []
+        let first = try await processTurnWithLiveRetry(orchestrator, "no, don't be so cheerful", history: history)
+        history.append(ChatMessage(role: .user, text: "no, don't be so cheerful"))
+        history.append(contentsOf: first.appendedChat)
+
+        let second = try await processTurnWithLiveRetry(
+            orchestrator,
+            "This is ridiculous and annoying, my wifi drops every hour.",
+            history: history
+        )
+        let secondText = (second.appendedChat.last(where: { $0.role == .assistant })?.text ?? "").lowercased()
+        let outputText = second.appendedOutputs.map { $0.payload.lowercased() }.joined(separator: "\n")
+        let practicalCorpus = secondText + "\n" + outputText
+        XCTAssertFalse(
+            secondText.contains("yay") || secondText.contains("awesome") || secondText.contains("great news"),
+            "Next-turn response should stay grounded after tone repair"
+        )
+        XCTAssertTrue(
+            practicalCorpus.contains("restart")
+                || practicalCorpus.contains("check")
+                || practicalCorpus.contains("step")
+                || practicalCorpus.contains("troubleshoot"),
+            "Expected practical follow-up after tone repair"
+        )
+    }
+
+    @MainActor
+    func testLiveOpenAIFrustratedBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        let input = "This is ridiculous and annoying, the app keeps freezing. Give me quick troubleshooting steps."
+
+        let result = try await processTurnWithLiveRetry(orchestrator, input, history: [])
+        let parts = assistantTextParts(from: result)
+        assertEmotionalOpening(parts.opening, markers: ["frustrat", "annoy", "i can see why", "i get why"])
+        XCTAssertLessThanOrEqual(emotionalSentenceCount(in: parts.combined), 1)
+        XCTAssertTrue(
+            parts.combined.contains("step")
+                || parts.combined.contains("restart")
+                || parts.combined.contains("check")
+                || parts.combined.contains("quick fix")
+                || parts.combined.contains("more info")
+                || parts.combined.contains("error message")
+        )
+    }
+
+    @MainActor
+    func testLiveOpenAIAnxiousBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        let input = "I'm really worried I'll mess up this presentation tomorrow. Give me a practical plan."
+
+        let result = try await processTurnWithLiveRetry(orchestrator, input, history: [])
+        let parts = assistantTextParts(from: result)
+        assertEmotionalOpening(
+            parts.opening,
+            markers: [
+                "worry",
+                "step by step",
+                "unsettling",
+                "we can",
+                "normal to feel nervous",
+                "normal to feel that way",
+                "normal to feel this way",
+                "feel nervous"
+            ]
+        )
+        XCTAssertLessThanOrEqual(emotionalSentenceCount(in: parts.combined), 1)
+        XCTAssertTrue(parts.combined.contains("plan") || parts.combined.contains("step") || parts.combined.contains("practice"))
+    }
+
+    @MainActor
+    func testLiveOPAIySadBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        let input = "I feel down today and can't focus. Give me two practical steps to start."
+
+        let result = try await processTurnWithLiveRetry(orchestrator, input, history: [])
+        let parts = assistantTextParts(from: result)
+        assertEmotionalOpening(parts.opening, markers: ["sorry", "tough", "heavy", "i hear you"])
+        XCTAssertLessThanOrEqual(emotionalSentenceCount(in: parts.combined), 1)
+        XCTAssertTrue(
+            parts.combined.contains("step")
+                || parts.combined.contains("start")
+                || parts.combined.contains("try")
+                || parts.combined.contains("practical")
+                || parts.combined.contains("quick suggestion")
+        )
+    }
+
+    @MainActor
+    func testLiveOpenAIAngryBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        let input = "THIS IS BROKEN AND I'M PISSED. Tell me what to do first."
+
+        let result = try await processTurnWithLiveRetry(orchestrator, input, history: [])
+        let parts = assistantTextParts(from: result)
+        assertEmotionalOpening(parts.opening, markers: ["intense", "frustrat", "let's slow", "slow this down"])
+        XCTAssertLessThanOrEqual(emotionalSentenceCount(in: parts.combined), 1)
+        let outputText = result.appendedOutputs.map { $0.payload.lowercased() }.joined(separator: "\n")
+        let practicalCorpus = parts.combined + "\n" + outputText
+        XCTAssertTrue(
+            practicalCorpus.contains("first")
+                || practicalCorpus.contains("step")
+                || practicalCorpus.contains("check")
+                || practicalCorpus.contains("troubleshoot")
+                || practicalCorpus.contains("restart")
+                || practicalCorpus.contains("error message")
+                || practicalCorpus.contains("when it started")
+                || practicalCorpus.contains("what exactly")
+                || practicalCorpus.contains("quick")
+                || practicalCorpus.contains("try")
+                || practicalCorpus.contains("issue")
+        )
+    }
+
+    @MainActor
+    func testLiveOpenAIExcitedBehavior() async throws {
+        guard shouldRunLiveToneValidation() else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_TONE_VALIDATION=1 to run live tone tests")
+        }
+        let orchestrator = try makeLiveOrchestrator()
+        TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.affectMirroringEnabled = true
+        M2Settings.useEmotionalTone = true
+        let input = "Yay this finally worked!!! What should I do next to lock it in?"
+
+        let result = try await processTurnWithLiveRetry(orchestrator, input, history: [])
+        let parts = assistantTextParts(from: result)
+        assertEmotionalOpening(
+            parts.opening,
+            markers: ["awesome", "great", "nice", "love that energy"],
+            allowGenericAcknowledgement: false
+        )
+        XCTAssertLessThanOrEqual(emotionalSentenceCount(in: parts.combined), 1)
+        XCTAssertTrue(parts.combined.contains("next") || parts.combined.contains("save") || parts.combined.contains("validate") || parts.combined.contains("step"))
+    }
+
+    @MainActor
+    func testPromptBlockOrderingAndCriticalPreservation() {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let context = PromptRuntimeContext(
+            mode: .fallback,
+            affect: AffectMetadata(affect: .frustrated, intensity: 2),
+            tonePreferences: profile,
+            toneRepairCue: "Understood - I'll keep it more direct.",
+            sessionSummary: String(repeating: "summary token ", count: 600),
+            interactionStateJSON: "{}",
+            responseBudget: .default
+        )
+        let prompt = PromptBuilder.buildSystemPrompt(
+            forInput: "This is a very long input " + String(repeating: "with lots of extra context ", count: 200),
+            promptContext: context,
+            includeLongToolExamples: true
+        )
+
+        assertPromptBlockOrder(prompt, markers: [
+            "CORE_JSON_CONTRACT",
+            "SYSTEM_IDENTITY_AND_MODE",
+            "CONVERSATION_SUMMARY",
+            "AFFECT_GUIDANCE",
+            "TONE_PREFERENCES",
+            "TOOL_POLICY",
+            "INSTALLED_SKILLS",
+            "HISTORY_RETRIEVAL"
+        ])
+        XCTAssertTrue(prompt.contains("AFFECT_GUIDANCE"))
+        XCTAssertTrue(prompt.contains("TONE_PREFERENCES"))
+    }
+
     @MainActor
     func testLiveOpenAIRecipeTurnSmoke() async throws {
         let shouldRun = ProcessInfo.processInfo.environment["RUN_LIVE_OPENAI_SMOKE"] == "1"

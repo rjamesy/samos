@@ -160,12 +160,13 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         let learned = try XCTUnwrap(outcome)
         XCTAssertEqual(learned.reason, "more_direct")
         XCTAssertEqual(learned.profile.directness, 0.65, accuracy: 0.0001)
         XCTAssertEqual(learned.profile.hedging, 0.40, accuracy: 0.0001)
+        XCTAssertTrue(learned.profile.preferOneQuestionMax)
     }
 
     func testExplicitFeedbackStopQuestionsUpdatesCuriosityAndFlag() throws {
@@ -177,7 +178,7 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         let learned = try XCTUnwrap(outcome)
         XCTAssertEqual(learned.reason, "stop_questions")
@@ -195,7 +196,7 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         let learned = try XCTUnwrap(outcome)
         XCTAssertEqual(learned.reason, "no_therapy_language")
@@ -211,7 +212,7 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         let learned = try XCTUnwrap(outcome)
         XCTAssertEqual(learned.reason, "too_long")
@@ -229,7 +230,7 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: orchestrator.debugDetectAffect(input),
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         XCTAssertNil(outcome)
     }
@@ -246,7 +247,7 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 0
+            updatesInLast24Hours: 0
         )
         let learned = try XCTUnwrap(clamped)
         XCTAssertEqual(learned.profile.directness, 1.0, accuracy: 0.0001)
@@ -258,9 +259,130 @@ final class TurnOrchestratorTests: XCTestCase {
             affect: .neutral,
             profile: profile,
             useEmotionalTone: true,
-            updatesToday: 3
+            updatesInLast24Hours: 3
         )
         XCTAssertNil(blocked)
+    }
+
+    func testToneLearningDailyCap() {
+        let store = TonePreferenceStore.shared
+        let now = Date()
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        store.replaceProfileForTesting(profile)
+
+        for _ in 0..<5 {
+            let current = store.loadProfile()
+            let updatesInWindow = store.updatesInLast24Hours(now: now)
+            if let outcome = TonePreferenceLearner.learn(
+                from: "be more direct",
+                mode: .fallback,
+                affect: .neutral,
+                profile: current,
+                useEmotionalTone: true,
+                updatesInLast24Hours: updatesInWindow
+            ) {
+                _ = store.applyLearningOutcome(outcome, at: now)
+            }
+        }
+
+        XCTAssertEqual(store.updatesInLast24Hours(now: now), 3)
+    }
+
+    func testImplicitFeedbackSmallNudges() throws {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let baseline = profile.directness
+        let outcome = TonePreferenceLearner.learn(
+            from: "too long",
+            mode: .fallback,
+            affect: .neutral,
+            profile: profile,
+            useEmotionalTone: true,
+            updatesInLast24Hours: 0
+        )
+        let learned = try XCTUnwrap(outcome)
+        let delta = learned.profile.directness - baseline
+        XCTAssertGreaterThanOrEqual(delta, 0.03)
+        XCTAssertLessThanOrEqual(delta, 0.08)
+        XCTAssertTrue(learned.profile.avoidTherapyLanguage)
+    }
+
+    func testTonePreferencesReset() {
+        let store = TonePreferenceStore.shared
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.lastUpdated = Date()
+        profile.directness = 0.90
+        profile.warmth = 0.10
+        profile.humor = 0.90
+        profile.curiosity = 0.20
+        profile.reassurance = 0.10
+        profile.formality = 0.80
+        profile.hedging = 0.20
+        profile.avoidCheerfulWhenUpset = false
+        profile.avoidTherapyLanguage = false
+        profile.preferBulletSteps = false
+        profile.preferShortOpeners = false
+        profile.preferOneQuestionMax = true
+        store.replaceProfileForTesting(profile, learningUpdateHistory: [Date()], lastUpdateReason: "test")
+
+        let reset = store.resetProfile()
+        XCTAssertEqual(reset.enabled, true)
+        XCTAssertNil(reset.lastUpdated)
+        XCTAssertEqual(reset.directness, TonePreferenceProfile.neutralDefaults.directness, accuracy: 0.0001)
+        XCTAssertEqual(reset.warmth, TonePreferenceProfile.neutralDefaults.warmth, accuracy: 0.0001)
+        XCTAssertEqual(reset.humor, TonePreferenceProfile.neutralDefaults.humor, accuracy: 0.0001)
+        XCTAssertEqual(reset.curiosity, TonePreferenceProfile.neutralDefaults.curiosity, accuracy: 0.0001)
+        XCTAssertEqual(reset.reassurance, TonePreferenceProfile.neutralDefaults.reassurance, accuracy: 0.0001)
+        XCTAssertEqual(reset.formality, TonePreferenceProfile.neutralDefaults.formality, accuracy: 0.0001)
+        XCTAssertEqual(reset.hedging, TonePreferenceProfile.neutralDefaults.hedging, accuracy: 0.0001)
+        XCTAssertEqual(reset.avoidCheerfulWhenUpset, TonePreferenceProfile.neutralDefaults.avoidCheerfulWhenUpset)
+        XCTAssertEqual(reset.avoidTherapyLanguage, TonePreferenceProfile.neutralDefaults.avoidTherapyLanguage)
+        XCTAssertEqual(reset.preferBulletSteps, TonePreferenceProfile.neutralDefaults.preferBulletSteps)
+        XCTAssertEqual(reset.preferShortOpeners, TonePreferenceProfile.neutralDefaults.preferShortOpeners)
+        XCTAssertEqual(reset.preferOneQuestionMax, TonePreferenceProfile.neutralDefaults.preferOneQuestionMax)
+    }
+
+    func testResetDoesNotDisableLearning() {
+        let store = TonePreferenceStore.shared
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        profile.directness = 0.90
+        store.replaceProfileForTesting(profile)
+
+        let reset = store.resetProfile()
+        XCTAssertTrue(reset.enabled, "Reset should preserve learning toggle")
+    }
+
+    func testNoTonelearningOnClinicalLanguage() {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let input = "my chest tightness is worse, be more direct"
+        let outcome = TonePreferenceLearner.learn(
+            from: input,
+            mode: .fallback,
+            affect: AffectMetadata(affect: .anxious, intensity: 1),
+            profile: profile,
+            useEmotionalTone: true,
+            updatesInLast24Hours: 0
+        )
+        XCTAssertNil(outcome)
+    }
+
+    func testTonelearningIgnoredDuringCrisisContent() {
+        var profile = TonePreferenceProfile.neutralDefaults
+        profile.enabled = true
+        let input = "i feel hopeless and this is a crisis, be more direct"
+        let outcome = TonePreferenceLearner.learn(
+            from: input,
+            mode: .fallback,
+            affect: AffectMetadata(affect: .sad, intensity: 1),
+            profile: profile,
+            useEmotionalTone: true,
+            updatesInLast24Hours: 0
+        )
+        XCTAssertNil(outcome)
     }
 
     // MARK: - Plan Execution

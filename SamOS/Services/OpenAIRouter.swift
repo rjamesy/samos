@@ -337,7 +337,8 @@ enum PromptToneInjector {
     private static let maxToneChars = 450
 
     static func makeToneBlock(profile: TonePreferenceProfile,
-                              affect: AffectMetadata?) -> String {
+                              affect: AffectMetadata?,
+                              toneRepairCue: String?) -> String {
         let normalized = normalizedProfile(profile)
         var lines: [String] = [
             "User tone preferences:",
@@ -347,6 +348,9 @@ enum PromptToneInjector {
 
         var prioritizedRules: [String] = []
 
+        if let toneRepairCue, !toneRepairCue.isEmpty {
+            prioritizedRules.append("- tone_repair_now=true: first sentence briefly acknowledges tone correction ('\(toneRepairCue)'), then stay practical and direct.")
+        }
         if normalized.avoidCheerfulWhenUpset, let affect, affect.affect != .neutral {
             prioritizedRules.append("- non-neutral affect: avoid cheerful phrasing; keep tone grounded.")
         }
@@ -425,10 +429,15 @@ enum PromptBuilder {
             : websiteHints.map { "- website_learning: \($0.replacingOccurrences(of: "\"", with: "'"))" }
 
         let modePolicy = dynamicModePolicy(promptContext?.mode)
+        let summaryPolicy = compactSummary(promptContext?.sessionSummary ?? "")
         let affectPolicy = dynamicAffectGuidance(promptContext?.affect)
         let tonePolicy = promptContext?.tonePreferences.flatMap { profile -> String? in
             guard profile.enabled else { return nil }
-            return PromptToneInjector.makeToneBlock(profile: profile, affect: promptContext?.affect)
+            return PromptToneInjector.makeToneBlock(
+                profile: profile,
+                affect: promptContext?.affect,
+                toneRepairCue: promptContext?.toneRepairCue
+            )
         }
         let budgetDirective: String
         if promptContext?.responseBudget != nil {
@@ -461,16 +470,17 @@ enum PromptBuilder {
         }
 
         let coreSystem = """
-        [BLOCK 1: CORE]
-        You are Sam, a friendly voice assistant inside a macOS app called SamOS.
+        [BLOCK 1: CORE_JSON_CONTRACT]
         Return EXACTLY ONE valid JSON object and nothing else.
         The "action" field MUST be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP.
         think step by step internally before choosing the final JSON action, but never reveal chain-of-thought.
         Never output markdown or prose outside JSON.
         """
 
-        let stylePolicy = """
-        [BLOCK 2: STYLE_AND_LENGTH]
+        let systemIdentityAndModeBlock = """
+        [BLOCK 2: SYSTEM_IDENTITY_AND_MODE]
+        You are Sam, a friendly voice assistant inside a macOS app called SamOS.
+        \(modePolicy)
         - Warm, casual, clear language. Use contractions.
         - Default: medium response length in chat.
         - Chat target: 120-350 tokens for most replies.
@@ -484,9 +494,9 @@ enum PromptBuilder {
         - If prior assistant turn asked a question and the user replies briefly, treat that as the answer unless topic clearly changes.
         """
 
-        let modeBlock = """
-        [BLOCK 3: MODE_POLICY]
-        \(modePolicy)
+        let conversationSummaryBlock = """
+        [BLOCK 3: CONVERSATION_SUMMARY]
+        \(summaryPolicy)
         """
 
         let affectBlock = """
@@ -505,8 +515,6 @@ enum PromptBuilder {
         [BLOCK 6: TOOL_POLICY]
         Available tools:
         \(cachedToolDescriptions)
-        Installed skills (matched automatically, not tool names):
-        \(skillLines.joined(separator: "\n"))
         Tool rules:
         - Weather/forecast -> get_weather.
         - Time/date/timezone -> get_time.
@@ -522,20 +530,27 @@ enum PromptBuilder {
         \(toolExampleBlock)
         """
 
-        let localContext = """
-        [LOCAL_CONTEXT]
+        let installedSkillsBlock = """
+        [BLOCK 7: INSTALLED_SKILLS]
+        Installed skills (matched automatically, not tool names):
+        \(skillLines.joined(separator: "\n"))
+        """
+
+        let historyRetrievalBlock = """
+        [BLOCK 8: HISTORY_RETRIEVAL]
         \(memoryHintLines.joined(separator: "\n"))
         \(selfLessonLines.joined(separator: "\n"))
         \(websiteLines.joined(separator: "\n"))
         - Use website notes only when relevant to the user query. Do not invent details.
         """
 
-        var blocks = [coreSystem, stylePolicy, modeBlock, affectBlock]
+        var blocks = [coreSystem, systemIdentityAndModeBlock, conversationSummaryBlock, affectBlock]
         if let toneBlock {
             blocks.append(toneBlock)
         }
         blocks.append(toolPolicy)
-        blocks.append(localContext)
+        blocks.append(installedSkillsBlock)
+        blocks.append(historyRetrievalBlock)
 
         return cappedPrompt(
             blocks: blocks,
@@ -613,6 +628,13 @@ enum PromptBuilder {
         lines.append("- If user mentions panic attack, suicidal, or hopeless language: offer a gentle disclaimer and suggest professional help; only urgent-emergency escalation if immediate danger is stated.")
         lines.append("- Always continue with task logic, clarifiers, and practical next steps.")
         return lines.joined(separator: "\n")
+    }
+
+    private static func compactSummary(_ summary: String) -> String {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "- (none)" }
+        if trimmed.count <= 700 { return trimmed }
+        return String(trimmed.prefix(697)) + "..."
     }
 
     static func gatedWebsiteLearningContext(query: String, maxItems: Int, maxChars: Int) -> [String] {
@@ -750,10 +772,10 @@ enum PromptBuilder {
             return assembled
         }
 
-        // First trim local context block aggressively.
+        // First trim history/retrieval block aggressively.
         var mutable = blocks
-        if let idx = mutable.firstIndex(where: { $0.hasPrefix("[LOCAL_CONTEXT]") }) {
-            mutable[idx] = "[LOCAL_CONTEXT]\n- memory_hint: []\n- self_learning: []\n- website_learning: []"
+        if let idx = mutable.firstIndex(where: { $0.contains("HISTORY_RETRIEVAL]") }) {
+            mutable[idx] = "[BLOCK 8: HISTORY_RETRIEVAL]\n- memory_hint: []\n- self_learning: []\n- website_learning: []"
         }
         assembled = mutable.joined(separator: "\n\n")
         if assembled.count <= maxChars {
@@ -763,7 +785,7 @@ enum PromptBuilder {
         // Then trim tool block examples only.
         if let idx = mutable.firstIndex(where: { $0.contains("TOOL_POLICY]") }) {
             mutable[idx] = """
-            [BLOCK: TOOL_POLICY]
+            [BLOCK 6: TOOL_POLICY]
             Use available tools exactly by name.
             Prefer PLAN for tool work and missing fields.
             Weather -> get_weather; time -> get_time; URL learning -> learn_website; long detail -> show_text.
@@ -772,6 +794,37 @@ enum PromptBuilder {
         assembled = mutable.joined(separator: "\n\n")
         if assembled.count <= maxChars {
             return assembled
+        }
+
+        // Then trim installed skills and conversation summary.
+        if let idx = mutable.firstIndex(where: { $0.contains("INSTALLED_SKILLS]") }) {
+            mutable[idx] = "[BLOCK 7: INSTALLED_SKILLS]\n- (none)"
+        }
+        if let idx = mutable.firstIndex(where: { $0.contains("CONVERSATION_SUMMARY]") }) {
+            mutable[idx] = "[BLOCK 3: CONVERSATION_SUMMARY]\n- (summary omitted for budget)"
+        }
+        assembled = mutable.joined(separator: "\n\n")
+        if assembled.count <= maxChars {
+            return assembled
+        }
+
+        // Preserve mandatory blocks in budget-constrained fallback.
+        let requiredMarkers = [
+            "CORE_JSON_CONTRACT]",
+            "SYSTEM_IDENTITY_AND_MODE]",
+            "AFFECT_GUIDANCE]",
+            "TONE_PREFERENCES]",
+            "TOOL_POLICY]"
+        ]
+        let required = mutable.filter { block in
+            requiredMarkers.contains(where: { block.contains($0) })
+        }
+        if !required.isEmpty {
+            let requiredOnly = required.joined(separator: "\n\n")
+            if requiredOnly.count <= maxChars {
+                return requiredOnly
+            }
+            return String(requiredOnly.prefix(maxChars))
         }
 
         return String(assembled.prefix(maxChars))

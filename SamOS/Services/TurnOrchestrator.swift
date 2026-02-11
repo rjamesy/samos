@@ -163,6 +163,8 @@ struct TonePreferenceLearningOutcome {
     let reason: String
     let deltaSummary: String
     let profile: TonePreferenceProfile
+    let isToneRepair: Bool
+    let toneRepairCue: String?
 }
 
 @MainActor
@@ -219,9 +221,13 @@ final class TonePreferenceStore {
         return state.profile
     }
 
-    func updatesToday(now: Date = Date()) -> Int {
+    func updatesInLast24Hours(now: Date = Date()) -> Int {
         let history = loadState().learningUpdateHistory
-        return history.filter { Calendar.current.isDate($0, inSameDayAs: now) }.count
+        return history.filter { now.timeIntervalSince($0) <= (24 * 60 * 60) }.count
+    }
+
+    func updatesToday(now: Date = Date()) -> Int {
+        updatesInLast24Hours(now: now)
     }
 
     func debugLastUpdateReason() -> String? {
@@ -303,21 +309,34 @@ final class TonePreferenceStore {
 enum TonePreferenceLearner {
     private static let explicitDelta = 0.15
     private static let implicitDelta = 0.05
-    private static let maxUpdatesPerDay = 3
+    private static let maxUpdatesPer24Hours = 3
+    private static let medicalMarkers = [
+        "chest pain", "chest tightness", "fever", "vomit", "vomiting", "diarrhea",
+        "nausea", "bleeding", "blood", "faint", "can't breathe", "cant breathe", "symptom"
+    ]
+    private static let crisisMarkers = [
+        "suicidal", "suicide", "self harm", "kill myself", "hopeless", "panic attack", "crisis"
+    ]
+    private static let confessionMarkers = [
+        "i feel worthless", "i am worthless", "my trauma", "i was abused", "grieving",
+        "i cheated", "deeply personal"
+    ]
 
     static func learn(from userInput: String,
                       mode: ConversationMode,
                       affect: AffectMetadata,
                       profile: TonePreferenceProfile,
                       useEmotionalTone: Bool,
-                      updatesToday: Int) -> TonePreferenceLearningOutcome? {
+                      updatesInLast24Hours: Int) -> TonePreferenceLearningOutcome? {
         guard profile.enabled, useEmotionalTone else { return nil }
-        guard updatesToday < maxUpdatesPerDay else { return nil }
+        guard updatesInLast24Hours < maxUpdatesPer24Hours else { return nil }
 
         let lower = normalized(userInput)
         guard !lower.isEmpty else { return nil }
+        _ = affect
+        guard !containsClinicalOrCrisisLanguageInNormalized(lower, mode: mode) else { return nil }
 
-        if let explicit = explicitUpdate(for: lower, affect: affect, profile: profile) {
+        if let explicit = explicitUpdate(for: lower, profile: profile) {
             return explicit
         }
 
@@ -330,37 +349,63 @@ enum TonePreferenceLearner {
         return nil
     }
 
+    static func containsClinicalOrCrisisLanguage(_ input: String, mode: ConversationMode) -> Bool {
+        containsClinicalOrCrisisLanguageInNormalized(normalized(input), mode: mode)
+    }
+
     private static func explicitUpdate(for lower: String,
-                                       affect: AffectMetadata,
                                        profile: TonePreferenceProfile) -> TonePreferenceLearningOutcome? {
-        if hasAny(lower, ["don't talk like a therapist", "dont talk like a therapist", "stop the therapy tone"]) {
+        if let toneRepairReason = toneRepairReason(for: lower) {
             var updated = profile
-            applyKnob(&updated.warmth, -0.05)
+            var deltas: [String] = []
+            applyKnob(&updated.directness, explicitDelta)
+            deltas.append("directness+0.15")
+            applyKnob(&updated.warmth, -0.10)
+            deltas.append("warmth-0.10")
             applyKnob(&updated.reassurance, -0.10)
-            updated.avoidTherapyLanguage = true
+            deltas.append("reassurance-0.10")
+            updated.preferOneQuestionMax = true
+            deltas.append("preferOneQuestionMax=true")
+
+            switch toneRepairReason {
+            case "no_therapy_language":
+                updated.avoidTherapyLanguage = true
+                deltas.append("avoidTherapyLanguage=true")
+            case "avoid_cheerful":
+                updated.avoidCheerfulWhenUpset = true
+                applyKnob(&updated.humor, -0.10)
+                deltas.append("avoidCheerfulWhenUpset=true")
+                deltas.append("humor-0.10")
+            case "more_direct":
+                applyKnob(&updated.hedging, -0.10)
+                deltas.append("hedging-0.10")
+            default:
+                break
+            }
+
             return outcome(source: "explicit_feedback",
-                           reason: "no_therapy_language",
-                           deltas: ["warmth-0.05", "reassurance-0.10", "avoidTherapyLanguage=true"],
+                           reason: toneRepairReason,
+                           deltas: deltas,
+                           isToneRepair: true,
+                           toneRepairCue: toneRepairAcknowledgement(for: toneRepairReason),
                            updated: updated)
         }
 
-        if hasAny(lower, ["stop asking so many questions", "ask fewer questions", "less questions"]) {
+        if hasAny(lower, [
+            "stop asking so many questions",
+            "don't ask so many questions",
+            "dont ask so many questions",
+            "don't ask so many questions anymore",
+            "dont ask so many questions anymore",
+            "ask fewer questions",
+            "less questions"
+        ]) {
             var updated = profile
             applyKnob(&updated.curiosity, -explicitDelta)
             updated.preferOneQuestionMax = true
             return outcome(source: "explicit_feedback",
                            reason: "stop_questions",
                            deltas: ["curiosity-0.15", "preferOneQuestionMax=true"],
-                           updated: updated)
-        }
-
-        if hasAny(lower, ["be more direct", "more direct please", "more direct"]) {
-            var updated = profile
-            applyKnob(&updated.directness, explicitDelta)
-            applyKnob(&updated.hedging, -0.10)
-            return outcome(source: "explicit_feedback",
-                           reason: "more_direct",
-                           deltas: ["directness+0.15", "hedging-0.10"],
                            updated: updated)
         }
 
@@ -372,19 +417,6 @@ enum TonePreferenceLearner {
             return outcome(source: "explicit_feedback",
                            reason: "avoid_patronizing_tone",
                            deltas: ["warmth-0.15", "reassurance-0.10", "avoidCheerfulWhenUpset=true"],
-                           updated: updated)
-        }
-
-        if hasAny(lower, ["don't be so cheerful", "dont be so cheerful"]) {
-            var updated = profile
-            applyKnob(&updated.humor, -0.10)
-            updated.avoidCheerfulWhenUpset = true
-            if affect.affect == .frustrated || affect.affect == .angry || affect.affect == .sad || affect.affect == .anxious {
-                applyKnob(&updated.warmth, -0.05)
-            }
-            return outcome(source: "explicit_feedback",
-                           reason: "avoid_cheerful_when_upset",
-                           deltas: ["humor-0.10", "avoidCheerfulWhenUpset=true"],
                            updated: updated)
         }
 
@@ -474,35 +506,24 @@ enum TonePreferenceLearner {
     }
 
     private static func shouldSkipImplicitLearning(for lower: String, mode: ConversationMode) -> Bool {
+        if containsClinicalOrCrisisLanguageInNormalized(lower, mode: mode) {
+            return true
+        }
+        return hasAny(lower, confessionMarkers)
+    }
+
+    private static func containsClinicalOrCrisisLanguageInNormalized(_ lower: String, mode: ConversationMode) -> Bool {
         if mode.domain == .health && mode.intent == .problemReport {
             return true
         }
-
-        let medicalMarkers = [
-            "chest pain", "chest tightness", "fever", "vomit", "vomiting", "diarrhea",
-            "nausea", "bleeding", "blood", "faint", "can't breathe", "cant breathe", "symptom"
-        ]
-        if hasAny(lower, medicalMarkers) {
-            return true
-        }
-
-        let crisisMarkers = [
-            "suicidal", "suicide", "self harm", "kill myself", "hopeless", "panic attack", "crisis"
-        ]
-        if hasAny(lower, crisisMarkers) {
-            return true
-        }
-
-        let confessionMarkers = [
-            "i feel worthless", "i am worthless", "my trauma", "i was abused", "grieving",
-            "i cheated", "deeply personal"
-        ]
-        return hasAny(lower, confessionMarkers)
+        return hasAny(lower, medicalMarkers) || hasAny(lower, crisisMarkers)
     }
 
     private static func outcome(source: String,
                                 reason: String,
                                 deltas: [String],
+                                isToneRepair: Bool = false,
+                                toneRepairCue: String? = nil,
                                 updated: TonePreferenceProfile) -> TonePreferenceLearningOutcome {
         var profile = updated
         profile.clampKnobs()
@@ -510,8 +531,41 @@ enum TonePreferenceLearner {
             source: source,
             reason: reason,
             deltaSummary: deltas.joined(separator: " "),
-            profile: profile
+            profile: profile,
+            isToneRepair: isToneRepair,
+            toneRepairCue: toneRepairCue
         )
+    }
+
+    private static func toneRepairReason(for lower: String) -> String? {
+        if hasAny(lower, ["no, don't be so cheerful", "no, dont be so cheerful", "don't be so cheerful", "dont be so cheerful"]) {
+            return "avoid_cheerful"
+        }
+        if hasAny(lower, ["that's too emotional", "thats too emotional", "stop the empathy", "less warmth please", "less warm please"]) {
+            return "less_warmth"
+        }
+        if hasAny(lower, ["be more direct", "more direct please", "more direct"]) {
+            return "more_direct"
+        }
+        if hasAny(lower, ["don't talk like a therapist", "dont talk like a therapist", "stop the therapy tone"]) {
+            return "no_therapy_language"
+        }
+        return nil
+    }
+
+    private static func toneRepairAcknowledgement(for reason: String) -> String {
+        switch reason {
+        case "avoid_cheerful":
+            return "Understood - I'll keep it grounded."
+        case "less_warmth":
+            return "Got it - I'll keep this more practical."
+        case "more_direct":
+            return "Understood - I'll keep it more direct."
+        case "no_therapy_language":
+            return "Thanks for the feedback - I'll keep it practical and direct."
+        default:
+            return "Understood - I'll adjust the tone."
+        }
     }
 
     private static func applyKnob(_ value: inout Double, _ delta: Double) {
@@ -521,6 +575,7 @@ enum TonePreferenceLearner {
     private static func normalized(_ input: String) -> String {
         input
             .lowercased()
+            .replacingOccurrences(of: "’", with: "'")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -570,6 +625,7 @@ struct PromptRuntimeContext: Equatable {
     let mode: ConversationMode
     let affect: AffectMetadata
     let tonePreferences: TonePreferenceProfile?
+    let toneRepairCue: String?
     let sessionSummary: String
     let interactionStateJSON: String
     let responseBudget: ResponseLengthBudget
@@ -1332,19 +1388,22 @@ final class TurnOrchestrator {
         let rawAffect = ConversationAffectClassifier.classify(text, history: history)
         let affectMirroringEnabled = M2Settings.affectMirroringEnabled
         let useEmotionalTone = M2Settings.useEmotionalTone
+        let containsClinicalOrCrisis = TonePreferenceLearner.containsClinicalOrCrisisLanguage(text, mode: mode)
         var toneProfile = tonePreferenceStore.loadProfile()
+        var toneRepairCue: String?
         if let learningOutcome = TonePreferenceLearner.learn(
             from: text,
             mode: mode,
             affect: rawAffect,
             profile: toneProfile,
             useEmotionalTone: useEmotionalTone,
-            updatesToday: tonePreferenceStore.updatesToday(now: now)
+            updatesInLast24Hours: tonePreferenceStore.updatesInLast24Hours(now: now)
         ) {
             toneProfile = tonePreferenceStore.applyLearningOutcome(learningOutcome, at: now)
+            toneRepairCue = learningOutcome.toneRepairCue
             logToneLearning(outcome: learningOutcome, profile: toneProfile)
         }
-        let effectiveToneProfile = (toneProfile.enabled && useEmotionalTone) ? toneProfile : nil
+        let effectiveToneProfile = (toneProfile.enabled && useEmotionalTone && !containsClinicalOrCrisis) ? toneProfile : nil
         let effectiveAffect: AffectMetadata = (affectMirroringEnabled && useEmotionalTone)
             ? rawAffect
             : .neutral
@@ -1365,6 +1424,7 @@ final class TurnOrchestrator {
             mode: mode,
             affect: effectiveAffect,
             tonePreferences: effectiveToneProfile,
+            toneRepairCue: toneRepairCue,
             userInput: text,
             history: history,
             sessionSummary: sessionSummary,
@@ -1428,7 +1488,9 @@ final class TurnOrchestrator {
                                          turnIndex: currentTurn,
                                          feedbackDepth: 0,
                                          turnStartedAt: turnStartedAt,
-                                         mode: mode)
+                                         mode: mode,
+                                         toneRepairCue: toneRepairCue,
+                                         affect: effectiveAffect)
             }
         }
 
@@ -1457,7 +1519,9 @@ final class TurnOrchestrator {
                                  turnIndex: currentTurn,
                                  feedbackDepth: 0,
                                  turnStartedAt: turnStartedAt,
-                                 mode: mode)
+                                 mode: mode,
+                                 toneRepairCue: toneRepairCue,
+                                 affect: effectiveAffect)
     }
 
     // MARK: - Brain Router Pipeline
@@ -1546,7 +1610,9 @@ final class TurnOrchestrator {
                              turnIndex: Int,
                              feedbackDepth: Int,
                              turnStartedAt: Date,
-                             mode: ConversationMode) async -> TurnResult {
+                             mode: ConversationMode,
+                             toneRepairCue: String? = nil,
+                             affect: AffectMetadata = .neutral) async -> TurnResult {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
 
         var result = TurnResult()
@@ -1615,6 +1681,8 @@ final class TurnOrchestrator {
         )
         applyCanvasPresentationPolicy(&result)
         applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
+        applyAffectMirroringResponsePolicy(&result, affect: affect)
+        applyToneRepairResponsePolicy(&result, cue: toneRepairCue)
         applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
         applyKnowledgeAttribution(&result,
                                   userInput: originalInput,
@@ -1874,6 +1942,7 @@ final class TurnOrchestrator {
     private func buildPromptRuntimeContext(mode: ConversationMode,
                                            affect: AffectMetadata,
                                            tonePreferences: TonePreferenceProfile?,
+                                           toneRepairCue: String?,
                                            userInput: String,
                                            history: [ChatMessage],
                                            sessionSummary: String,
@@ -1893,6 +1962,7 @@ final class TurnOrchestrator {
                 "intensity": affect.clampedIntensity,
                 "guidance": affect.guidance
             ],
+            "tone_repair_cue": toneRepairCue ?? "",
             "repetition_by_intent": repetition,
             "last_assistant_openers": Array(lastAssistantOpeners.suffix(2)),
             "recent_facts_ttl": Array(facts)
@@ -1902,6 +1972,7 @@ final class TurnOrchestrator {
             mode: mode,
             affect: affect,
             tonePreferences: tonePreferences,
+            toneRepairCue: toneRepairCue,
             sessionSummary: sessionSummary,
             interactionStateJSON: interactionStateJSON,
             responseBudget: responseLengthBudget(for: mode, userInput: userInput, history: history)
@@ -2698,6 +2769,127 @@ final class TurnOrchestrator {
                 }
             }
         }
+    }
+
+    private func applyToneRepairResponsePolicy(_ result: inout TurnResult, cue: String?) {
+        guard let cue = cue?.trimmingCharacters(in: .whitespacesAndNewlines), !cue.isEmpty else { return }
+        guard let idx = result.appendedChat.firstIndex(where: { $0.role == .assistant }) else { return }
+
+        let original = result.appendedChat[idx]
+        let originalTrimmed = original.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !originalTrimmed.isEmpty else { return }
+
+        let lower = originalTrimmed.lowercased()
+        let acknowledgementMarkers = [
+            "understood",
+            "got it",
+            "thanks for the feedback",
+            "i'll keep it",
+            "i will keep it"
+        ]
+        if acknowledgementMarkers.contains(where: { lower.contains($0) }) {
+            return
+        }
+
+        let replacement: String
+        let transientFailureMarkers = [
+            "had trouble generating a response",
+            "had trouble processing that",
+            "took too long",
+            "please try again"
+        ]
+        if transientFailureMarkers.contains(where: { lower.contains($0) }) {
+            replacement = cue
+        } else {
+            replacement = "\(cue) \(originalTrimmed)"
+        }
+
+        result.appendedChat[idx] = ChatMessage(
+            id: original.id,
+            ts: original.ts,
+            role: original.role,
+            text: replacement,
+            llmProvider: original.llmProvider,
+            isEphemeral: original.isEphemeral,
+            usedMemory: original.usedMemory,
+            usedLocalKnowledge: original.usedLocalKnowledge
+        )
+
+        if let spokenIdx = result.spokenLines.firstIndex(of: original.text) {
+            result.spokenLines[spokenIdx] = replacement
+        } else if result.spokenLines.isEmpty {
+            result.spokenLines.append(replacement)
+        }
+    }
+
+    private func applyAffectMirroringResponsePolicy(_ result: inout TurnResult, affect: AffectMetadata) {
+        guard affect.affect != .neutral else { return }
+        guard let idx = result.appendedChat.firstIndex(where: { $0.role == .assistant }) else { return }
+
+        let original = result.appendedChat[idx]
+        let originalTrimmed = original.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !originalTrimmed.isEmpty else { return }
+
+        let opening = firstSentence(of: originalTrimmed)?.lowercased() ?? originalTrimmed.lowercased()
+        if hasAffectAcknowledgement(opening: opening, affect: affect.affect) {
+            return
+        }
+
+        let acknowledgement = affectAcknowledgement(for: affect.affect)
+        let replacement = "\(acknowledgement) \(originalTrimmed)"
+
+        result.appendedChat[idx] = ChatMessage(
+            id: original.id,
+            ts: original.ts,
+            role: original.role,
+            text: replacement,
+            llmProvider: original.llmProvider,
+            isEphemeral: original.isEphemeral,
+            usedMemory: original.usedMemory,
+            usedLocalKnowledge: original.usedLocalKnowledge
+        )
+
+        if let spokenIdx = result.spokenLines.firstIndex(of: original.text) {
+            result.spokenLines[spokenIdx] = replacement
+        } else if result.spokenLines.isEmpty {
+            result.spokenLines.append(replacement)
+        }
+    }
+
+    private func affectAcknowledgement(for affect: ConversationAffect) -> String {
+        switch affect {
+        case .neutral:
+            return ""
+        case .frustrated:
+            return "That sounds frustrating."
+        case .anxious:
+            return "I get why that feels worrying."
+        case .sad:
+            return "I'm sorry, that sounds heavy."
+        case .angry:
+            return "I can tell this is really intense."
+        case .excited:
+            return "That's awesome!"
+        }
+    }
+
+    private func hasAffectAcknowledgement(opening: String, affect: ConversationAffect) -> Bool {
+        let markers: [String]
+        switch affect {
+        case .neutral:
+            return true
+        case .frustrated:
+            markers = ["frustrat", "annoy", "i get why", "i can see why", "sorry you're", "sorry you’re"]
+        case .anxious:
+            markers = ["worr", "nervous", "unsettling", "normal to feel", "understandable"]
+        case .sad:
+            markers = ["sorry", "tough", "heavy", "i hear you"]
+        case .angry:
+            markers = ["intense", "let's slow", "lets slow", "frustrat", "sorry you're", "sorry you’re"]
+        case .excited:
+            markers = ["awesome", "great", "nice", "excited", "love that energy"]
+        }
+        return markers.contains { opening.contains($0) }
     }
 
     private func isMemoryAckOnCooldown(_ turnIndex: Int) -> Bool {
