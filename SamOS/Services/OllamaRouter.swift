@@ -315,6 +315,16 @@ final class OllamaRouter {
             """
             messages.append(["role": "system", "content": stateLine])
 
+            if let identityLine = context.identityContextLine?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !identityLine.isEmpty {
+                let identityBlock = """
+                [IDENTITY_CONTEXT]
+                \(identityLine)
+                """
+                messages.append(["role": "system", "content": identityBlock])
+            }
+
             messages.append([
                 "role": "system",
                 "content": "[RESPONSE_BUDGET] max_output_tokens=\(context.responseBudget.maxOutputTokens)"

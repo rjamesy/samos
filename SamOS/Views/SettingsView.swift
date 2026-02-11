@@ -34,6 +34,8 @@ struct SettingsView: View {
 
     // Router
     @State private var useEmotionalTone: Bool = M2Settings.useEmotionalTone
+    @State private var faceRecognitionEnabled: Bool = M2Settings.faceRecognitionEnabled
+    @State private var personalizedGreetingsEnabled: Bool = M2Settings.personalizedGreetingsEnabled
     @State private var useOllama: Bool = M2Settings.useOllama
     @State private var ollamaEndpoint: String = M2Settings.ollamaEndpoint
     @State private var ollamaModel: String = M2Settings.ollamaModel
@@ -62,6 +64,7 @@ struct SettingsView: View {
     // Memory
     @State private var memories: [MemoryRow] = []
     @State private var showClearConfirmation = false
+    @State private var faceClearFeedback: String = ""
 
     // Skills
     @State private var installedSkills: [SkillSpec] = []
@@ -419,6 +422,21 @@ struct SettingsView: View {
                 set: { appState.setCameraEnabled($0) }
             ))
 
+            Toggle("Enable face recognition", isOn: $faceRecognitionEnabled)
+                .onChange(of: faceRecognitionEnabled) { _, newValue in
+                    M2Settings.faceRecognitionEnabled = newValue
+                    if !newValue {
+                        personalizedGreetingsEnabled = false
+                        M2Settings.personalizedGreetingsEnabled = false
+                    }
+                }
+
+            Toggle("Personalized greetings", isOn: $personalizedGreetingsEnabled)
+                .disabled(!faceRecognitionEnabled)
+                .onChange(of: personalizedGreetingsEnabled) { _, newValue in
+                    M2Settings.personalizedGreetingsEnabled = newValue
+                }
+
             LabeledContent("Permission") {
                 switch appState.cameraPermissionStatus {
                 case .granted:
@@ -467,6 +485,13 @@ struct SettingsView: View {
                 }
                 .disabled(!appState.isCameraEnabled)
 
+                Button("Clear Saved Faces", role: .destructive) {
+                    let didClear = appState.clearSavedFaces()
+                    faceClearFeedback = didClear
+                        ? "Saved faces cleared locally."
+                        : "Saved faces cleared from active memory."
+                }
+
                 Spacer()
 
                 Button("Refresh Status") {
@@ -475,7 +500,13 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
             }
 
-            Text("When camera is enabled, Sam can describe the scene, find objects, detect face presence, enroll and recognize named faces, answer visual questions, capture inventory snapshots, and save camera memory notes. Face profiles are persisted locally in encrypted storage.")
+            if !faceClearFeedback.isEmpty {
+                Text(faceClearFeedback)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Text("When camera is enabled, Sam can describe the scene, find objects, detect face presence, enroll and recognize named faces, answer visual questions, capture inventory snapshots, and save camera memory notes. Face profiles stay local in encrypted storage.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

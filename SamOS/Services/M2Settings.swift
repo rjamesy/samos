@@ -20,6 +20,8 @@ enum M2Settings {
         static let affectMirroringEnabled = "m3_affectMirroringEnabled"
         static let useEmotionalTone = "m3_useEmotionalTone"
         static let toneLearningNoticeShown = "m3_toneLearningNoticeShown"
+        static let faceRecognitionEnabled = "m3_faceRecognitionEnabled"
+        static let personalizedGreetingsEnabled = "m3_personalizedGreetingsEnabled"
         static let useOllama = "m3_useOllama"
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
@@ -189,6 +191,22 @@ enum M2Settings {
     static var toneLearningNoticeShown: Bool {
         get { defaults.bool(forKey: Key.toneLearningNoticeShown) }
         set { defaults.set(newValue, forKey: Key.toneLearningNoticeShown) }
+    }
+
+    static var faceRecognitionEnabled: Bool {
+        get {
+            if defaults.object(forKey: Key.faceRecognitionEnabled) == nil { return true }
+            return defaults.bool(forKey: Key.faceRecognitionEnabled)
+        }
+        set { defaults.set(newValue, forKey: Key.faceRecognitionEnabled) }
+    }
+
+    static var personalizedGreetingsEnabled: Bool {
+        get {
+            if defaults.object(forKey: Key.personalizedGreetingsEnabled) == nil { return true }
+            return defaults.bool(forKey: Key.personalizedGreetingsEnabled)
+        }
+        set { defaults.set(newValue, forKey: Key.personalizedGreetingsEnabled) }
     }
 
     static var useOllama: Bool {

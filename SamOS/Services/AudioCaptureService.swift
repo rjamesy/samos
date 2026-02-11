@@ -429,6 +429,7 @@ protocol CameraVisionProviding: AnyObject {
     func enrollFace(name: String) -> CameraFaceEnrollmentResult
     func recognizeKnownFaces() -> CameraFaceRecognitionResult?
     func knownFaceNames() -> [String]
+    func clearKnownFaces() -> Bool
 }
 
 extension CameraVisionProviding {
@@ -445,6 +446,7 @@ extension CameraVisionProviding {
     }
     func recognizeKnownFaces() -> CameraFaceRecognitionResult? { nil }
     func knownFaceNames() -> [String] { [] }
+    func clearKnownFaces() -> Bool { false }
 }
 
 enum CameraVisionError: LocalizedError {
@@ -605,6 +607,15 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
                 $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
             }
         }
+    }
+
+    func clearKnownFaces() -> Bool {
+        recognitionQueue.sync {
+            enrolledFacePrints.removeAll()
+            enrolledFaceNames.removeAll()
+        }
+        let empty = FaceProfileStore.Snapshot(names: [:], prints: [:])
+        return profileStore.save(empty)
     }
 
     func enrollFace(name: String) -> CameraFaceEnrollmentResult {

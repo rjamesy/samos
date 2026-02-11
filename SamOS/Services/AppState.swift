@@ -478,6 +478,13 @@ final class AppState: ObservableObject {
         appendOutputItem(OutputItem(kind: .markdown, payload: scene.markdown()), source: "camera_describe")
     }
 
+    @discardableResult
+    func clearSavedFaces() -> Bool {
+        let didClear = cameraVisionService.clearKnownFaces()
+        refreshCameraDebug()
+        return didClear
+    }
+
     /// Call when Settings opens — pauses listening to avoid ViewBridge / audio contention.
     func pauseListeningForSettings() {
         wasListeningBeforeSettings = isListeningEnabled

@@ -628,7 +628,26 @@ struct PromptRuntimeContext: Equatable {
     let toneRepairCue: String?
     let sessionSummary: String
     let interactionStateJSON: String
+    let identityContextLine: String?
     let responseBudget: ResponseLengthBudget
+
+    init(mode: ConversationMode,
+         affect: AffectMetadata,
+         tonePreferences: TonePreferenceProfile?,
+         toneRepairCue: String?,
+         sessionSummary: String,
+         interactionStateJSON: String,
+         identityContextLine: String? = nil,
+         responseBudget: ResponseLengthBudget) {
+        self.mode = mode
+        self.affect = affect
+        self.tonePreferences = tonePreferences
+        self.toneRepairCue = toneRepairCue
+        self.sessionSummary = sessionSummary
+        self.interactionStateJSON = interactionStateJSON
+        self.identityContextLine = identityContextLine
+        self.responseBudget = responseBudget
+    }
 }
 
 private struct RecentFact {
@@ -1309,6 +1328,7 @@ final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
     private let openAIRouter: OpenAIRouter
     private let tonePreferenceStore: TonePreferenceStore
+    private let faceGreetingManager: FaceGreetingManager
     private let summaryService = SessionSummaryService()
     private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
@@ -1318,6 +1338,7 @@ final class TurnOrchestrator {
     private var lastAssistantQuestion: String?
     private var lastAssistantQuestionAnswered = false
     private var lastAssistantOpeners: [String] = []
+    private var currentFaceIdentityContext: FaceIdentityContext = .none
     private var lastPromptContext: PromptRuntimeContext?
     private var lastFinalActionKind: String = "UNKNOWN"
     private var canvasConfirmationIndex = 0
@@ -1361,6 +1382,7 @@ final class TurnOrchestrator {
         self.ollamaRouter = ollama
         self.openAIRouter = OpenAIRouter(parser: ollama)
         self.tonePreferenceStore = .shared
+        self.faceGreetingManager = FaceGreetingManager()
         self.memoryAckCooldownTurns = 20
         self.followUpCooldownTurns = 3
     }
@@ -1368,11 +1390,13 @@ final class TurnOrchestrator {
     // Test init (injectable)
     init(ollamaRouter: OllamaRouter,
          openAIRouter: OpenAIRouter,
+         faceGreetingManager: FaceGreetingManager? = nil,
          memoryAckCooldownTurns: Int = 20,
          followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
         self.openAIRouter = openAIRouter
         self.tonePreferenceStore = .shared
+        self.faceGreetingManager = faceGreetingManager ?? FaceGreetingManager()
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
         self.followUpCooldownTurns = max(1, followUpCooldownTurns)
     }
@@ -1385,6 +1409,15 @@ final class TurnOrchestrator {
         let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
         let mode = ConversationModeClassifier.classify(text)
+        currentFaceIdentityContext = faceGreetingManager.evaluateFrame()
+        if let identityResolution = faceGreetingManager.resolveIdentityConfirmationResponse(text) {
+            currentFaceIdentityContext = faceGreetingManager.currentIdentityContext
+            var immediate = immediateIdentityTurnResult(for: identityResolution)
+            applyResponsePolish(&immediate, plan: Plan(steps: [.talk(say: immediate.spokenLines.first ?? "")]), hasMemoryHints: hasMemoryHints, turnIndex: currentTurn)
+            updateAssistantState(after: immediate, mode: mode)
+            rememberAssistantLines(immediate.appendedChat)
+            return immediate
+        }
         let rawAffect = ConversationAffectClassifier.classify(text, history: history)
         let affectMirroringEnabled = M2Settings.affectMirroringEnabled
         let useEmotionalTone = M2Settings.useEmotionalTone
@@ -1428,7 +1461,8 @@ final class TurnOrchestrator {
             userInput: text,
             history: history,
             sessionSummary: sessionSummary,
-            now: now
+            now: now,
+            faceIdentityContext: currentFaceIdentityContext
         )
         lastPromptContext = promptContext
 
@@ -1457,6 +1491,7 @@ final class TurnOrchestrator {
                                                            userInput: text,
                                                            history: history,
                                                            mode: mode,
+                                                           turnIndex: currentTurn,
                                                            turnStartedAt: turnStartedAt)
                 let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
 
@@ -1505,6 +1540,7 @@ final class TurnOrchestrator {
                                                    userInput: text,
                                                    history: history,
                                                    mode: mode,
+                                                   turnIndex: currentTurn,
                                                    turnStartedAt: turnStartedAt)
         let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
         lastFinalActionKind = inferredActionKind(for: shapedPlan)
@@ -1845,20 +1881,46 @@ final class TurnOrchestrator {
         return result
     }
 
+    private func immediateIdentityTurnResult(for resolution: FaceIdentityConfirmationResolution) -> TurnResult {
+        let message: String
+        switch resolution {
+        case .enrolled(_, let enrolledMessage):
+            message = enrolledMessage
+        case .declined(let declinedMessage):
+            message = declinedMessage
+        case .requestName(let requestMessage):
+            message = requestMessage
+        }
+
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: message)]
+        result.spokenLines = [message]
+        return result
+    }
+
     // MARK: - Helpers
 
     private func maybeRephraseRepeatedTalk(_ plan: Plan,
                                            userInput: String,
                                            history: [ChatMessage],
                                            mode: ConversationMode,
+                                           turnIndex: Int,
                                            turnStartedAt: Date) async -> Plan {
         guard elapsedMs(since: turnStartedAt) < maxRephraseBudgetMs else { return plan }
         guard let original = singleTalkLine(from: plan) else { return plan }
         let repetitionCount = intentRepetitionTracker.count(for: mode.intent)
 
         if mode.intent == .greeting {
+            if let identityGreeting = faceGreetingManager.greetingOverride(
+                for: mode,
+                repetitionCount: repetitionCount,
+                turnIndex: turnIndex
+            ) {
+                currentFaceIdentityContext = faceGreetingManager.currentIdentityContext
+                return Plan(steps: [.talk(say: identityGreeting)], say: plan.say)
+            }
             if repetitionCount >= 4 {
-                let meta = "You've asked that a few times — testing variation, or checking in?"
+                let meta = "You've asked that a few times - testing variation, or checking in?"
                 return Plan(steps: [.talk(say: meta)], say: plan.say)
             }
             guard isGreetingLikeAssistantLine(original) else { return plan }
@@ -1946,14 +2008,15 @@ final class TurnOrchestrator {
                                            userInput: String,
                                            history: [ChatMessage],
                                            sessionSummary: String,
-                                           now: Date) -> PromptRuntimeContext {
+                                           now: Date,
+                                           faceIdentityContext: FaceIdentityContext) -> PromptRuntimeContext {
         let repetition = intentRepetitionTracker.countsByIntent(now: now)
         let activeTopic = "\(mode.intent.rawValue):\(mode.domain.rawValue)"
         let facts = recentFacts
             .filter { $0.expiresAt > now }
             .map(\.text)
             .prefix(3)
-        let compactState: [String: Any] = [
+        var compactState: [String: Any] = [
             "active_topic": activeTopic,
             "last_assistant_question": lastAssistantQuestion ?? "",
             "last_question_answered": lastAssistantQuestionAnswered,
@@ -1967,6 +2030,19 @@ final class TurnOrchestrator {
             "last_assistant_openers": Array(lastAssistantOpeners.suffix(2)),
             "recent_facts_ttl": Array(facts)
         ]
+        if let name = faceIdentityContext.recognizedUserName,
+           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            compactState["recognized_user_name"] = name
+        }
+        if let confidence = faceIdentityContext.faceConfidence {
+            compactState["face_confidence"] = Double((confidence * 100).rounded() / 100)
+        }
+        if faceIdentityContext.unrecognizedUserPresent {
+            compactState["unrecognized_user_present"] = true
+        }
+        if faceIdentityContext.awaitingIdentityConfirmation {
+            compactState["awaiting_identity_confirmation"] = true
+        }
         let interactionStateJSON = compactJSONString(from: compactState) ?? "{}"
         return PromptRuntimeContext(
             mode: mode,
@@ -1975,6 +2051,7 @@ final class TurnOrchestrator {
             toneRepairCue: toneRepairCue,
             sessionSummary: sessionSummary,
             interactionStateJSON: interactionStateJSON,
+            identityContextLine: faceIdentityContext.identityPromptContextLine,
             responseBudget: responseLengthBudget(for: mode, userInput: userInput, history: history)
         )
     }
