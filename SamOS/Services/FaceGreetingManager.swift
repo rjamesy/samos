@@ -102,11 +102,15 @@ final class FaceGreetingManager {
 
     private let camera: CameraVisionProviding
     private let settings: FaceGreetingSettingsProviding
-    private let recognitionThreshold: Float
+    private let recognitionEnterThreshold: Float
+    private let recognitionExitThreshold: Float
+    private let lowConfidenceExitFrameCount: Int
+    private let lowConfidenceExitDurationSeconds: TimeInterval
     private let namedGreetingCooldownTurns: Int
     private let identityPromptCooldownSeconds: TimeInterval
     private let awaitingNameTimeoutSeconds: TimeInterval
     private let postEnrollGracePeriodSeconds: TimeInterval
+    private let postEnrollTrustWindowSeconds: TimeInterval
     private let recognitionCacheSeconds: TimeInterval
 
     private(set) var currentIdentityContext: FaceIdentityContext = .none
@@ -121,24 +125,41 @@ final class FaceGreetingManager {
     private var cachedRecognition: (at: Date, result: CameraFaceRecognitionResult)?
     private var postEnrollRepairPromptIssued = false
     private var lastRecognitionSummary = "faces=0, primary=none"
+    private var knownName: String?
+    private var knownSince: Date?
+    private var lastConfidence: Float?
+    private var lowConfidenceStreakCount: Int = 0
+    private var lowConfidenceStreakStartedAt: Date?
+    private var lastTransitionAt: Date?
 
     init(camera: CameraVisionProviding = CameraVisionService.shared,
          settings: FaceGreetingSettingsProviding = M2FaceGreetingSettings(),
          recognitionThreshold: Float = 0.72,
+         recognitionEnterThreshold: Float? = nil,
+         recognitionExitThreshold: Float = 0.45,
+         lowConfidenceExitFrameCount: Int = 10,
+         lowConfidenceExitDurationSeconds: TimeInterval = 2.0,
          namedGreetingCooldownTurns: Int = 2,
          onboardingPromptCooldownTurns: Int = 2,
          identityPromptCooldownSeconds: TimeInterval = 120,
          awaitingNameTimeoutSeconds: TimeInterval = 30,
          postEnrollGracePeriodSeconds: TimeInterval = 300,
+         postEnrollTrustWindowSeconds: TimeInterval = 300,
          recognitionCacheSeconds: TimeInterval = 1.5) {
         _ = onboardingPromptCooldownTurns
+        let enterThreshold = max(0.0, min(1.0, recognitionEnterThreshold ?? recognitionThreshold))
+        let exitThreshold = max(0.0, min(enterThreshold, recognitionExitThreshold))
         self.camera = camera
         self.settings = settings
-        self.recognitionThreshold = max(0.0, min(1.0, recognitionThreshold))
+        self.recognitionEnterThreshold = enterThreshold
+        self.recognitionExitThreshold = exitThreshold
+        self.lowConfidenceExitFrameCount = max(1, lowConfidenceExitFrameCount)
+        self.lowConfidenceExitDurationSeconds = max(0.5, lowConfidenceExitDurationSeconds)
         self.namedGreetingCooldownTurns = max(0, namedGreetingCooldownTurns)
         self.identityPromptCooldownSeconds = max(0, identityPromptCooldownSeconds)
         self.awaitingNameTimeoutSeconds = max(1, awaitingNameTimeoutSeconds)
         self.postEnrollGracePeriodSeconds = max(1, postEnrollGracePeriodSeconds)
+        self.postEnrollTrustWindowSeconds = max(1, postEnrollTrustWindowSeconds)
         self.recognitionCacheSeconds = max(0, recognitionCacheSeconds)
     }
 
@@ -175,6 +196,7 @@ final class FaceGreetingManager {
                     cachedRecognition = nil
                     identityState = .enrolledPendingRecognition(name: enrolledName, enrolledAt: now)
                     postEnrollRepairPromptIssued = false
+                    resetLowConfidenceTracking()
                 default:
                     identityState = .unknownDetected(lastPromptAt: now)
                 }
@@ -298,6 +320,7 @@ final class FaceGreetingManager {
                 cachedRecognition = nil
                 identityState = .enrolledPendingRecognition(name: enrolledName, enrolledAt: now)
                 currentIdentityContext = buildContext(primary: .unknown, state: identityState)
+                resetLowConfidenceTracking()
             default:
                 identityState = .unknownDetected(lastPromptAt: now)
                 currentIdentityContext = buildContext(primary: .unknown, state: identityState)
@@ -319,11 +342,13 @@ final class FaceGreetingManager {
         postEnrollRepairPromptIssued = false
         identityState = .none
         currentIdentityContext = .none
+        resetRecognitionStability()
         return cleared
     }
 
     private var isIdentityLogicEnabled: Bool {
         guard camera.isRunning else { return false }
+        guard camera.health.isHealthy else { return false }
         return settings.faceRecognitionEnabled && settings.personalizedGreetingsEnabled
     }
 
@@ -348,6 +373,7 @@ final class FaceGreetingManager {
             cachedRecognition = nil
             identityState = .none
             currentIdentityContext = .none
+            resetRecognitionStability()
             lastRecognitionSummary = "faces=0, primary=none (identity disabled)"
             return (.none, 0)
         }
@@ -362,64 +388,212 @@ final class FaceGreetingManager {
                 if now.timeIntervalSince(lastPromptAt) > awaitingNameTimeoutSeconds {
                     identityState = .none
                 }
+            case .enrolledPendingRecognition(_, let enrolledAt):
+                if now.timeIntervalSince(enrolledAt) > postEnrollTrustWindowSeconds {
+                    identityState = .none
+                }
             default:
                 identityState = .none
             }
+            resetLowConfidenceTracking()
             currentIdentityContext = buildContext(primary: .none, state: identityState)
             lastRecognitionSummary = "faces=0, primary=none"
             return (.none, 0)
         }
 
         guard let recognition = recognitionResult(now: now) else {
-            if !preserveKnownOrAwaitingStateForUnknown(now: now) {
-                identityState = .unknownDetected(lastPromptAt: lastPromptDate(in: identityState))
-            }
+            transitionToUnknownIfNeeded(now: now)
             currentIdentityContext = buildContext(primary: .unknown, state: identityState)
             lastRecognitionSummary = "faces=\(detectedFaces), primary=unknown(recognizer_unavailable)"
             return (.unknown, detectedFaces)
         }
 
-        if let primary = recognition.matches.max(by: { $0.confidence < $1.confidence }),
-           shouldTreatPrimaryAsKnown(primary, in: recognition) {
-            let confidence = max(primary.confidence, recognitionThreshold)
-            identityState = .known(name: primary.name, lastSeenAt: now)
-            postEnrollRepairPromptIssued = false
-            currentIdentityContext = buildContext(primary: .recognized(name: primary.name, confidence: confidence), state: identityState)
-            lastRecognitionSummary = "faces=\(recognition.detectedFaces), primary=known(\(primary.name), confidence=\(String(format: "%.2f", confidence)))"
-            logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "primary_match")
-            return (.recognized(name: primary.name, confidence: confidence), recognition.detectedFaces)
+        let primary = recognition.matches.max(by: { $0.confidence < $1.confidence })
+
+        if case .enrolledPendingRecognition(let enrolledName, let enrolledAt) = identityState,
+           now.timeIntervalSince(enrolledAt) <= postEnrollTrustWindowSeconds {
+            let trustedConfidence = primary?.confidence ?? lastConfidence ?? recognitionEnterThreshold
+            transitionToKnown(name: enrolledName, confidence: trustedConfidence, now: now, shouldRecordTransition: false)
+            currentIdentityContext = buildContext(
+                primary: .recognized(name: enrolledName, confidence: trustedConfidence),
+                state: identityState
+            )
+            lastRecognitionSummary =
+                "faces=\(recognition.detectedFaces), primary=known(\(enrolledName), confidence=\(String(format: "%.2f", trustedConfidence))), trust_window=active"
+            #if DEBUG
+            print("[IDENTITY] post_enroll_trust_active confidence=\(String(format: "%.2f", trustedConfidence))")
+            #endif
+            logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "post_enroll_trust")
+            return (.recognized(name: enrolledName, confidence: trustedConfidence), recognition.detectedFaces)
         }
 
-        if !preserveKnownOrAwaitingStateForUnknown(now: now) {
-            identityState = .unknownDetected(lastPromptAt: lastPromptDate(in: identityState))
+        if case .known(let currentName, _) = identityState {
+            if let primary {
+                if isSameIdentityName(primary.name, currentName) {
+                    if primary.confidence >= recognitionExitThreshold {
+                        transitionToKnown(name: currentName, confidence: primary.confidence, now: now, shouldRecordTransition: false)
+                        currentIdentityContext = buildContext(
+                            primary: .recognized(name: currentName, confidence: primary.confidence),
+                            state: identityState
+                        )
+                        lastRecognitionSummary =
+                            "faces=\(recognition.detectedFaces), primary=known(\(currentName), confidence=\(String(format: "%.2f", primary.confidence))), hysteresis=stable"
+                        logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "known_stable")
+                        return (.recognized(name: currentName, confidence: primary.confidence), recognition.detectedFaces)
+                    }
+
+                    if !registerLowConfidenceSample(now: now) {
+                        transitionToKnown(name: currentName, confidence: primary.confidence, now: now, shouldRecordTransition: false)
+                        currentIdentityContext = buildContext(
+                            primary: .recognized(name: currentName, confidence: primary.confidence),
+                            state: identityState
+                        )
+                        lastRecognitionSummary =
+                            "faces=\(recognition.detectedFaces), primary=known(\(currentName), confidence=\(String(format: "%.2f", primary.confidence))), hysteresis=hold"
+                        logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "known_hysteresis_hold")
+                        return (.recognized(name: currentName, confidence: primary.confidence), recognition.detectedFaces)
+                    }
+
+                    transitionToUnknown(now: now)
+                    currentIdentityContext = buildContext(primary: .unknown, state: identityState)
+                    lastRecognitionSummary =
+                        "faces=\(recognition.detectedFaces), primary=unknown(low_confidence_exit), confidence=\(String(format: "%.2f", primary.confidence))"
+                    logFaceRecognition(recognition: recognition, primary: primary, recognized: false, reason: "known_hysteresis_exit")
+                    return (.unknown, recognition.detectedFaces)
+                }
+
+                if primary.confidence >= recognitionEnterThreshold {
+                    transitionToKnown(name: primary.name, confidence: primary.confidence, now: now)
+                    currentIdentityContext = buildContext(
+                        primary: .recognized(name: primary.name, confidence: primary.confidence),
+                        state: identityState
+                    )
+                    lastRecognitionSummary =
+                        "faces=\(recognition.detectedFaces), primary=known(\(primary.name), confidence=\(String(format: "%.2f", primary.confidence))), hysteresis=switch"
+                    logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "known_switch")
+                    return (.recognized(name: primary.name, confidence: primary.confidence), recognition.detectedFaces)
+                }
+            }
+
+            if !registerLowConfidenceSample(now: now) {
+                let holdConfidence = primary?.confidence ?? lastConfidence ?? recognitionExitThreshold
+                transitionToKnown(name: currentName, confidence: holdConfidence, now: now, shouldRecordTransition: false)
+                currentIdentityContext = buildContext(
+                    primary: .recognized(name: currentName, confidence: holdConfidence),
+                    state: identityState
+                )
+                lastRecognitionSummary =
+                    "faces=\(recognition.detectedFaces), primary=known(\(currentName), confidence=\(String(format: "%.2f", holdConfidence))), hysteresis=hold"
+                logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "known_hysteresis_hold_no_match")
+                return (.recognized(name: currentName, confidence: holdConfidence), recognition.detectedFaces)
+            }
+
+            transitionToUnknown(now: now)
+            currentIdentityContext = buildContext(primary: .unknown, state: identityState)
+            lastRecognitionSummary = "faces=\(recognition.detectedFaces), primary=unknown(hysteresis_exit)"
+            logFaceRecognition(recognition: recognition, primary: primary, recognized: false, reason: "known_hysteresis_exit_no_match")
+            return (.unknown, recognition.detectedFaces)
         }
+
+        if let primary,
+           shouldTreatPrimaryAsKnown(primary, in: recognition) {
+            transitionToKnown(name: primary.name, confidence: primary.confidence, now: now)
+            currentIdentityContext = buildContext(primary: .recognized(name: primary.name, confidence: primary.confidence), state: identityState)
+            lastRecognitionSummary =
+                "faces=\(recognition.detectedFaces), primary=known(\(primary.name), confidence=\(String(format: "%.2f", primary.confidence)))"
+            logFaceRecognition(recognition: recognition, primary: primary, recognized: true, reason: "primary_match")
+            return (.recognized(name: primary.name, confidence: primary.confidence), recognition.detectedFaces)
+        }
+
+        transitionToUnknownIfNeeded(now: now)
         currentIdentityContext = buildContext(primary: .unknown, state: identityState)
         let primaryDescriptor = recognition.matches.isEmpty ? "unknown" : "unknown(low_confidence)"
-        lastRecognitionSummary = "faces=\(recognition.detectedFaces), primary=\(primaryDescriptor), matches=\(recognition.matches.count), unknown_faces=\(recognition.unknownFaces)"
-        let primary = recognition.matches.max(by: { $0.confidence < $1.confidence })
+        let confidenceDescriptor = primary.map { String(format: "%.2f", $0.confidence) } ?? "n/a"
+        lastRecognitionSummary =
+            "faces=\(recognition.detectedFaces), primary=\(primaryDescriptor), confidence=\(confidenceDescriptor), matches=\(recognition.matches.count), unknown_faces=\(recognition.unknownFaces)"
         logFaceRecognition(recognition: recognition, primary: primary, recognized: false, reason: "low_confidence_or_no_match")
         return (.unknown, recognition.detectedFaces)
     }
 
-    private func preserveKnownOrAwaitingStateForUnknown(now: Date) -> Bool {
+    private func transitionToUnknownIfNeeded(now: Date) {
         switch identityState {
-        case .known:
-            // Keep known state for potential "different face" scenarios.
-            return true
         case .awaitingName(let lastPromptAt):
             if now.timeIntervalSince(lastPromptAt) > awaitingNameTimeoutSeconds {
                 identityState = .unknownDetected(lastPromptAt: lastPromptAt)
+                recordTransition(now: now, to: nil, confidence: nil)
             }
-            return true
         case .enrolledPendingRecognition(_, let enrolledAt):
             if now.timeIntervalSince(enrolledAt) <= postEnrollGracePeriodSeconds {
-                return true
+                return
             }
             identityState = .unknownDetected(lastPromptAt: lastPromptDate(in: identityState))
-            return false
+            recordTransition(now: now, to: nil, confidence: nil)
+        case .known:
+            transitionToUnknown(now: now)
         case .unknownDetected, .none:
-            return false
+            identityState = .unknownDetected(lastPromptAt: lastPromptDate(in: identityState))
         }
+    }
+
+    private func transitionToKnown(name: String, confidence: Float, now: Date, shouldRecordTransition: Bool = true) {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        identityState = .known(name: normalizedName, lastSeenAt: now)
+        postEnrollRepairPromptIssued = false
+        resetLowConfidenceTracking()
+        if knownName == nil || !isSameIdentityName(knownName ?? "", normalizedName) {
+            knownSince = now
+        }
+        knownName = normalizedName
+        lastConfidence = confidence
+        if shouldRecordTransition {
+            recordTransition(now: now, to: normalizedName, confidence: confidence)
+        }
+    }
+
+    private func transitionToUnknown(now: Date) {
+        identityState = .unknownDetected(lastPromptAt: lastPromptDate(in: identityState))
+        recordTransition(now: now, to: nil, confidence: nil)
+        resetLowConfidenceTracking()
+    }
+
+    private func registerLowConfidenceSample(now: Date) -> Bool {
+        lowConfidenceStreakCount += 1
+        if lowConfidenceStreakStartedAt == nil {
+            lowConfidenceStreakStartedAt = now
+        }
+        let duration = now.timeIntervalSince(lowConfidenceStreakStartedAt ?? now)
+        return lowConfidenceStreakCount >= lowConfidenceExitFrameCount || duration >= lowConfidenceExitDurationSeconds
+    }
+
+    private func resetLowConfidenceTracking() {
+        lowConfidenceStreakCount = 0
+        lowConfidenceStreakStartedAt = nil
+    }
+
+    private func resetRecognitionStability() {
+        knownName = nil
+        knownSince = nil
+        lastConfidence = nil
+        resetLowConfidenceTracking()
+        lastTransitionAt = nil
+    }
+
+    private func recordTransition(now: Date, to name: String?, confidence: Float?) {
+        let previousName = knownName
+        knownName = name
+        lastConfidence = confidence
+        if let name {
+            if previousName == nil || !isSameIdentityName(previousName ?? "", name) {
+                knownSince = now
+            }
+        } else {
+            knownSince = nil
+        }
+        lastTransitionAt = now
+    }
+
+    private func isSameIdentityName(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.compare(rhs, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
     }
 
     private func recognitionResult(now: Date) -> CameraFaceRecognitionResult? {
@@ -549,9 +723,10 @@ final class FaceGreetingManager {
         let disallowed: Set<String> = [
             "hello", "hi", "hey",
             "thanks", "thank", "please", "sure",
-            "okay", "ok", "yes", "no", "nope", "nah",
+            "okay", "ok", "yes", "yeah", "yep", "yup", "no", "nope", "nah",
             "later", "maybe", "skip", "cancel",
             "help", "weather", "time",
+            "remember", "recognize", "enroll", "build", "start",
             "what", "when", "where", "why", "who", "how", "are", "you", "today"
         ]
         if words.contains(where: { disallowed.contains($0) }) {
@@ -563,7 +738,7 @@ final class FaceGreetingManager {
 
     private func shouldTreatPrimaryAsKnown(_ primary: CameraRecognizedFaceMatch,
                                            in recognition: CameraFaceRecognitionResult) -> Bool {
-        if primary.confidence >= recognitionThreshold {
+        if primary.confidence >= recognitionEnterThreshold {
             return true
         }
         guard case .enrolledPendingRecognition = identityState else {
@@ -622,7 +797,7 @@ final class FaceGreetingManager {
 
         let stripped = compact.replacingOccurrences(of: #"[^a-z'\-\s]"#, with: "", options: .regularExpression)
         let tokens = stripped.split(separator: " ")
-        guard (1...4).contains(tokens.count) else { return false }
+        guard (1...3).contains(tokens.count) else { return false }
 
         let noSpaces = compact.replacingOccurrences(of: " ", with: "")
         guard !noSpaces.isEmpty else { return false }
@@ -630,9 +805,11 @@ final class FaceGreetingManager {
         let ratio = Double(letters.count) / Double(noSpaces.unicodeScalars.count)
         guard ratio >= 0.75 else { return false }
 
-        if compact.contains(",") && tokens.count > 3 {
-            return false
-        }
+        let verbMarkers: Set<String> = [
+            "am", "are", "is", "do", "did", "can", "could", "should", "would",
+            "need", "want", "help", "check", "see", "recognize", "remember"
+        ]
+        if tokens.contains(where: { verbMarkers.contains(String($0)) }) { return false }
         return true
     }
 

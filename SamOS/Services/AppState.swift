@@ -111,6 +111,7 @@ final class AppState: ObservableObject {
     /// Follow-up question mode uses a short no-speech timeout; pending slot mode does not.
     private var awaitingQuestionAutoListen = false
     private let questionAutoListenNoSpeechTimeoutMs: Int
+    private static let questionAutoListenFeatureFlagKey = "samos_feature_question_auto_listen"
     private static let alarmFollowUpSettleDelayNs: UInt64 = 120_000_000
     private static let followUpSettleDelayNs: UInt64 = 80_000_000
 
@@ -145,6 +146,7 @@ final class AppState: ObservableObject {
     }
 
     private static let liveVisionScriptFlag = "--run-live-vision-script"
+    private static let liveLockdownCheckFlag = "--run-live-lockdown-check"
 
     // MARK: - Init
 
@@ -644,7 +646,7 @@ final class AppState: ObservableObject {
         )
         let shouldAutoListenForQuestion = finalAssistantText.map(endsWithSingleQuestionMark(_:)) ?? false
 
-        if shouldAutoListenForQuestion && isListeningEnabled {
+        if isQuestionAutoListenFeatureEnabled && shouldAutoListenForQuestion && isListeningEnabled {
             awaitingUserReply = true
             awaitingQuestionAutoListen = true
         } else if result.triggerFollowUpCapture && isListeningEnabled {
@@ -686,13 +688,23 @@ final class AppState: ObservableObject {
 
     private func maybeRunLiveVisionScriptIfRequested() {
         let args = ProcessInfo.processInfo.arguments
-        guard args.contains(Self.liveVisionScriptFlag) else { return }
-        Task { [weak self] in
-            await self?.runLiveVisionScriptHarness()
+        if args.contains(Self.liveLockdownCheckFlag) {
+            Task { [weak self] in
+                let succeeded = await self?.runLiveLockdownCheckHarness() ?? false
+                exit(succeeded ? 0 : 1)
+            }
+            return
+        }
+        if args.contains(Self.liveVisionScriptFlag) {
+            Task { [weak self] in
+                let succeeded = await self?.runLiveVisionScriptHarness() ?? false
+                exit(succeeded ? 0 : 1)
+            }
         }
     }
 
-    private func runLiveVisionScriptHarness() async {
+    @discardableResult
+    private func runLiveVisionScriptHarness() async -> Bool {
         let reportHeader = "[LIVE_VISION_SCRIPT]"
         print("\(reportHeader) start")
 
@@ -778,6 +790,141 @@ final class AppState: ObservableObject {
             print("\(reportHeader) result=FAIL failures=\(failures.joined(separator: " | "))")
         }
         print("\(reportHeader) report_end")
+        return failures.isEmpty
+    }
+
+    @discardableResult
+    private func runLiveLockdownCheckHarness() async -> Bool {
+        let reportHeader = "[LIVE_LOCKDOWN_CHECK]"
+        let enterThreshold: Float = 0.70
+        print("\(reportHeader) start")
+
+        var failures: [String] = []
+
+        func hasBlindClaim(_ text: String) -> Bool {
+            let normalized = text.lowercased()
+            return normalized.contains("i can't see")
+                || normalized.contains("i dont have the ability to see")
+                || normalized.contains("i don't have the ability to see")
+                || normalized.contains("i can't recognize images")
+        }
+
+        func looksLikeIdentityPrompt(_ text: String) -> Bool {
+            let normalized = text.lowercased()
+            return normalized.contains("what's your name") || normalized.contains("what is your name")
+        }
+
+        let keyStatus = OpenAISettings.apiKeyStatus
+        if keyStatus != .ready {
+            failures.append("OpenAI key not ready (\(keyStatus))")
+        }
+
+        if !cameraVisionService.isRunning {
+            if CameraPermission.currentStatus == .granted {
+                do {
+                    try cameraVisionService.start()
+                    isCameraEnabled = true
+                } catch {
+                    failures.append("Camera failed to start: \(error.localizedDescription)")
+                }
+            } else {
+                failures.append("Camera permission not granted")
+            }
+        }
+
+        var becameHealthy = false
+        for _ in 0..<30 {
+            if cameraVisionService.health.isHealthy {
+                becameHealthy = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if !becameHealthy {
+            failures.append("Camera health did not become healthy within 3s")
+        }
+        let initialHealth = cameraVisionService.health
+
+        let enrollResult = cameraVisionService.enrollFace(name: "Richard")
+        if enrollResult.status != .success {
+            failures.append("Enroll failed with status \(enrollResult.status)")
+        }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        var confidenceSamples: [Float] = []
+        let recognitionLoopStart = Date()
+        while Date().timeIntervalSince(recognitionLoopStart) < 5.0 {
+            if let recognition = cameraVisionService.recognizeKnownFaces(),
+               let primary = recognition.matches.max(by: { $0.confidence < $1.confidence }) {
+                confidenceSamples.append(primary.confidence)
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let maxConfidence = confidenceSamples.max() ?? 0
+        let minConfidence = confidenceSamples.min() ?? 0
+
+        var trustKnown = false
+        var history: [ChatMessage] = []
+        let trustProbe = await orchestrator.processTurn("Hi", history: history, inputMode: .text)
+        history.append(ChatMessage(role: .user, text: "Hi"))
+        history.append(contentsOf: trustProbe.appendedChat)
+        let trustAssistant = trustProbe.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+        #if DEBUG
+        let identityContext = (orchestrator as? TurnOrchestrator)?.debugLastPromptContext()?.identityContextLine ?? ""
+        #else
+        let identityContext = ""
+        #endif
+        trustKnown = trustAssistant.localizedCaseInsensitiveContains("richard")
+            || identityContext.localizedCaseInsensitiveContains("recognized user: richard")
+        if looksLikeIdentityPrompt(trustAssistant) {
+            failures.append("Trust probe re-prompted identity after enrollment")
+        }
+
+        if !(maxConfidence >= enterThreshold || trustKnown) {
+            failures.append("Recognition confidence never reached enter threshold and trust-window did not force known")
+        }
+
+        let visionTurn = "What do you see?"
+        let visionResult = await orchestrator.processTurn(visionTurn, history: history, inputMode: .text)
+        history.append(ChatMessage(role: .user, text: visionTurn))
+        history.append(contentsOf: visionResult.appendedChat)
+        let visionAssistant = visionResult.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+        let visionTools = visionResult.executedToolSteps.map(\.name)
+        let visionPass = visionTools.contains("describe_camera_view") && !hasBlindClaim(visionAssistant)
+        if !visionPass {
+            failures.append("Vision turn failed: expected describe_camera_view and no blindness claim")
+        }
+
+        let chatTurn = "How are you today?"
+        let chatResult = await orchestrator.processTurn(chatTurn, history: history, inputMode: .text)
+        history.append(ChatMessage(role: .user, text: chatTurn))
+        history.append(contentsOf: chatResult.appendedChat)
+        let chatAssistant = chatResult.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+        let chatLower = chatAssistant.lowercased()
+        let answeredQuestion = chatLower.contains("i'm")
+            || chatLower.contains("i am")
+            || chatLower.contains("doing")
+            || chatLower.contains("well")
+        if !answeredQuestion {
+            failures.append("Chat turn did not answer 'How are you today?'")
+        }
+        if looksLikeIdentityPrompt(chatAssistant) {
+            failures.append("Chat turn re-prompted identity after enrollment")
+        }
+
+        print("\(reportHeader) report_begin")
+        print("\(reportHeader) health_initial isHealthy=\(initialHealth.isHealthy) lastGoodFrameAt=\(String(describing: initialHealth.lastGoodFrameAt)) consecutiveErrors=\(initialHealth.consecutiveErrors)")
+        print("\(reportHeader) enroll status=\(enrollResult.status) samplesForName=\(enrollResult.samplesForName) totalKnownNames=\(enrollResult.totalKnownNames)")
+        print("\(reportHeader) recognition samples=\(confidenceSamples.count) minConfidence=\(String(format: "%.3f", minConfidence)) maxConfidence=\(String(format: "%.3f", maxConfidence)) trustKnown=\(trustKnown)")
+        print("\(reportHeader) turn=\"\(visionTurn)\" tools=\(visionTools.joined(separator: ",")) assistant=\"\(visionAssistant)\"")
+        print("\(reportHeader) turn=\"\(chatTurn)\" provider=\(chatResult.llmProvider.rawValue) assistant=\"\(chatAssistant)\"")
+        if failures.isEmpty {
+            print("\(reportHeader) result=PASS")
+        } else {
+            print("\(reportHeader) result=FAIL failures=\(failures.joined(separator: " | "))")
+        }
+        print("\(reportHeader) report_end")
+        return failures.isEmpty
     }
 
     private func markTurnRouteFinished(provider: LLMProvider, toolSteps: Int, routerMs: Int?) {
@@ -1305,6 +1452,13 @@ final class AppState: ObservableObject {
 
     private static func elapsedMs(since start: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(start) * 1000))
+    }
+
+    private var isQuestionAutoListenFeatureEnabled: Bool {
+        if let stored = UserDefaults.standard.object(forKey: Self.questionAutoListenFeatureFlagKey) as? Bool {
+            return stored
+        }
+        return true
     }
 
     func refreshWebsiteLearningDebug(limit: Int = 20) {

@@ -12,6 +12,18 @@ enum LLMCallReason: String {
     case imageRepair
 }
 
+enum RouterValidationFailureKind: Equatable {
+    case unknownTool
+}
+
+struct RouterValidationFailure: Error, Equatable {
+    let kind: RouterValidationFailureKind
+    let toolName: String
+    let userText: String
+    let rawPlanPrefix: String
+    let reason: String
+}
+
 // MARK: - Ollama Transport Protocol
 
 /// Abstraction over the Ollama HTTP API so tests can inject a fake.
@@ -148,6 +160,7 @@ final class OllamaRouter {
         case invalidResponse
         case jsonParseFailed(String)
         case schemaMismatch(raw: String, reasons: [String])
+        case validationFailure(RouterValidationFailure)
 
         var errorDescription: String? {
             switch self {
@@ -156,6 +169,8 @@ final class OllamaRouter {
             case .jsonParseFailed(let raw): return "Failed to parse Action JSON: \(raw.prefix(200))"
             case .schemaMismatch(let raw, let reasons):
                 return "LLM returned non-schema JSON: \(reasons.joined(separator: "; ")) — raw: \(raw.prefix(200))"
+            case .validationFailure(let failure):
+                return "Router validation failure (\(failure.kind)): \(failure.reason)"
             }
         }
     }
@@ -206,6 +221,9 @@ final class OllamaRouter {
         do {
             return try parsePlanOrAction(from: responseText)
         } catch OllamaError.schemaMismatch(let raw, let reasons) where repairReasons == nil {
+            if let failure = unknownToolValidationFailure(from: reasons, userInput: input, raw: raw) {
+                throw OllamaError.validationFailure(failure)
+            }
             // First attempt returned valid JSON with wrong schema — retry once with repair context
             #if DEBUG
             print("[OllamaRouter] Schema mismatch, repair retry: \(reasons.joined(separator: "; "))")
@@ -640,18 +658,61 @@ final class OllamaRouter {
         return reasons
     }
 
+    private func unknownToolValidationFailure(from reasons: [String],
+                                              userInput: String,
+                                              raw: String) -> RouterValidationFailure? {
+        for reason in reasons {
+            guard let toolName = extractUnknownToolName(from: reason) else { continue }
+            return RouterValidationFailure(
+                kind: .unknownTool,
+                toolName: toolName,
+                userText: userInput,
+                rawPlanPrefix: String(raw.prefix(200)),
+                reason: reason
+            )
+        }
+        return nil
+    }
+
+    private func extractUnknownToolName(from reason: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"unknown tool '([^']+)'"#, options: .caseInsensitive) else {
+            return nil
+        }
+        let range = NSRange(reason.startIndex..<reason.endIndex, in: reason)
+        guard let match = regex.firstMatch(in: reason, range: range),
+              match.numberOfRanges >= 2,
+              let toolRange = Range(match.range(at: 1), in: reason) else {
+            return nil
+        }
+        let tool = String(reason[toolRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return tool.isEmpty ? nil : tool
+    }
+
     private func canNormalizeMissingStepWithName(_ name: String, toolNames: Set<String>) -> Bool {
         isKnownToolName(name, toolNames: toolNames)
     }
 
     private func canNormalizeStepAliasToTool(_ stepType: String) -> Bool {
-        Self.planStepToolAliasAllowlist.contains(normalizeToken(stepType))
+        let normalized = normalizeToken(stepType)
+        return Self.planStepToolAliasAllowlist.contains(normalized)
+            || Self.planStepToolAliasAllowlist.contains(canonicalToolName(normalized))
     }
 
     private func isKnownToolName(_ name: String, toolNames: Set<String>) -> Bool {
-        let normalized = normalizeToken(name)
+        let normalized = canonicalToolName(name)
         guard !normalized.isEmpty else { return false }
         return toolNames.contains(normalized) || Self.planStepToolAliasAllowlist.contains(normalized)
+    }
+
+    private func canonicalToolName(_ value: String) -> String {
+        let normalized = normalizeToken(value)
+        let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
+        switch compact {
+        case "enrollfacetool", "enrollface", "enrollcameraface", "enrolluserface", "enrollfacerecognition":
+            return "enroll_camera_face"
+        default:
+            return normalized
+        }
     }
 
     private func normalizeToken(_ value: String) -> String {
@@ -718,7 +779,12 @@ final class OllamaRouter {
         "find_video",
         "find_image",
         "find_files",
-        "learn_website"
+        "learn_website",
+        "enroll_camera_face",
+        "enrollfacetool",
+        "enroll_face_tool",
+        "enrollface",
+        "enrollcameraface"
     ]
 
     /// Attempts to rescue a non-schema JSON object as TALK if it looks conversational.
@@ -770,8 +836,9 @@ final class OllamaRouter {
         }
 
         // Case 1: LLM used tool name as action (e.g. "action": "show_image")
-        if toolNames.contains(actionRaw) {
-            let toolName = actionRaw
+        let canonicalActionToolName = canonicalToolName(actionRaw)
+        if toolNames.contains(canonicalActionToolName) {
+            let toolName = canonicalActionToolName
             dict["action"] = "TOOL"
             dict["name"] = toolName
             // Collect top-level keys as args if no "args" key exists
@@ -823,7 +890,9 @@ final class OllamaRouter {
         if (dict["action"] as? String ?? "").uppercased() == "TOOL",
            let name = (dict["name"] as? String)?.lowercased(),
            var args = dict["args"] as? [String: Any] {
-            args = normalizeToolArgs(name: name, args: args)
+            let canonicalName = canonicalToolName(name)
+            dict["name"] = canonicalName
+            args = normalizeToolArgs(name: canonicalName, args: args)
             dict["args"] = args
         }
 
@@ -873,10 +942,14 @@ final class OllamaRouter {
             step["step"] = "tool"
         }
 
+        if let rawName = step["name"] as? String {
+            step["name"] = canonicalToolName(rawName)
+        }
+
         let rawStepType = normalizeToken(step["step"] as? String ?? "")
         if canNormalizeStepAliasToTool(rawStepType) {
             if step["name"] == nil {
-                step["name"] = rawStepType
+                step["name"] = canonicalToolName(rawStepType)
             }
             step["step"] = "tool"
         }
@@ -914,16 +987,27 @@ final class OllamaRouter {
         }
 
         if normalizedType == "tool",
-           let name = (step["name"] as? String)?.lowercased(),
-           var args = step["args"] as? [String: Any] {
-            args = normalizeToolArgs(name: name, args: args)
+           let name = (step["name"] as? String)?.lowercased() {
+            let canonicalName = canonicalToolName(name)
+            step["name"] = canonicalName
+            var args = step["args"] as? [String: Any] ?? [:]
+            args = normalizeToolArgs(name: canonicalName, args: args, step: step)
+            if canonicalName == "show_text" {
+                let markdown = (args["markdown"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let say = (step["say"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let hasOnlyInternalFallback = markdown == "(internal) show_text called with empty markdown"
+                if (markdown.isEmpty || hasOnlyInternalFallback), shouldPromoteShowTextSayToMarkdown(say) {
+                    args["markdown"] = say
+                    step["say"] = shortShowTextSummary(from: say)
+                }
+            }
             step["args"] = args
         }
 
         return step
     }
 
-    private func normalizeToolArgs(name: String, args: [String: Any]) -> [String: Any] {
+    private func normalizeToolArgs(name: String, args: [String: Any], step: [String: Any]? = nil) -> [String: Any] {
         var normalized = args
         if name == "show_text" {
             let markdown = (normalized["markdown"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -934,10 +1018,49 @@ final class OllamaRouter {
                 } else if let content = normalized["content"] as? String,
                           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     normalized["markdown"] = content
+                } else if let topMarkdown = step?["markdown"] as? String,
+                          !topMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    normalized["markdown"] = topMarkdown
+                } else if let topText = step?["text"] as? String,
+                          !topText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    normalized["markdown"] = topText
+                } else if let topContent = step?["content"] as? String,
+                          !topContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    normalized["markdown"] = topContent
                 }
+            }
+            let normalizedMarkdown = (normalized["markdown"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if normalizedMarkdown.isEmpty {
+                normalized["markdown"] = "(internal) show_text called with empty markdown"
             }
         }
         return normalized
+    }
+
+    private func shouldPromoteShowTextSayToMarkdown(_ say: String) -> Bool {
+        let trimmed = say.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lower = trimmed.lowercased()
+        if trimmed.contains("\n") { return true }
+        if lower.contains("ingredients") || lower.contains("steps:") || lower.contains("instructions") {
+            return true
+        }
+        return trimmed.count > 120
+    }
+
+    private func shortShowTextSummary(from markdown: String) -> String {
+        let compact = markdown
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !compact.isEmpty else { return "Here you go." }
+        if let range = compact.range(of: #"[.!?]\s"#, options: .regularExpression) {
+            let sentence = String(compact[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty {
+                return sentence.count <= 120 ? sentence : String(sentence.prefix(117)) + "..."
+            }
+        }
+        return compact.count <= 120 ? compact : String(compact.prefix(117)) + "..."
     }
 
     /// Extracts a JSON object from text, preferring objects with an "action" key.

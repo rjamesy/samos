@@ -418,9 +418,43 @@ struct CameraFrameAnalysis {
     let capturedAt: Date
 }
 
+struct CameraHealth: Equatable {
+    let lastGoodFrameAt: Date?
+    let lastFrameErrorAt: Date?
+    let consecutiveErrors: Int
+    let isHealthy: Bool
+}
+
+enum FaceConfidenceMapper {
+    /// Distance-based confidence for VNFeaturePrintObservation distances.
+    /// Uses an exponential decay so low-but-valid distances do not collapse to near-zero confidence.
+    static func confidence(fromDistance distance: Float) -> Float {
+        let safeDistance = max(0, distance)
+        let confidence = exp(-safeDistance)
+        return max(0, min(1, confidence))
+    }
+
+    /// Utility for deterministic unit tests.
+    static func cosineConfidence(live: [Float], stored: [Float]) -> Float? {
+        guard live.count == stored.count, !live.isEmpty else { return nil }
+        var dot: Float = 0
+        var liveNormSq: Float = 0
+        var storedNormSq: Float = 0
+        for idx in live.indices {
+            dot += live[idx] * stored[idx]
+            liveNormSq += live[idx] * live[idx]
+            storedNormSq += stored[idx] * stored[idx]
+        }
+        guard liveNormSq > 0, storedNormSq > 0 else { return nil }
+        let similarity = dot / (sqrt(liveNormSq) * sqrt(storedNormSq))
+        return max(0, min(1, (similarity + 1) * 0.5))
+    }
+}
+
 protocol CameraVisionProviding: AnyObject {
     var isRunning: Bool { get }
     var latestFrameAt: Date? { get }
+    var health: CameraHealth { get }
     func start() throws
     func stop()
     func latestPreviewImage() -> NSImage?
@@ -432,7 +466,23 @@ protocol CameraVisionProviding: AnyObject {
     func clearKnownFaces() -> Bool
 }
 
+enum CameraVisionHealthPolicy {
+    static let healthyFrameMaxAgeSeconds: TimeInterval = 3.0
+}
+
 extension CameraVisionProviding {
+    var health: CameraHealth {
+        let now = Date()
+        let healthy = isRunning
+            && (latestFrameAt.map { now.timeIntervalSince($0) <= CameraVisionHealthPolicy.healthyFrameMaxAgeSeconds } ?? false)
+        return CameraHealth(
+            lastGoodFrameAt: latestFrameAt,
+            lastFrameErrorAt: nil,
+            consecutiveErrors: 0,
+            isHealthy: healthy
+        )
+    }
+
     func currentAnalysis() -> CameraFrameAnalysis? { nil }
     func enrollFace(name: String) -> CameraFaceEnrollmentResult {
         _ = name
@@ -486,12 +536,16 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
     private var latestImage: CGImage?
     private var latestPreview: NSImage?
     private var _latestFrameAt: Date?
+    private var _lastFrameErrorAt: Date?
+    private var _consecutiveFrameErrors: Int = 0
     private var lastStoredAt = Date.distantPast
     private var enrolledFacePrints: [String: [VNFeaturePrintObservation]] = [:]
     private var enrolledFaceNames: [String: String] = [:]
     private var cachedAnalysis: CameraFrameAnalysis?
     private var cachedAnalysisAt: Date?
     private let faceRecognitionThreshold: Float = 0.36
+    private let cameraHealthMaxConsecutiveErrors = 8
+    private var hasLoggedFaceDebugThisSession = false
 
     private override init() {
         self.profileStore = .shared
@@ -505,6 +559,24 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
 
     var latestFrameAt: Date? {
         stateQueue.sync { _latestFrameAt }
+    }
+
+    var health: CameraHealth {
+        stateQueue.sync {
+            let now = Date()
+            let hasRecentFrame = _latestFrameAt.map {
+                now.timeIntervalSince($0) <= CameraVisionHealthPolicy.healthyFrameMaxAgeSeconds
+            } ?? false
+            let healthy = _isRunning
+                && hasRecentFrame
+                && _consecutiveFrameErrors < cameraHealthMaxConsecutiveErrors
+            return CameraHealth(
+                lastGoodFrameAt: _latestFrameAt,
+                lastFrameErrorAt: _lastFrameErrorAt,
+                consecutiveErrors: _consecutiveFrameErrors,
+                isHealthy: healthy
+            )
+        }
     }
 
     func latestPreviewImage() -> NSImage? {
@@ -530,6 +602,7 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
         }
 
         if let startError {
+            recordFrameError()
             throw startError
         }
     }
@@ -732,7 +805,14 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
             }
 
             if best.distance <= faceRecognitionThreshold {
-                let confidence = max(0.0, min(1.0, 1.0 - (best.distance / faceRecognitionThreshold)))
+                let confidence = FaceConfidenceMapper.confidence(fromDistance: best.distance)
+                maybeLogFaceDebugOnce(
+                    liveEmbeddingDim: best.liveEmbeddingDim,
+                    storedEmbeddingDim: best.storedEmbeddingDim,
+                    metric: "VNFeaturePrintDistance(exp(-distance))",
+                    rawDistance: best.distance,
+                    computedConfidence: confidence
+                )
                 matches.append(
                     CameraRecognizedFaceMatch(
                         name: best.name,
@@ -790,6 +870,7 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
             session.commitConfiguration()
             didConfigure = true
         } catch {
+            recordFrameError()
             throw CameraVisionError.configurationFailed(error.localizedDescription)
         }
     }
@@ -797,13 +878,19 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
     private func setRunning(_ running: Bool) {
         stateQueue.async(flags: .barrier) {
             self._isRunning = running
+            if !running {
+                self._consecutiveFrameErrors = 0
+            }
         }
     }
 
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            recordFrameError()
+            return
+        }
         let now = Date()
 
         let shouldStore = stateQueue.sync(flags: .barrier) { () -> Bool in
@@ -815,13 +902,17 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
         guard shouldStore else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            recordFrameError(at: now)
+            return
+        }
         let preview = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
 
         stateQueue.sync(flags: .barrier) {
             self.latestImage = cgImage
             self.latestPreview = preview
             self._latestFrameAt = now
+            self._consecutiveFrameErrors = 0
         }
         analysisQueue.sync {
             self.cachedAnalysis = nil
@@ -830,6 +921,13 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
 
         DispatchQueue.main.async { [weak self] in
             self?.onFrameUpdated?(preview, now)
+        }
+    }
+
+    private func recordFrameError(at timestamp: Date = Date()) {
+        stateQueue.sync(flags: .barrier) {
+            self._lastFrameErrorAt = timestamp
+            self._consecutiveFrameErrors += 1
         }
     }
 
@@ -960,17 +1058,31 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
         return rect.integral
     }
 
+    private struct BestFaceMatch {
+        let name: String
+        let distance: Float
+        let liveEmbeddingDim: Int
+        let storedEmbeddingDim: Int
+    }
+
     private func bestFaceMatch(
         for observation: VNFeaturePrintObservation,
         registry: [String: [VNFeaturePrintObservation]],
         names: [String: String]
-    ) -> (name: String, distance: Float)? {
+    ) -> BestFaceMatch? {
         var bestDistance = Float.greatestFiniteMagnitude
         var bestName: String?
+        var bestLiveDim: Int = 0
+        var bestStoredDim: Int = 0
+        let liveDim = observation.elementCount
 
         for (key, references) in registry {
             let resolvedName = names[key] ?? key
             for reference in references {
+                let storedDim = reference.elementCount
+                guard liveDim == storedDim else {
+                    continue
+                }
                 var distance: Float = 0
                 do {
                     try observation.computeDistance(&distance, to: reference)
@@ -980,12 +1092,35 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
                 if distance < bestDistance {
                     bestDistance = distance
                     bestName = resolvedName
+                    bestLiveDim = liveDim
+                    bestStoredDim = storedDim
                 }
             }
         }
 
         guard let bestName else { return nil }
-        return (bestName, bestDistance)
+        return BestFaceMatch(
+            name: bestName,
+            distance: bestDistance,
+            liveEmbeddingDim: bestLiveDim,
+            storedEmbeddingDim: bestStoredDim
+        )
+    }
+
+    private func maybeLogFaceDebugOnce(liveEmbeddingDim: Int,
+                                       storedEmbeddingDim: Int,
+                                       metric: String,
+                                       rawDistance: Float,
+                                       computedConfidence: Float) {
+        #if DEBUG
+        guard !hasLoggedFaceDebugThisSession else { return }
+        hasLoggedFaceDebugThisSession = true
+        print(
+            "[FACE_DEBUG] storedEmbeddingDim=\(storedEmbeddingDim), liveEmbeddingDim=\(liveEmbeddingDim), " +
+            "metric=\(metric), rawDistance=\(String(format: "%.4f", rawDistance)), " +
+            "computedConfidence=\(String(format: "%.4f", computedConfidence))"
+        )
+        #endif
     }
 
     private func faceArea(_ normalizedRect: CGRect) -> CGFloat {

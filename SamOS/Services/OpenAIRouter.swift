@@ -1175,6 +1175,7 @@ final class OpenAIRouter {
         case invalidAPIKey
         case requestFailed(String)
         case badResponse(Int)
+        case validationFailure(RouterValidationFailure)
 
         var errorDescription: String? {
             switch self {
@@ -1186,6 +1187,8 @@ final class OpenAIRouter {
                 return "OpenAI rejected request (HTTP 401/403)"
             case .requestFailed(let msg): return "OpenAI request failed: \(msg)"
             case .badResponse(let code): return "OpenAI returned HTTP \(code)"
+            case .validationFailure(let failure):
+                return "OpenAI validation failure (\(failure.kind)): \(failure.reason)"
             }
         }
     }
@@ -1288,6 +1291,14 @@ final class OpenAIRouter {
             }
             return guarded
         } catch {
+            if let failure = unknownToolValidationFailure(
+                from: error,
+                userInput: input,
+                rawResponse: responseText
+            ) {
+                throw OpenAIError.validationFailure(failure)
+            }
+
             let trimmed = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 throw OpenAIError.requestFailed("Empty response from OpenAI")
@@ -1923,6 +1934,10 @@ final class OpenAIRouter {
     }
 
     private func debugParseFailureReason(from error: Error) -> String {
+        if let openAIError = error as? OpenAIRouter.OpenAIError,
+           case .validationFailure(let failure) = openAIError {
+            return "validation_failure:\(failure.reason)"
+        }
         if let ollamaError = error as? OllamaRouter.OllamaError {
             switch ollamaError {
             case .schemaMismatch(_, let reasons):
@@ -1933,6 +1948,8 @@ final class OpenAIRouter {
                 return "invalid_response"
             case .unreachable(let msg):
                 return "unreachable: \(msg)"
+            case .validationFailure(let failure):
+                return "validation_failure:\(failure.reason)"
             }
         }
         if let decodingError = error as? DecodingError {
@@ -1964,5 +1981,40 @@ final class OpenAIRouter {
         let snippet = raw.replacingOccurrences(of: "\n", with: " ")
         print("[OpenAIRouter][debug] salvage_stage=\(stage) parse_failed_reason=\(reason) raw_json_prefix=\(snippet.prefix(120))")
         #endif
+    }
+
+    private func unknownToolValidationFailure(from error: Error,
+                                              userInput: String,
+                                              rawResponse: String) -> RouterValidationFailure? {
+        guard let ollamaError = error as? OllamaRouter.OllamaError else { return nil }
+        guard case .schemaMismatch(_, let reasons) = ollamaError else { return nil }
+        for reason in reasons {
+            guard let toolName = extractUnknownToolName(from: reason) else { continue }
+            return RouterValidationFailure(
+                kind: .unknownTool,
+                toolName: toolName,
+                userText: userInput,
+                rawPlanPrefix: String(rawResponse.prefix(200)),
+                reason: reason
+            )
+        }
+        return nil
+    }
+
+    private func extractUnknownToolName(from reason: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"unknown tool '([^']+)'"#,
+            options: .caseInsensitive
+        ) else {
+            return nil
+        }
+        let range = NSRange(reason.startIndex..<reason.endIndex, in: reason)
+        guard let match = regex.firstMatch(in: reason, range: range),
+              match.numberOfRanges >= 2,
+              let toolRange = Range(match.range(at: 1), in: reason) else {
+            return nil
+        }
+        let value = String(reason[toolRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }

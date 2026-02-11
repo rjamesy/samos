@@ -97,11 +97,17 @@ final class FaceGreetingManagerTests: XCTestCase {
         let manager = FaceGreetingManager(camera: camera, settings: StubFaceGreetingSettings())
 
         _ = manager.evaluateFrame()
-        let line = manager.greetingOverride(for: greetingMode, repetitionCount: 1, turnIndex: 1)
+        let decision = manager.prepareTurn(
+            userInput: "Hi",
+            inputMode: .voice,
+            now: Date(),
+            userInitiated: true
+        )
 
         XCTAssertTrue(manager.currentIdentityContext.unrecognizedUserPresent)
         XCTAssertTrue(manager.awaitingIdentityConfirmation)
-        XCTAssertTrue((line ?? "").localizedCaseInsensitiveContains("what's your name"))
+        XCTAssertTrue(decision.shouldPromptIdentity)
+        XCTAssertTrue((decision.promptToAppend ?? "").localizedCaseInsensitiveContains("what's your name"))
     }
 
     func testDeclineEnrollmentResetsState() {
@@ -111,7 +117,13 @@ final class FaceGreetingManagerTests: XCTestCase {
         let manager = FaceGreetingManager(camera: camera, settings: StubFaceGreetingSettings())
 
         _ = manager.evaluateFrame()
-        _ = manager.greetingOverride(for: greetingMode, repetitionCount: 1, turnIndex: 1)
+        _ = manager.prepareTurn(
+            userInput: "Hi",
+            inputMode: .voice,
+            now: Date(),
+            userInitiated: true
+        )
+        XCTAssertTrue(manager.awaitingIdentityConfirmation)
         let resolution = manager.resolveIdentityConfirmationResponse("No thanks")
 
         XCTAssertEqual(resolution, .declined(message: "No worries at all."))
@@ -238,8 +250,8 @@ final class FaceGreetingManagerTests: XCTestCase {
         )
         let line = result.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
 
-        XCTAssertEqual(line, "Hi there - I don't recognize you. What's your name?")
-        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Proactive unknown prompt should short-circuit normal routing")
+        XCTAssertTrue(line.localizedCaseInsensitiveContains("what's your name"), "Expected identity prompt, got: \(line)")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Unknown-face onboarding must still route normal chat once")
     }
 
     func testUnknownFaceTextInputUsesNormalRouting() async {
@@ -261,7 +273,7 @@ final class FaceGreetingManagerTests: XCTestCase {
         )
         let line = result.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
 
-        XCTAssertEqual(line, "I can help with that.")
+        XCTAssertTrue(line.localizedCaseInsensitiveContains("what's your name"), "Expected identity prompt appended once, got: \(line)")
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
     }
 

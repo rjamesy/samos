@@ -69,10 +69,13 @@ struct ShowTextTool: Tool {
 
     func execute(args: [String: String]) -> OutputItem {
         // Accept common aliases from model-generated specs.
-        let markdown = args["markdown"]
+        let rawMarkdown = args["markdown"]
             ?? args["text"]
             ?? args["content"]
-            ?? "_No content provided._"
+            ?? ""
+        let markdown = rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "(internal) show_text called with empty markdown"
+            : rawMarkdown
         return OutputItem(kind: .markdown, payload: markdown)
     }
 }
