@@ -144,6 +144,8 @@ final class AppState: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "samos_userWantsCameraEnabled") }
     }
 
+    private static let liveVisionScriptFlag = "--run-live-vision-script"
+
     // MARK: - Init
 
     init() {
@@ -162,6 +164,7 @@ final class AppState: ObservableObject {
         refreshWebsiteLearningDebug()
         refreshAutonomousLearningDebug()
         refreshCameraDebug()
+        maybeRunLiveVisionScriptIfRequested()
     }
 
     init(orchestrator: TurnOrchestrating,
@@ -188,6 +191,7 @@ final class AppState: ObservableObject {
         refreshWebsiteLearningDebug()
         refreshAutonomousLearningDebug()
         refreshCameraDebug()
+        maybeRunLiveVisionScriptIfRequested()
     }
 
     init(orchestrator: TurnOrchestrating,
@@ -213,6 +217,7 @@ final class AppState: ObservableObject {
         refreshWebsiteLearningDebug()
         refreshAutonomousLearningDebug()
         refreshCameraDebug()
+        maybeRunLiveVisionScriptIfRequested()
     }
 
     private func configureRuntimeServicesIfNeeded(_ enabled: Bool) {
@@ -558,8 +563,9 @@ final class AppState: ObservableObject {
 
         // Everything else → orchestrator
         startThinkingFillerTimer(baseChatCount: baseChatCount, baseOutputCount: baseOutputCount)
+        let turnInputMode: TurnInputMode = existingTurnStart != nil ? .voice : .text
         Task(priority: .userInitiated) {
-            let result = await orchestrator.processTurn(trimmed, history: chatMessages)
+            let result = await orchestrator.processTurn(trimmed, history: chatMessages, inputMode: turnInputMode)
             markTurnRouteFinished(
                 provider: result.llmProvider,
                 toolSteps: result.executedToolSteps.count,
@@ -615,7 +621,7 @@ final class AppState: ObservableObject {
                 appendedChat[idx].usedLocalKnowledge = true
             }
         }
-        for idx in appendedChat.indices where appendedChat[idx].role == .assistant && appendedChat[idx].llmProvider == .openai {
+        for idx in appendedChat.indices where appendedChat[idx].role == .assistant && appendedChat[idx].originProvider == .openai {
             appendedChat[idx].assistantResponseMode = currentAssistantResponseMode()
         }
 
@@ -676,6 +682,102 @@ final class AppState: ObservableObject {
         pendingCaptureStartedAt = nil
         pendingTranscribeStartedAt = nil
         pendingTranscriptReadyAt = nil
+    }
+
+    private func maybeRunLiveVisionScriptIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains(Self.liveVisionScriptFlag) else { return }
+        Task { [weak self] in
+            await self?.runLiveVisionScriptHarness()
+        }
+    }
+
+    private func runLiveVisionScriptHarness() async {
+        let reportHeader = "[LIVE_VISION_SCRIPT]"
+        print("\(reportHeader) start")
+
+        var failures: [String] = []
+        let keyStatus = OpenAISettings.apiKeyStatus
+        if keyStatus != .ready {
+            failures.append("OpenAI key not ready (\(keyStatus))")
+        }
+
+        if !cameraVisionService.isRunning {
+            if CameraPermission.currentStatus == .granted {
+                do {
+                    try cameraVisionService.start()
+                    isCameraEnabled = true
+                } catch {
+                    failures.append("Camera failed to start: \(error.localizedDescription)")
+                }
+            } else {
+                failures.append("Camera permission not granted")
+            }
+        }
+
+        if cameraVisionService.currentAnalysis() == nil {
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                if cameraVisionService.currentAnalysis() != nil { break }
+            }
+        }
+        if cameraVisionService.currentAnalysis() == nil {
+            failures.append("No live camera frame available")
+        }
+
+        var history: [ChatMessage] = []
+        var scriptRows: [(turn: String, tools: [String], origin: String, assistant: String, pass: Bool)] = []
+
+        func hasBlindClaim(_ text: String) -> Bool {
+            let normalized = text.lowercased()
+            return normalized.contains("i can't see")
+                || normalized.contains("i dont have the ability to see")
+                || normalized.contains("i don't have the ability to see")
+                || normalized.contains("i can't recognize images")
+        }
+
+        func appendHistory(turn: String, result: TurnResult) {
+            history.append(ChatMessage(role: .user, text: turn))
+            history.append(contentsOf: result.appendedChat)
+        }
+
+        let firstTurn = "What do you see?"
+        let firstResult = await orchestrator.processTurn(firstTurn, history: history, inputMode: .text)
+        appendHistory(turn: firstTurn, result: firstResult)
+        let firstTools = firstResult.executedToolSteps.map(\.name)
+        let firstAssistant = firstResult.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+        let firstOrigin = firstResult.appendedChat.last(where: { $0.role == .assistant })?.originProvider.rawValue
+            ?? firstResult.originProvider.rawValue
+        let firstPass = firstTools.contains("describe_camera_view") && !hasBlindClaim(firstAssistant)
+        if !firstPass {
+            failures.append("Turn 1 failed: expected describe_camera_view and no blindness claim")
+        }
+        scriptRows.append((turn: firstTurn, tools: firstTools, origin: firstOrigin, assistant: firstAssistant, pass: firstPass))
+
+        let secondTurn = "Do you see a person?"
+        let secondResult = await orchestrator.processTurn(secondTurn, history: history, inputMode: .text)
+        appendHistory(turn: secondTurn, result: secondResult)
+        let secondTools = secondResult.executedToolSteps.map(\.name)
+        let secondAssistant = secondResult.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+        let secondOrigin = secondResult.appendedChat.last(where: { $0.role == .assistant })?.originProvider.rawValue
+            ?? secondResult.originProvider.rawValue
+        let secondPass = secondTools.contains("camera_visual_qa")
+        if !secondPass {
+            failures.append("Turn 2 failed: expected camera_visual_qa")
+        }
+        scriptRows.append((turn: secondTurn, tools: secondTools, origin: secondOrigin, assistant: secondAssistant, pass: secondPass))
+
+        print("\(reportHeader) report_begin")
+        for row in scriptRows {
+            print("\(reportHeader) turn=\"\(row.turn)\" pass=\(row.pass) origin=\(row.origin) tools=\(row.tools.joined(separator: ","))")
+            print("\(reportHeader) assistant=\"\(row.assistant)\"")
+        }
+        if failures.isEmpty {
+            print("\(reportHeader) result=PASS")
+        } else {
+            print("\(reportHeader) result=FAIL failures=\(failures.joined(separator: " | "))")
+        }
+        print("\(reportHeader) report_end")
     }
 
     private func markTurnRouteFinished(provider: LLMProvider, toolSteps: Int, routerMs: Int?) {

@@ -219,6 +219,52 @@ final class FaceGreetingManagerTests: XCTestCase {
         XCTAssertEqual(camera.enrollCalls, ["James"])
     }
 
+    func testUnknownFacePromptsOnFirstVoiceTurnAfterDetection() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(#"{"action":"TALK","say":"I can help with that."}"#)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = FakeFaceCamera()
+        camera.analysis = makeAnalysis(faceCount: 1)
+        camera.recognitionResult = makeRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        let manager = FaceGreetingManager(camera: camera, settings: StubFaceGreetingSettings())
+        let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, faceGreetingManager: manager)
+
+        let result = await orchestrator.processTurn(
+            "What's the weather in Tokyo?",
+            history: [],
+            inputMode: .voice
+        )
+        let line = result.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+
+        XCTAssertEqual(line, "Hi there - I don't recognize you. What's your name?")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Proactive unknown prompt should short-circuit normal routing")
+    }
+
+    func testUnknownFaceTextInputUsesNormalRouting() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(#"{"action":"TALK","say":"I can help with that."}"#)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = FakeFaceCamera()
+        camera.analysis = makeAnalysis(faceCount: 1)
+        camera.recognitionResult = makeRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        let manager = FaceGreetingManager(camera: camera, settings: StubFaceGreetingSettings())
+        let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, faceGreetingManager: manager)
+
+        let result = await orchestrator.processTurn(
+            "What's the weather in Tokyo?",
+            history: [],
+            inputMode: .text
+        )
+        let line = result.appendedChat.last(where: { $0.role == .assistant })?.text ?? ""
+
+        XCTAssertEqual(line, "I can help with that.")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
+    }
+
     func testPrivacyNoAutoEnroll() async {
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [

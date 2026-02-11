@@ -770,7 +770,7 @@ struct SettingsView: View {
     private var securitySection: some View {
         Section("Security") {
             #if DEBUG
-            Text("Dev mode: keys stored locally with Keychain fallback enabled.")
+            Text("Dev mode: API keys are stored locally in app preferences (Keychain disabled).")
                 .font(.caption)
                 .foregroundColor(.secondary)
             #else

@@ -2,8 +2,8 @@ import Foundation
 import AVFoundation
 import CryptoKit
 
-/// Settings for OpenAI (SkillForge), using Keychain for the API key and UserDefaults for the model.
-/// Follows the same pattern as ElevenLabsSettings.
+/// Settings for OpenAI (SkillForge), with DEBUG keys stored in app-local UserDefaults
+/// (DevSecretsStore) to avoid Keychain prompts during development.
 enum OpenAISettings {
 
     // MARK: - Keychain identifiers
@@ -51,8 +51,8 @@ enum OpenAISettings {
 
     private static var shouldUseKeychainStorage: Bool {
         #if DEBUG
-        // In debug we always persist in Keychain so app rebuild/relaunch does not lose API keys.
-        return true
+        // Keep development keys app-local to avoid macOS Keychain access prompts.
+        return false
         #else
         return KeychainStore.useKeychain
         #endif
@@ -112,7 +112,7 @@ enum OpenAISettings {
     }
 
     /// Reads the API key once.
-    /// DEBUG prefers Keychain first, then falls back to DevSecretsStore.
+    /// DEBUG uses DevSecretsStore only.
     /// RELEASE uses Keychain.
     /// Both fall back to `OPENAI_API_KEY` env var when no persisted key exists.
     private static func loadApiKeyCache() {
@@ -120,22 +120,9 @@ enum OpenAISettings {
         loadInvalidatedKeyStateIfNeeded()
 
         #if DEBUG
-        if shouldUseKeychainStorage,
-           let key = KeychainStore.get(forKey: keychainAccount, service: effectiveKeychainService),
-           !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            _cachedApiKey = key
-
-            // Keep local debug store aligned for local inspection.
-            DevSecretsStore.shared.set(effectiveDevSecretKey, key)
-            return
-        }
-
         if let key = DevSecretsStore.shared.get(effectiveDevSecretKey),
            !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             _cachedApiKey = key
-            if shouldUseKeychainStorage {
-                _ = KeychainStore.set(key, forKey: keychainAccount, service: effectiveKeychainService)
-            }
             return
         }
         #endif

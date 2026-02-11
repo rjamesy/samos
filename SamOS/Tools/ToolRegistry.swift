@@ -2227,7 +2227,12 @@ struct DescribeCameraViewTool: Tool {
             )
         }
 
-        return OutputItem(kind: .markdown, payload: scene.markdown())
+        let spoken = "Here's what I can see right now: \(scene.summary)"
+        return cameraStructuredPayload(
+            kind: "camera_view",
+            spoken: spoken,
+            formatted: scene.markdown()
+        )
     }
 }
 

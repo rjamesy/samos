@@ -13,6 +13,9 @@ struct TurnResult {
     var aiModelUsed: String?
     var executedToolSteps: [(name: String, args: [String: String])] = []
     var routerMs: Int?
+    var originProvider: MessageOriginProvider = .local
+    var executionProvider: MessageOriginProvider = .local
+    var originReason: String?
 }
 
 private struct LocalKnowledgeContext {
@@ -1300,7 +1303,26 @@ private enum ConversationAffectClassifier {
 @MainActor
 protocol TurnOrchestrating: AnyObject {
     var pendingSlot: PendingSlot? { get set }
-    func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult
+    func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult
+}
+
+enum TurnInputMode {
+    case voice
+    case text
+    case unspecified
+}
+
+enum VisionQueryIntent: Equatable {
+    case none
+    case describe
+    case visualQA(question: String)
+    case findObject(query: String)
+}
+
+extension TurnOrchestrating {
+    func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
+        await processTurn(text, history: history, inputMode: .unspecified)
+    }
 }
 
 // MARK: - Timeout Helper
@@ -1329,6 +1351,7 @@ final class TurnOrchestrator {
     private let openAIRouter: OpenAIRouter
     private let tonePreferenceStore: TonePreferenceStore
     private let faceGreetingManager: FaceGreetingManager
+    private let cameraVision: CameraVisionProviding
     private let summaryService = SessionSummaryService()
     private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
@@ -1383,6 +1406,7 @@ final class TurnOrchestrator {
         self.openAIRouter = OpenAIRouter(parser: ollama)
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = FaceGreetingManager()
+        self.cameraVision = CameraVisionService.shared
         self.memoryAckCooldownTurns = 20
         self.followUpCooldownTurns = 3
     }
@@ -1391,17 +1415,33 @@ final class TurnOrchestrator {
     init(ollamaRouter: OllamaRouter,
          openAIRouter: OpenAIRouter,
          faceGreetingManager: FaceGreetingManager? = nil,
+         cameraVision: CameraVisionProviding = CameraVisionService.shared,
          memoryAckCooldownTurns: Int = 20,
          followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
         self.openAIRouter = openAIRouter
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = faceGreetingManager ?? FaceGreetingManager()
+        self.cameraVision = cameraVision
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
         self.followUpCooldownTurns = max(1, followUpCooldownTurns)
     }
 
-    func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
+    // Backward-compatible initializer retained for existing callsites/tests.
+    convenience init(ollamaRouter: OllamaRouter,
+                     openAIRouter: OpenAIRouter,
+                     faceGreetingManager: FaceGreetingManager? = nil,
+                     memoryAckCooldownTurns: Int = 20,
+                     followUpCooldownTurns: Int = 3) {
+        self.init(ollamaRouter: ollamaRouter,
+                  openAIRouter: openAIRouter,
+                  faceGreetingManager: faceGreetingManager,
+                  cameraVision: CameraVisionService.shared,
+                  memoryAckCooldownTurns: memoryAckCooldownTurns,
+                  followUpCooldownTurns: followUpCooldownTurns)
+    }
+
+    func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult {
         turnCounter += 1
         let currentTurn = turnCounter
         let now = Date()
@@ -1409,15 +1449,53 @@ final class TurnOrchestrator {
         let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
         let mode = ConversationModeClassifier.classify(text)
-        currentFaceIdentityContext = faceGreetingManager.evaluateFrame()
-        if let identityResolution = faceGreetingManager.resolveIdentityConfirmationResponse(text) {
-            currentFaceIdentityContext = faceGreetingManager.currentIdentityContext
-            var immediate = immediateIdentityTurnResult(for: identityResolution)
-            applyResponsePolish(&immediate, plan: Plan(steps: [.talk(say: immediate.spokenLines.first ?? "")]), hasMemoryHints: hasMemoryHints, turnIndex: currentTurn)
+        let identityDecision = faceGreetingManager.prepareTurn(
+            userInput: text,
+            inputMode: inputMode,
+            now: now,
+            userInitiated: true
+        )
+        currentFaceIdentityContext = identityDecision.context
+
+        if case .enroll(let name, let confirmation, let providerNoneReason) = identityDecision.action {
+            var immediate = immediateTalkTurnResult(message: confirmation)
+            immediate.llmProvider = .none
+            immediate.originProvider = .local
+            immediate.executionProvider = .local
+            immediate.originReason = providerNoneReason
+            immediate.routerMs = 0
+            immediate.executedToolSteps = [("enroll_camera_face", ["name": name])]
+            applyResponsePolish(&immediate,
+                                plan: Plan(steps: [.talk(say: immediate.spokenLines.first ?? "")]),
+                                hasMemoryHints: hasMemoryHints,
+                                turnIndex: currentTurn)
             updateAssistantState(after: immediate, mode: mode)
             rememberAssistantLines(immediate.appendedChat)
+            logIdentityTurn(decision: identityDecision,
+                            now: now,
+                            provider: immediate.llmProvider,
+                            routeReason: providerNoneReason,
+                            routerMs: immediate.routerMs)
             return immediate
         }
+
+        let visionIntent = detectVisionQueryIntent(text)
+        if shouldRunVisionToolFirst(for: visionIntent) {
+            let visionResult = await runVisionToolFirstTurn(
+                intent: visionIntent,
+                text: text,
+                history: history,
+                mode: mode,
+                localKnowledgeContext: localKnowledgeContext,
+                hasMemoryHints: hasMemoryHints,
+                turnIndex: currentTurn,
+                turnStartedAt: turnStartedAt,
+                identityDecision: identityDecision,
+                now: now
+            )
+            return visionResult
+        }
+
         let rawAffect = ConversationAffectClassifier.classify(text, history: history)
         let affectMirroringEnabled = M2Settings.affectMirroringEnabled
         let useEmotionalTone = M2Settings.useEmotionalTone
@@ -1477,17 +1555,23 @@ final class TurnOrchestrator {
                 let msg = "I'm not getting it — can you rephrase?"
                 result.appendedChat.append(ChatMessage(role: .assistant, text: msg))
                 result.spokenLines.append(msg)
+                logIdentityTurn(decision: identityDecision,
+                                now: now,
+                                provider: .none,
+                                routeReason: "pending_slot_retry_exhausted",
+                                routerMs: nil)
                 return result
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(
+                let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
                     text,
                     history: history,
                     pendingSlot: slot,
                     reason: .pendingSlotReply,
                     promptContext: promptContext
                 )
-                let plan = await maybeRephraseRepeatedTalk(rawPlan,
+                let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: text)
+                let plan = await maybeRephraseRepeatedTalk(guardedPlan,
                                                            userInput: text,
                                                            history: history,
                                                            mode: mode,
@@ -1512,31 +1596,40 @@ final class TurnOrchestrator {
                 }
 
                 lastFinalActionKind = inferredActionKind(for: shapedPlan)
-                return await executePlan(shapedPlan,
-                                         originalInput: text,
-                                         history: history,
-                                         provider: provider,
-                                         aiModelUsed: aiModelUsed,
-                                         routerMs: routerMs,
-                                         localKnowledgeContext: localKnowledgeContext,
-                                         hasMemoryHints: hasMemoryHints,
-                                         turnIndex: currentTurn,
-                                         feedbackDepth: 0,
-                                         turnStartedAt: turnStartedAt,
-                                         mode: mode,
-                                         toneRepairCue: toneRepairCue,
-                                         affect: effectiveAffect)
+                var result = await executePlan(shapedPlan,
+                                               originalInput: text,
+                                               history: history,
+                                               provider: provider,
+                                               aiModelUsed: aiModelUsed,
+                                               routerMs: routerMs,
+                                               localKnowledgeContext: localKnowledgeContext,
+                                               hasMemoryHints: hasMemoryHints,
+                                               turnIndex: currentTurn,
+                                               feedbackDepth: 0,
+                                               turnStartedAt: turnStartedAt,
+                                               mode: mode,
+                                               toneRepairCue: toneRepairCue,
+                                               affect: effectiveAffect,
+                                               originReason: routeProviderReason)
+                appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
+                logIdentityTurn(decision: identityDecision,
+                                now: now,
+                                provider: provider,
+                                routeReason: routeProviderReason,
+                                routerMs: routerMs)
+                return result
             }
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider, routerMs, aiModelUsed) = await routePlan(
+        let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
             text,
             history: history,
             reason: .userChat,
             promptContext: promptContext
         )
-        let plan = await maybeRephraseRepeatedTalk(rawPlan,
+        let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: text)
+        let plan = await maybeRephraseRepeatedTalk(guardedPlan,
                                                    userInput: text,
                                                    history: history,
                                                    mode: mode,
@@ -1544,20 +1637,28 @@ final class TurnOrchestrator {
                                                    turnStartedAt: turnStartedAt)
         let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
         lastFinalActionKind = inferredActionKind(for: shapedPlan)
-        return await executePlan(shapedPlan,
-                                 originalInput: text,
-                                 history: history,
-                                 provider: provider,
-                                 aiModelUsed: aiModelUsed,
-                                 routerMs: routerMs,
-                                 localKnowledgeContext: localKnowledgeContext,
-                                 hasMemoryHints: hasMemoryHints,
-                                 turnIndex: currentTurn,
-                                 feedbackDepth: 0,
-                                 turnStartedAt: turnStartedAt,
-                                 mode: mode,
-                                 toneRepairCue: toneRepairCue,
-                                 affect: effectiveAffect)
+        var result = await executePlan(shapedPlan,
+                                       originalInput: text,
+                                       history: history,
+                                       provider: provider,
+                                       aiModelUsed: aiModelUsed,
+                                       routerMs: routerMs,
+                                       localKnowledgeContext: localKnowledgeContext,
+                                       hasMemoryHints: hasMemoryHints,
+                                       turnIndex: currentTurn,
+                                       feedbackDepth: 0,
+                                       turnStartedAt: turnStartedAt,
+                                       mode: mode,
+                                       toneRepairCue: toneRepairCue,
+                                       affect: effectiveAffect,
+                                       originReason: routeProviderReason)
+        appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
+        logIdentityTurn(decision: identityDecision,
+                        now: now,
+                        provider: provider,
+                        routeReason: routeProviderReason,
+                        routerMs: routerMs)
+        return result
     }
 
     // MARK: - Brain Router Pipeline
@@ -1567,7 +1668,7 @@ final class TurnOrchestrator {
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
                            reason: LLMCallReason = .userChat,
-                           promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?) {
+                           promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?, String) {
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
         let keyStatus = OpenAISettings.apiKeyStatus
@@ -1589,19 +1690,19 @@ final class TurnOrchestrator {
                 }
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
-                return (plan, .openai, ms, selectedModel)
+                return (plan, .openai, ms, selectedModel, "openai_success")
 
             } catch {
                 // OpenAI failed — do NOT fall back to Ollama (it poisons answers + doubles latency)
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                return (friendlyFallbackPlan(error), .none, ms, nil)
+                return (friendlyFallbackPlan(error), .none, ms, nil, "openai_error_fallback")
             }
         }
 
         // A2) OpenAI key is present but known invalid (401/403) — fail fast with explicit auth error.
         if keyStatus == .invalid {
-            return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil)
+            return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil, "openai_invalid_key")
         }
 
         // B) Ollama standalone (OpenAI not configured, useOllama enabled)
@@ -1610,14 +1711,14 @@ final class TurnOrchestrator {
         }
 
         // C) No usable model route — return clear auth error.
-        return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil)
+        return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil, "no_provider_configured")
     }
 
     /// Ollama attempt — single call, no validation repair.
     private func ollamaFallback(_ text: String, history: [ChatMessage],
                                 pendingSlot: PendingSlot?,
                                 reason: LLMCallReason,
-                                promptContext: PromptRuntimeContext?) async -> (Plan, LLMProvider, Int, String?) {
+                                promptContext: PromptRuntimeContext?) async -> (Plan, LLMProvider, Int, String?, String) {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let plan = try await withTimeout(4.0) {
@@ -1625,11 +1726,11 @@ final class TurnOrchestrator {
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-            return (plan, .ollama, ms, nil)
+            return (plan, .ollama, ms, nil, "ollama_success")
         } catch {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-            return (friendlyFallbackPlan(error), .none, ms, nil)
+            return (friendlyFallbackPlan(error), .none, ms, nil, "ollama_error_fallback")
         }
     }
 
@@ -1648,7 +1749,8 @@ final class TurnOrchestrator {
                              turnStartedAt: Date,
                              mode: ConversationMode,
                              toneRepairCue: String? = nil,
-                             affect: AffectMetadata = .neutral) async -> TurnResult {
+                             affect: AffectMetadata = .neutral,
+                             originReason: String? = nil) async -> TurnResult {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
 
         var result = TurnResult()
@@ -1656,12 +1758,18 @@ final class TurnOrchestrator {
         result.aiModelUsed = aiModelUsed
         result.executedToolSteps = exec.executedToolSteps
         result.routerMs = routerMs
+        result.originProvider = originProvider(for: provider)
+        result.executionProvider = executionProvider(for: provider, hasToolExecution: !exec.executedToolSteps.isEmpty)
+        result.originReason = originReason
 
         // Stamp provider on assistant messages
         result.appendedChat = exec.chatMessages.map { msg in
             if msg.role == .assistant {
                 var stamped = msg
                 stamped.llmProvider = provider
+                stamped.originProvider = result.originProvider
+                stamped.executionProvider = result.executionProvider
+                stamped.originReason = result.originReason
                 return stamped
             }
             return msg
@@ -1685,7 +1793,8 @@ final class TurnOrchestrator {
                                                     hasMemoryHints: hasMemoryHints,
                                                     turnIndex: turnIndex,
                                                     feedbackDepth: feedbackDepth,
-                                                    turnStartedAt: turnStartedAt)
+                                                    turnStartedAt: turnStartedAt,
+                                                    originReason: originReason)
             if let retryResult = retryResult {
                 return retryResult
             }
@@ -1715,6 +1824,7 @@ final class TurnOrchestrator {
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
+        result.executionProvider = executionProvider(for: provider, hasToolExecution: !result.executedToolSteps.isEmpty)
         applyCanvasPresentationPolicy(&result)
         applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
         applyAffectMirroringResponsePolicy(&result, affect: affect)
@@ -1725,6 +1835,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        applyOriginMetadata(&result)
         updateAssistantState(after: result, mode: mode)
         rememberAssistantLines(result.appendedChat)
         return result
@@ -1742,7 +1853,8 @@ final class TurnOrchestrator {
                                  hasMemoryHints: Bool,
                                  turnIndex: Int,
                                  feedbackDepth: Int,
-                                 turnStartedAt: Date) async -> TurnResult? {
+                                 turnStartedAt: Date,
+                                 originReason: String?) async -> TurnResult? {
         let repairReasons = [
             "The image URLs you provided are dead or don't serve image content. \(failureReason)",
             "Return 3 NEW direct image URLs from upload.wikimedia.org (preferred), images.unsplash.com, or images.pexels.com. URLs MUST end in .jpg, .png, .gif, or .webp. NEVER use example.com or placeholder domains."
@@ -1770,7 +1882,8 @@ final class TurnOrchestrator {
                                                 hasMemoryHints: hasMemoryHints,
                                                 turnIndex: turnIndex,
                                                 feedbackDepth: feedbackDepth,
-                                                turnStartedAt: turnStartedAt)
+                                                turnStartedAt: turnStartedAt,
+                                                originReason: originReason ?? "openai_image_repair")
             } catch {
                 #if DEBUG
                 print("[ROUTER] imageRepair openai failed: \(error.localizedDescription)")
@@ -1793,7 +1906,8 @@ final class TurnOrchestrator {
                                                 hasMemoryHints: hasMemoryHints,
                                                 turnIndex: turnIndex,
                                                 feedbackDepth: feedbackDepth,
-                                                turnStartedAt: turnStartedAt)
+                                                turnStartedAt: turnStartedAt,
+                                                originReason: originReason ?? "ollama_image_repair")
             } catch {
                 #if DEBUG
                 print("[ROUTER] imageRepair ollama failed: \(error.localizedDescription)")
@@ -1813,7 +1927,8 @@ final class TurnOrchestrator {
                                     hasMemoryHints: Bool,
                                     turnIndex: Int,
                                     feedbackDepth: Int,
-                                    turnStartedAt: Date) async -> TurnResult? {
+                                    turnStartedAt: Date,
+                                    originReason: String?) async -> TurnResult? {
         let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput)
 
         // If the retry ALSO produced an image_url failure, give up
@@ -1824,8 +1939,18 @@ final class TurnOrchestrator {
             var result = TurnResult()
             result.llmProvider = provider
             result.aiModelUsed = aiModelUsed
-            let msg = "I couldn't find a working image for that — sorry about that."
-            result.appendedChat = [ChatMessage(role: .assistant, text: msg, llmProvider: provider)]
+            result.originProvider = originProvider(for: provider)
+            result.executionProvider = executionProvider(for: provider, hasToolExecution: false)
+            result.originReason = originReason
+            let msg = "I couldn't find a working image for that - sorry about that."
+            result.appendedChat = [ChatMessage(
+                role: .assistant,
+                text: msg,
+                llmProvider: provider,
+                originProvider: result.originProvider,
+                executionProvider: result.executionProvider,
+                originReason: result.originReason
+            )]
             result.spokenLines = [msg]
             return result
         }
@@ -1833,10 +1958,16 @@ final class TurnOrchestrator {
         var result = TurnResult()
         result.llmProvider = provider
         result.aiModelUsed = aiModelUsed
+        result.originProvider = originProvider(for: provider)
+        result.executionProvider = executionProvider(for: provider, hasToolExecution: !exec.executedToolSteps.isEmpty)
+        result.originReason = originReason
         result.appendedChat = exec.chatMessages.map { msg in
             if msg.role == .assistant {
                 var stamped = msg
                 stamped.llmProvider = provider
+                stamped.originProvider = result.originProvider
+                stamped.executionProvider = result.executionProvider
+                stamped.originReason = result.originReason
                 return stamped
             }
             return msg
@@ -1868,6 +1999,7 @@ final class TurnOrchestrator {
             depth: feedbackDepth,
             turnStartedAt: turnStartedAt
         )
+        result.executionProvider = executionProvider(for: provider, hasToolExecution: !result.executedToolSteps.isEmpty)
         applyCanvasPresentationPolicy(&result)
         applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
         applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
@@ -1876,6 +2008,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        applyOriginMetadata(&result)
         updateAssistantState(after: result, mode: ConversationModeClassifier.classify(originalInput))
         rememberAssistantLines(result.appendedChat)
         return result
@@ -1892,13 +2025,308 @@ final class TurnOrchestrator {
             message = requestMessage
         }
 
+        return immediateTalkTurnResult(message: message)
+    }
+
+    private func immediateTalkTurnResult(message: String) -> TurnResult {
         var result = TurnResult()
         result.appendedChat = [ChatMessage(role: .assistant, text: message)]
         result.spokenLines = [message]
         return result
     }
 
+    private func appendIdentityPromptIfNeeded(_ prompt: String?, to result: inout TurnResult) {
+        guard let prompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prompt.isEmpty else { return }
+        guard !result.triggerFollowUpCapture else { return }
+
+        let alreadyContainsIdentityPrompt = result.appendedChat.contains { message in
+            guard message.role == .assistant else { return false }
+            return isIdentityPromptLike(message.text)
+        }
+        if alreadyContainsIdentityPrompt {
+            return
+        }
+
+        result.appendedChat.append(
+            ChatMessage(
+                role: .assistant,
+                text: prompt,
+                llmProvider: result.llmProvider,
+                originProvider: result.originProvider,
+                executionProvider: result.executionProvider,
+                originReason: result.originReason
+            )
+        )
+        result.spokenLines.append(prompt)
+    }
+
+    private func isIdentityPromptLike(_ text: String) -> Bool {
+        let normalized = normalizeForComparison(text)
+        if normalized.contains("what s your name") || normalized.contains("what is your name") {
+            return true
+        }
+        if normalized.contains("remember you") && normalized.contains("name") {
+            return true
+        }
+        if normalized.contains("recognize you next time") {
+            return true
+        }
+        return false
+    }
+
+    private func logIdentityTurn(decision: IdentityTurnDecision,
+                                 now: Date,
+                                 provider: LLMProvider,
+                                 routeReason: String,
+                                 routerMs: Int?) {
+        #if DEBUG
+        let shouldPrompt = decision.shouldPromptIdentity ? "yes" : "no"
+        let msLabel = routerMs.map(String.init) ?? "n/a"
+        print(
+            "[IDENTITY] before=\(decision.stateBefore.debugSummary(reference: now)) " +
+            "after=\(decision.stateAfter.debugSummary(reference: now)) " +
+            "recognition=\(decision.recognitionSummary) " +
+            "shouldPromptIdentity=\(shouldPrompt) " +
+            "promptReason=\(decision.promptReason) " +
+            "provider=\(provider.rawValue) route_reason=\(routeReason) router_ms=\(msLabel)"
+        )
+        #endif
+    }
+
     // MARK: - Helpers
+
+    private func shouldRunVisionToolFirst(for intent: VisionQueryIntent) -> Bool {
+        guard isVisionToolingEnabled else { return false }
+        if case .none = intent { return false }
+        return true
+    }
+
+    private var isVisionToolingEnabled: Bool {
+        guard cameraVision.isRunning else { return false }
+        let registry = ToolRegistry.shared
+        return registry.get("describe_camera_view") != nil
+            && registry.get("camera_visual_qa") != nil
+            && registry.get("find_camera_objects") != nil
+    }
+
+    private func runVisionToolFirstTurn(intent: VisionQueryIntent,
+                                        text: String,
+                                        history: [ChatMessage],
+                                        mode: ConversationMode,
+                                        localKnowledgeContext: LocalKnowledgeContext,
+                                        hasMemoryHints: Bool,
+                                        turnIndex: Int,
+                                        turnStartedAt: Date,
+                                        identityDecision: IdentityTurnDecision,
+                                        now: Date) async -> TurnResult {
+        let plan = visionToolPlan(for: intent, preface: nil)
+        lastFinalActionKind = inferredActionKind(for: plan)
+        var result = await executePlan(
+            plan,
+            originalInput: text,
+            history: history,
+            provider: .none,
+            aiModelUsed: nil,
+            routerMs: 0,
+            localKnowledgeContext: localKnowledgeContext,
+            hasMemoryHints: hasMemoryHints,
+            turnIndex: turnIndex,
+            feedbackDepth: 0,
+            turnStartedAt: turnStartedAt,
+            mode: mode,
+            affect: .neutral,
+            originReason: "vision_tool_first"
+        )
+        ensureVisionAssistantSummary(intent: intent, result: &result)
+        appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
+        logIdentityTurn(
+            decision: identityDecision,
+            now: now,
+            provider: .none,
+            routeReason: "vision_tool_first",
+            routerMs: 0
+        )
+        return result
+    }
+
+    private func ensureVisionAssistantSummary(intent: VisionQueryIntent, result: inout TurnResult) {
+        let assistantLines = result.appendedChat
+            .filter { $0.role == .assistant }
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if assistantLines.contains(where: containsVisionSummaryPhrase) {
+            return
+        }
+
+        let fallback = extractVisionSpokenSummary(from: result.appendedOutputs)
+            ?? defaultVisionSpokenSummary(for: intent)
+        let trimmed = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard !assistantLines.contains(trimmed) else { return }
+
+        result.appendedChat.append(
+            ChatMessage(
+                role: .assistant,
+                text: trimmed,
+                llmProvider: result.llmProvider,
+                originProvider: result.originProvider,
+                executionProvider: result.executionProvider,
+                originReason: result.originReason
+            )
+        )
+        result.spokenLines.append(trimmed)
+    }
+
+    private func containsVisionSummaryPhrase(_ text: String) -> Bool {
+        let normalized = normalizeForComparison(text)
+        if normalized.contains("what i can see") || normalized.contains("i can see") {
+            return true
+        }
+        if normalized.contains("checked the camera") || normalized.contains("looked at the camera") {
+            return true
+        }
+        return false
+    }
+
+    private func extractVisionSpokenSummary(from outputs: [OutputItem]) -> String? {
+        for output in outputs where output.kind == .markdown {
+            guard let data = output.payload.data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let spoken = dict["spoken"] as? String else {
+                continue
+            }
+            let trimmed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    private func defaultVisionSpokenSummary(for intent: VisionQueryIntent) -> String {
+        switch intent {
+        case .describe, .none:
+            return "Here's what I can see right now."
+        case .visualQA:
+            return "I checked the camera and answered that."
+        case .findObject:
+            return "I checked the camera and found what I could."
+        }
+    }
+
+    private func visionToolPlan(for intent: VisionQueryIntent, preface: String?) -> Plan {
+        let spokenPrefix = preface?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch intent {
+        case .describe, .none:
+            return Plan(
+                steps: [.tool(name: "describe_camera_view", args: [:], say: nil)],
+                say: spokenPrefix?.isEmpty == false ? spokenPrefix : nil
+            )
+        case .visualQA(let question):
+            return Plan(
+                steps: [.tool(name: "camera_visual_qa", args: ["question": .string(question)], say: nil)],
+                say: spokenPrefix?.isEmpty == false ? spokenPrefix : nil
+            )
+        case .findObject(let query):
+            return Plan(
+                steps: [.tool(name: "find_camera_objects", args: ["query": .string(query)], say: nil)],
+                say: spokenPrefix?.isEmpty == false ? spokenPrefix : nil
+            )
+        }
+    }
+
+    private func detectVisionQueryIntent(_ input: String) -> VisionQueryIntent {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .none }
+        let lower = trimmed.lowercased()
+
+        if let query = extractFindObjectQuery(from: trimmed) {
+            return .findObject(query: query)
+        }
+
+        let describePhrases = [
+            "what do you see",
+            "what can you see",
+            "describe the camera",
+            "describe what you see"
+        ]
+        if describePhrases.contains(where: { lower.contains($0) }) {
+            return .describe
+        }
+
+        if lower == "look" || lower == "look around" || lower == "take a look" {
+            return .describe
+        }
+
+        if lower.contains("do you see")
+            || lower.contains("can you see")
+            || lower.contains("are there")
+            || lower.range(of: #"\bis\s+the\b.*\b(open|closed|visible)\b"#, options: .regularExpression) != nil {
+            return .visualQA(question: trimmed)
+        }
+
+        return .none
+    }
+
+    private func extractFindObjectQuery(from input: String) -> String? {
+        let lower = input.lowercased()
+        guard let range = lower.range(of: #"\bfind\s+(?:my\s+)?([a-z0-9][a-z0-9\s'\-]{0,40})"#, options: .regularExpression) else {
+            return nil
+        }
+        let raw = String(input[range])
+        var candidate = raw
+            .replacingOccurrences(of: #"(?i)^find\s+(my\s+)?"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"[?.!,;:]$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.lowercased() == "out" || candidate.lowercased().hasPrefix("out ") {
+            return nil
+        }
+        if candidate.count > 40 {
+            candidate = String(candidate.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return candidate.isEmpty ? nil : candidate
+    }
+
+    private func enforceNoFalseBlindnessGuardrail(on plan: Plan, userInput: String) -> Plan {
+        guard isVisionToolingEnabled else { return plan }
+        guard planContainsFalseBlindnessClaim(plan) else { return plan }
+
+        let detectedIntent = detectVisionQueryIntent(userInput)
+        let intent: VisionQueryIntent
+        if case .none = detectedIntent {
+            intent = .describe
+        } else {
+            intent = detectedIntent
+        }
+        #if DEBUG
+        print("[VISION_GUARD] Replacing blind-claim response with camera tool plan")
+        #endif
+        return visionToolPlan(for: intent, preface: "Let me take a look.")
+    }
+
+    private func planContainsFalseBlindnessClaim(_ plan: Plan) -> Bool {
+        let talkLines = plan.steps.compactMap { step -> String? in
+            if case .talk(let say) = step { return say }
+            return nil
+        }
+        if let topLevel = plan.say, !topLevel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if isBlindnessClaim(topLevel) { return true }
+        }
+        return talkLines.contains(where: isBlindnessClaim)
+    }
+
+    private func isBlindnessClaim(_ text: String) -> Bool {
+        let normalized = normalizeForComparison(text)
+        let phrases = [
+            "i can t see",
+            "i don t have the ability to see",
+            "i do not have the ability to see",
+            "i can t recognize images",
+            "i cannot recognize images"
+        ]
+        return phrases.contains(where: { normalized.contains($0) })
+    }
 
     private func maybeRephraseRepeatedTalk(_ plan: Plan,
                                            userInput: String,
@@ -3201,6 +3629,26 @@ final class TurnOrchestrator {
             )
         }
         return output
+    }
+
+    private func originProvider(for provider: LLMProvider) -> MessageOriginProvider {
+        MessageOriginProvider.from(llmProvider: provider)
+    }
+
+    private func executionProvider(for provider: LLMProvider, hasToolExecution: Bool) -> MessageOriginProvider {
+        if hasToolExecution { return .local }
+        return originProvider(for: provider)
+    }
+
+    private func applyOriginMetadata(_ result: inout TurnResult) {
+        for idx in result.appendedChat.indices where result.appendedChat[idx].role == .assistant {
+            result.appendedChat[idx].llmProvider = result.llmProvider
+            result.appendedChat[idx].originProvider = result.originProvider
+            result.appendedChat[idx].executionProvider = result.executionProvider
+            if result.appendedChat[idx].originReason == nil {
+                result.appendedChat[idx].originReason = result.originReason
+            }
+        }
     }
 
     private func routerLog(provider: String, reason: String, ms: Int, ok: Bool) {

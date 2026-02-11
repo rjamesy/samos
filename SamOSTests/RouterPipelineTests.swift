@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import SamOS
 
 // MARK: - Fake OpenAI Transport
@@ -810,7 +811,8 @@ final class FakeTurnOrchestrator: TurnOrchestrating {
     var delayNanoseconds: UInt64 = 0
     var queuedResults: [TurnResult] = []
 
-    func processTurn(_ text: String, history: [ChatMessage]) async -> TurnResult {
+    func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult {
+        _ = inputMode
         if delayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
         }
@@ -868,6 +870,54 @@ final class ImageProbeToolsRuntime: ToolsRuntimeProtocol {
             return OutputItem(kind: .image, payload: payload)
         }
         return nil
+    }
+}
+
+private struct StubFaceGreetingSettings: FaceGreetingSettingsProviding {
+    var faceRecognitionEnabled: Bool = true
+    var personalizedGreetingsEnabled: Bool = true
+}
+
+final class IdentityTestCamera: CameraVisionProviding {
+    var isRunning: Bool = true
+    var latestFrameAt: Date? = Date()
+    var analysis: CameraFrameAnalysis?
+    var recognitionResult: CameraFaceRecognitionResult?
+    var sceneDescription: CameraSceneDescription?
+    var enrollCalls: [String] = []
+    var clearCalls = 0
+    var onEnroll: ((String) -> Void)?
+
+    func start() throws {}
+    func stop() {}
+    func latestPreviewImage() -> NSImage? { nil }
+    func describeCurrentScene() -> CameraSceneDescription? { sceneDescription }
+    func currentAnalysis() -> CameraFrameAnalysis? { analysis }
+    func recognizeKnownFaces() -> CameraFaceRecognitionResult? { recognitionResult }
+
+    func enrollFace(name: String) -> CameraFaceEnrollmentResult {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        enrollCalls.append(trimmed)
+        onEnroll?(trimmed)
+        return CameraFaceEnrollmentResult(
+            status: .success,
+            enrolledName: trimmed,
+            samplesForName: 1,
+            totalKnownNames: Set(enrollCalls).count,
+            capturedAt: Date()
+        )
+    }
+
+    func knownFaceNames() -> [String] {
+        Array(Set(enrollCalls)).sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+
+    func clearKnownFaces() -> Bool {
+        clearCalls += 1
+        enrollCalls.removeAll()
+        return true
     }
 }
 
@@ -1067,6 +1117,500 @@ final class RouterPipelineTests: XCTestCase {
     private func extractSystemBlock(named marker: String, from prompt: String) -> String? {
         let pieces = prompt.components(separatedBy: "\n\n")
         return pieces.first(where: { $0.contains(marker) })
+    }
+
+    private func makeIdentityOrchestrator(fakeOpenAI: FakeOpenAITransport,
+                                          fakeOllama: FakeOllamaTransportForPipeline,
+                                          camera: IdentityTestCamera,
+                                          identityPromptCooldownSeconds: TimeInterval = 120,
+                                          postEnrollGracePeriodSeconds: TimeInterval = 300,
+                                          recognitionCacheSeconds: TimeInterval = 1.5) -> TurnOrchestrator {
+        let manager = FaceGreetingManager(
+            camera: camera,
+            settings: StubFaceGreetingSettings(),
+            recognitionThreshold: 0.72,
+            namedGreetingCooldownTurns: 2,
+            identityPromptCooldownSeconds: identityPromptCooldownSeconds,
+            awaitingNameTimeoutSeconds: 30,
+            postEnrollGracePeriodSeconds: postEnrollGracePeriodSeconds,
+            recognitionCacheSeconds: recognitionCacheSeconds
+        )
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        return TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            faceGreetingManager: manager,
+            cameraVision: camera
+        )
+    }
+
+    private func makeIdentityAnalysis(faceCount: Int) -> CameraFrameAnalysis {
+        CameraFrameAnalysis(
+            labels: [],
+            recognizedText: [],
+            faces: CameraFacePresence(count: faceCount),
+            capturedAt: Date()
+        )
+    }
+
+    private func makeIdentityScene(summary: String = "I can see a desk and a person.") -> CameraSceneDescription {
+        CameraSceneDescription(
+            summary: summary,
+            labels: ["desk (95%)", "person (90%)"],
+            recognizedText: [],
+            capturedAt: Date()
+        )
+    }
+
+    private func makeIdentityRecognition(detectedFaces: Int,
+                                         matches: [CameraRecognizedFaceMatch],
+                                         unknownFaces: Int) -> CameraFaceRecognitionResult {
+        CameraFaceRecognitionResult(
+            capturedAt: Date(),
+            detectedFaces: detectedFaces,
+            matches: matches,
+            unknownFaces: unknownFaces,
+            enrolledNames: Array(Set(matches.map(\.name))).sorted()
+        )
+    }
+
+    private func assistantCombinedText(_ result: TurnResult) -> String {
+        result.appendedChat
+            .filter { $0.role == .assistant }
+            .map(\.text)
+            .joined(separator: "\n")
+    }
+
+    private func identityPromptCount(in result: TurnResult) -> Int {
+        result.appendedChat.reduce(0) { partial, message in
+            guard message.role == .assistant else { return partial }
+            let normalized = message.text.lowercased()
+            if normalized.contains("what's your name") || normalized.contains("what is your name") {
+                return partial + 1
+            }
+            return partial
+        }
+    }
+
+    private func appendTurn(_ history: inout [ChatMessage], user: String, result: TurnResult) {
+        history.append(ChatMessage(role: .user, text: user))
+        history.append(contentsOf: result.appendedChat)
+    }
+
+    func testUnknownFacePromptsOnceThenCooldown() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I'm doing well."}"#),
+            .success(#"{"action":"TALK","say":"I can help with that."}"#),
+            .success(#"{"action":"TALK","say":"Still here and ready."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-identity-1"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-1"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera,
+            identityPromptCooldownSeconds: 0.25
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("hello", history: history)
+        appendTurn(&history, user: "hello", result: first)
+        XCTAssertEqual(identityPromptCount(in: first), 1)
+
+        let second = await orchestrator.processTurn("can you help?", history: history)
+        appendTurn(&history, user: "can you help?", result: second)
+        XCTAssertEqual(identityPromptCount(in: second), 0, "Identity prompt should be suppressed during cooldown")
+
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        let third = await orchestrator.processTurn("any update?", history: history)
+        XCTAssertEqual(identityPromptCount(in: third), 1, "Identity prompt should return after cooldown elapses")
+    }
+
+    func testAwaitingNameAcceptsNameAndEnrolls() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I'm doing well today."}"#),
+            .success(#"{"action":"TALK","say":"Hey there!"}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+        camera.onEnroll = { name in
+            camera.recognitionResult = CameraFaceRecognitionResult(
+                capturedAt: Date(),
+                detectedFaces: 1,
+                matches: [CameraRecognizedFaceMatch(name: name, confidence: 0.92, distance: 0.05)],
+                unknownFaces: 0,
+                enrolledNames: [name]
+            )
+        }
+
+        OpenAISettings.apiKey = "test-key-identity-2"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-2"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera,
+            recognitionCacheSeconds: 0
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("how are you today?", history: history)
+        appendTurn(&history, user: "how are you today?", result: first)
+        XCTAssertEqual(identityPromptCount(in: first), 1)
+
+        let second = await orchestrator.processTurn("I'm Richard", history: history)
+        appendTurn(&history, user: "I'm Richard", result: second)
+        XCTAssertEqual(second.llmProvider, .none)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Name enrollment turn should not call the LLM")
+        XCTAssertEqual(camera.enrollCalls, ["Richard"])
+        XCTAssertTrue(second.executedToolSteps.contains(where: { step in
+            step.name == "enroll_camera_face" && step.args["name"] == "Richard"
+        }))
+        XCTAssertTrue(assistantCombinedText(second).contains("Nice to meet you, Richard."))
+
+        let third = await orchestrator.processTurn("hi", history: history)
+        XCTAssertTrue(assistantCombinedText(third).contains("Richard"), "Recognized follow-up greeting should use enrolled name")
+    }
+
+    func testAwaitingNameEnrollInvalidatesCachedUnknownRecognition() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I'm doing well today."}"#),
+            .success(#"{"action":"TALK","say":"Hey there!"}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+        camera.onEnroll = { name in
+            camera.recognitionResult = CameraFaceRecognitionResult(
+                capturedAt: Date(),
+                detectedFaces: 1,
+                matches: [CameraRecognizedFaceMatch(name: name, confidence: 0.92, distance: 0.05)],
+                unknownFaces: 0,
+                enrolledNames: [name]
+            )
+        }
+
+        OpenAISettings.apiKey = "test-key-identity-cache-1"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-cache-1"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera,
+            recognitionCacheSeconds: 30
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("how are you today?", history: history)
+        appendTurn(&history, user: "how are you today?", result: first)
+        XCTAssertEqual(identityPromptCount(in: first), 1)
+
+        let second = await orchestrator.processTurn("Richard", history: history)
+        appendTurn(&history, user: "Richard", result: second)
+        XCTAssertEqual(second.llmProvider, .none)
+        XCTAssertEqual(camera.enrollCalls, ["Richard"])
+
+        let third = await orchestrator.processTurn("hi", history: history)
+        XCTAssertTrue(
+            assistantCombinedText(third).contains("Richard"),
+            "Enrollment should invalidate stale unknown cache so immediate follow-up can recognize the same user"
+        )
+    }
+
+    func testAwaitingNameNonNameRoutesNormally() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Happy to help."}"#),
+            .success(#"{"action":"TALK","say":"I'm doing great, thanks."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-identity-3"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-3"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("hello", history: history)
+        appendTurn(&history, user: "hello", result: first)
+        XCTAssertEqual(identityPromptCount(in: first), 1)
+
+        let second = await orchestrator.processTurn("How are you today?", history: history)
+        XCTAssertEqual(second.llmProvider, .openai)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "Non-name reply while awaitingName must still route normally")
+        XCTAssertTrue(assistantCombinedText(second).lowercased().contains("doing great"))
+        XCTAssertEqual(identityPromptCount(in: second), 0, "Should not immediately re-ask identity")
+    }
+
+    func testPostEnrollDoesNotRePromptWhoAreYou() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Sure."}"#),
+            .success(#"{"action":"TALK","say":"Absolutely, let's do it."}"#),
+            .success(#"{"action":"TALK","say":"Happy to continue."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-identity-4"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-4"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera,
+            identityPromptCooldownSeconds: 120,
+            postEnrollGracePeriodSeconds: 120
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("hello", history: history)
+        appendTurn(&history, user: "hello", result: first)
+
+        let second = await orchestrator.processTurn("Richard", history: history)
+        appendTurn(&history, user: "Richard", result: second)
+        XCTAssertEqual(second.llmProvider, .none)
+
+        let third = await orchestrator.processTurn("can you help me?", history: history)
+        appendTurn(&history, user: "can you help me?", result: third)
+        let fourth = await orchestrator.processTurn("one more thing", history: history)
+
+        let combined = (assistantCombinedText(third) + "\n" + assistantCombinedText(fourth)).lowercased()
+        XCTAssertFalse(combined.contains("what's your name"))
+        XCTAssertFalse(combined.contains("what is your name"))
+
+        let repairCount = [third, fourth]
+            .map { assistantCombinedText($0).lowercased() }
+            .filter { $0.contains("one more look to recognize you next time") }
+            .count
+        XCTAssertLessThanOrEqual(repairCount, 1, "Post-enroll repair prompt should never loop")
+    }
+
+    func testUnknownFaceDoesNotBypassLLMAndAnswersUserQuestion() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I'm doing well today, thanks for asking."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-identity-5"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-identity-5"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        let result = await orchestrator.processTurn("How are you today?", history: [])
+        let combined = assistantCombinedText(result).lowercased()
+
+        XCTAssertEqual(result.llmProvider, .openai)
+        XCTAssertNotNil(result.routerMs)
+        XCTAssertGreaterThanOrEqual(result.routerMs ?? -1, 0)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Unknown face flow must not bypass LLM routing")
+        XCTAssertTrue(combined.contains("doing well") || combined.contains("well today"))
+        XCTAssertLessThanOrEqual(identityPromptCount(in: result), 1)
+    }
+
+    func testVisionQueryToolFirstDescribe() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.sceneDescription = makeIdentityScene(summary: "I can see a desk, a laptop, and a person.")
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-vision-1"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-vision-1"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        let result = await orchestrator.processTurn("What do you see?", history: [])
+        XCTAssertEqual(result.executedToolSteps.first?.name, "describe_camera_view")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Vision queries should run tool-first before any LLM routing")
+        XCTAssertTrue(assistantCombinedText(result).lowercased().contains("here's what i can see"))
+    }
+
+    func testVisionQueryToolFirstVisualQA() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.sceneDescription = makeIdentityScene(summary: "I can see a desk and a person.")
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-vision-qa-1"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-vision-qa-1"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        let result = await orchestrator.processTurn("Do you see a person?", history: [])
+        XCTAssertEqual(result.executedToolSteps.first?.name, "camera_visual_qa")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Visual QA queries should execute camera tool first")
+    }
+
+    func testVisionQueryToolFirstFindObject() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.sceneDescription = makeIdentityScene(summary: "I can see a desk and a wallet.")
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-vision-find-1"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-vision-find-1"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        let result = await orchestrator.processTurn("Find my wallet", history: [])
+        XCTAssertEqual(result.executedToolSteps.first?.name, "find_camera_objects")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Find-object queries should execute camera tool first")
+    }
+
+    func testNoFalseBlindnessGuardrail() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I don't have the ability to see right now."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.sceneDescription = makeIdentityScene(summary: "I can see a desk and monitor.")
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-vision-2"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-vision-2"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        let result = await orchestrator.processTurn("Give me a quick update.", history: [])
+        let combined = assistantCombinedText(result).lowercased()
+
+        XCTAssertEqual(result.llmProvider, .openai, "Origin plan should remain OpenAI when guardrail rewrites the plan")
+        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }))
+        XCTAssertFalse(combined.contains("don't have the ability to see"))
+        XCTAssertFalse(combined.contains("can’t see"))
+    }
+
+    func testIdentityDoesNotOverrideVision() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Hi there."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = IdentityTestCamera()
+        camera.analysis = makeIdentityAnalysis(faceCount: 1)
+        camera.sceneDescription = makeIdentityScene(summary: "I can see you at a desk.")
+        camera.recognitionResult = makeIdentityRecognition(detectedFaces: 1, matches: [], unknownFaces: 1)
+
+        OpenAISettings.apiKey = "test-key-vision-3"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-vision-3"
+        M2Settings.useOllama = false
+
+        let orchestrator = makeIdentityOrchestrator(
+            fakeOpenAI: fakeOpenAI,
+            fakeOllama: fakeOllama,
+            camera: camera
+        )
+
+        var history: [ChatMessage] = []
+        let first = await orchestrator.processTurn("hello", history: history)
+        appendTurn(&history, user: "hello", result: first)
+
+        let second = await orchestrator.processTurn("Richard", history: history)
+        appendTurn(&history, user: "Richard", result: second)
+        XCTAssertEqual(second.llmProvider, .none)
+
+        let third = await orchestrator.processTurn("What do you see?", history: history)
+        let combined = assistantCombinedText(third).lowercased()
+
+        XCTAssertTrue(third.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }))
+        XCTAssertFalse(combined.contains("one more look to recognize you next time"))
+    }
+
+    func testAssistantBubbleRendersRegardlessOfProvider() {
+        let assistantNoProvider = ChatMessage(role: .assistant, text: "Hi", llmProvider: .none)
+        let assistantOpenAI = ChatMessage(role: .assistant, text: "Hi", llmProvider: .openai)
+        let user = ChatMessage(role: .user, text: "Hi")
+
+        XCTAssertEqual(ChatBubble.renderPath(for: assistantNoProvider), .assistantBubble)
+        XCTAssertEqual(ChatBubble.renderPath(for: assistantOpenAI), .assistantBubble)
+        XCTAssertEqual(ChatBubble.renderPath(for: user), .userBubble)
+    }
+
+    func testBubbleColorOriginProviderOpenAI() {
+        let message = ChatMessage(
+            role: .assistant,
+            text: "Done.",
+            llmProvider: .openai,
+            originProvider: .openai,
+            executionProvider: .local,
+            originReason: "userChat"
+        )
+        XCTAssertEqual(ChatBubble.colorRole(for: message), .assistantOpenAI)
     }
 
     // MARK: - A) OpenAI success does not call Ollama
@@ -3053,7 +3597,7 @@ final class RouterPipelineTests: XCTestCase {
             OpenAISettings._debugEffectiveDevSecretKeyForTesting().hasSuffix(".tests"),
             "XCTest runs must not touch production debug secret entries"
         )
-        XCTAssertTrue(OpenAISettings._debugShouldUseKeychainStorageForTesting())
+        XCTAssertFalse(OpenAISettings._debugShouldUseKeychainStorageForTesting())
         #else
         return
         #endif
@@ -3066,7 +3610,7 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(OpenAISettings.apiKey, key)
     }
 
-    func testOpenAIKeychainPreferredOverDebugFallbackWhenBothExist() {
+    func testOpenAIDebugFallbackPreferredOverKeychainWhenBothExist() {
         #if DEBUG
         let service = OpenAISettings._debugEffectiveKeychainServiceForTesting()
         let devKey = OpenAISettings._debugEffectiveDevSecretKeyForTesting()
@@ -3075,7 +3619,7 @@ final class RouterPipelineTests: XCTestCase {
         DevSecretsStore.shared.set(devKey, "dev-fallback-value")
 
         OpenAISettings._resetCacheForTesting()
-        XCTAssertEqual(OpenAISettings.apiKey, "keychain-live-value")
+        XCTAssertEqual(OpenAISettings.apiKey, "dev-fallback-value")
 
         _ = KeychainStore.delete(forKey: "apiKey", service: service)
         DevSecretsStore.shared.delete(devKey)

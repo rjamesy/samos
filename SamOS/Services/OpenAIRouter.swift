@@ -429,6 +429,7 @@ enum PromptBuilder {
             : websiteHints.map { "- website_learning: \($0.replacingOccurrences(of: "\"", with: "'"))" }
 
         let modePolicy = dynamicModePolicy(promptContext?.mode)
+        let identityPolicy = dynamicIdentityGuidance(promptContext?.identityContextLine)
         let summaryPolicy = compactSummary(promptContext?.sessionSummary ?? "")
         let affectPolicy = dynamicAffectGuidance(promptContext?.affect)
         let tonePolicy = promptContext?.tonePreferences.flatMap { profile -> String? in
@@ -481,6 +482,7 @@ enum PromptBuilder {
         [BLOCK 2: SYSTEM_IDENTITY_AND_MODE]
         You are Sam, a friendly voice assistant inside a macOS app called SamOS.
         \(modePolicy)
+        \(identityPolicy)
         - Warm, casual, clear language. Use contractions.
         - Default: medium response length in chat.
         - Chat target: 120-350 tokens for most replies.
@@ -594,6 +596,19 @@ enum PromptBuilder {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    static func dynamicIdentityGuidance(_ identityLine: String?) -> String {
+        guard let identityLine = identityLine?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !identityLine.isEmpty else {
+            return "- Identity context: none."
+        }
+
+        return """
+        - Identity context: \(identityLine)
+        - Always answer the user's request first.
+        - If identity follow-up is needed, ask once at the end.
+        """
     }
 
     static func dynamicAffectGuidance(_ affect: AffectMetadata?) -> String {

@@ -587,6 +587,35 @@ struct ChatBubble: View {
     let message: ChatMessage
     @State private var copied = false
 
+    static func colorRole(for message: ChatMessage) -> ChatBubbleColorRole {
+        switch message.role {
+        case .user:
+            return .user
+        case .assistant:
+            switch message.originProvider {
+            case .openai:
+                return .assistantOpenAI
+            case .ollama:
+                return .assistantOllama
+            case .local:
+                return .assistantLocal
+            }
+        case .system:
+            return .system
+        }
+    }
+
+    static func renderPath(for message: ChatMessage) -> ChatBubbleRenderPath {
+        switch message.role {
+        case .user:
+            return .userBubble
+        case .assistant:
+            return .assistantBubble
+        case .system:
+            return .systemBubble
+        }
+    }
+
     var body: some View {
         HStack {
             if message.role == .user { Spacer(minLength: 40) }
@@ -620,7 +649,7 @@ struct ChatBubble: View {
                     }
                 }
 
-                if message.llmProvider == .openai {
+                if message.originProvider == .openai {
                     if let mode = message.assistantResponseMode {
                         Text(mode.shortLabel)
                             .font(.caption2)
@@ -667,21 +696,26 @@ struct ChatBubble: View {
     }
 
     private var bubbleColor: Color {
-        switch message.role {
-        case .user: return .blue
-        case .assistant:
-            if message.usedLocalKnowledge { return .blue.opacity(0.85) }
-            if message.llmProvider == .openai { return .red.opacity(0.85) }
-            return Color(nsColor: .controlBackgroundColor)
-        case .system: return Color.yellow.opacity(0.2)
+        switch Self.colorRole(for: message) {
+        case .user:
+            return .blue
+        case .assistantOpenAI:
+            return .red.opacity(0.86)
+        case .assistantOllama:
+            return Color.orange.opacity(0.85)
+        case .assistantLocal:
+            return Color(nsColor: .controlAccentColor).opacity(0.14)
+        case .system:
+            return Color.yellow.opacity(0.2)
         }
     }
 
     private var textColor: Color {
         switch message.role {
         case .user: return .white
-        case .assistant where message.usedLocalKnowledge: return .white
-        case .assistant where message.llmProvider == .openai: return .white
+        case .assistant where message.originProvider == .openai: return .white
+        case .assistant where message.originProvider == .ollama: return .white
+        case .assistant: return .primary
         default: return .primary
         }
     }
@@ -700,4 +734,18 @@ struct ChatBubble: View {
             copied = false
         }
     }
+}
+
+enum ChatBubbleRenderPath: Equatable {
+    case userBubble
+    case assistantBubble
+    case systemBubble
+}
+
+enum ChatBubbleColorRole: Equatable {
+    case user
+    case assistantOpenAI
+    case assistantOllama
+    case assistantLocal
+    case system
 }

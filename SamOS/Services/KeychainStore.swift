@@ -43,7 +43,14 @@ enum KeychainStore {
     /// Default is true (recommended). Toggle in Settings if Keychain prompts persist.
     static var useKeychain: Bool {
         get {
-            if UserDefaults.standard.object(forKey: "samos_useKeychain") == nil { return true }
+            if UserDefaults.standard.object(forKey: "samos_useKeychain") == nil {
+                #if DEBUG
+                // In development, default to app-local secret storage to avoid Keychain prompts.
+                return false
+                #else
+                return true
+                #endif
+            }
             return UserDefaults.standard.bool(forKey: "samos_useKeychain")
         }
         set { UserDefaults.standard.set(newValue, forKey: "samos_useKeychain") }
