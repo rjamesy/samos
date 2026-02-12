@@ -72,6 +72,12 @@
 		F3A4B5C6D7E80001AA000031 /* PlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000030 /* PlanTests.swift */; };
 		F3A4B5C6D7E80001AA000033 /* PendingSlotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000032 /* PendingSlotTests.swift */; };
 		F3A4B5C6D7E80001AA000021 /* TurnOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */; };
+		AA1111111111111111112101 /* TurnPipelineCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111101 /* TurnPipelineCore.swift */; };
+		AA1111111111111111112102 /* TurnRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111102 /* TurnRouter.swift */; };
+		AA1111111111111111112103 /* TurnToolRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111103 /* TurnToolRunner.swift */; };
+		AA1111111111111111112104 /* SpeechCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111104 /* SpeechCoordinator.swift */; };
+		AA1111111111111111112105 /* OpenAIProviderWrapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111105 /* OpenAIProviderWrapper.swift */; };
+		AA1111111111111111112106 /* STTDiagnosticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111111111111111111106 /* STTDiagnosticsStore.swift */; };
 		F3A4B5C6D7E80001AA000023 /* TimezoneMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */; };
 		F3A4B5C6D7E80001AA000035 /* TurnOrchestratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000034 /* TurnOrchestratorTests.swift */; };
 		F3A4B5C6D7E80001AA000041 /* PlanExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */; };
@@ -86,6 +92,10 @@
 		F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */; };
 		F3A4B5C6D7E80001AA000071 /* TextUnescaper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000070 /* TextUnescaper.swift */; };
 		F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */; };
+		AA2222222222222222222101 /* TurnRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221101 /* TurnRouterTests.swift */; };
+		AA2222222222222222222102 /* TurnToolRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221102 /* TurnToolRunnerTests.swift */; };
+		AA2222222222222222222103 /* SpeechCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221103 /* SpeechCoordinatorTests.swift */; };
+		AA2222222222222222222104 /* TurnPipelineContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221104 /* TurnPipelineContractTests.swift */; };
 		F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */; };
 		F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */; };
 		F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */; };
@@ -177,6 +187,12 @@
 		F3A4B5C6D7E80001AA000030 /* PlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000032 /* PendingSlotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingSlotTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrchestrator.swift; sourceTree = "<group>"; };
+		AA1111111111111111111101 /* TurnPipelineCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPipelineCore.swift; sourceTree = "<group>"; };
+		AA1111111111111111111102 /* TurnRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnRouter.swift; sourceTree = "<group>"; };
+		AA1111111111111111111103 /* TurnToolRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnToolRunner.swift; sourceTree = "<group>"; };
+		AA1111111111111111111104 /* SpeechCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCoordinator.swift; sourceTree = "<group>"; };
+		AA1111111111111111111105 /* OpenAIProviderWrapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIProviderWrapper.swift; sourceTree = "<group>"; };
+		AA1111111111111111111106 /* STTDiagnosticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STTDiagnosticsStore.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimezoneMapping.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000034 /* TurnOrchestratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrchestratorTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanExecutor.swift; sourceTree = "<group>"; };
@@ -191,6 +207,10 @@
 		F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterPipelineTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000070 /* TextUnescaper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUnescaper.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextUnescaperTests.swift; sourceTree = "<group>"; };
+		AA2222222222222222221101 /* TurnRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnRouterTests.swift; sourceTree = "<group>"; };
+		AA2222222222222222221102 /* TurnToolRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnToolRunnerTests.swift; sourceTree = "<group>"; };
+		AA2222222222222222221103 /* SpeechCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCoordinatorTests.swift; sourceTree = "<group>"; };
+		AA2222222222222222221104 /* TurnPipelineContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPipelineContractTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevSecretsStore.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveService.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveTests.swift; sourceTree = "<group>"; };
@@ -324,6 +344,12 @@
 				F3A4B5C6D7E80001AA000001 /* AlarmSession.swift */,
 				F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */,
 				F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */,
+				AA1111111111111111111101 /* TurnPipelineCore.swift */,
+				AA1111111111111111111102 /* TurnRouter.swift */,
+				AA1111111111111111111103 /* TurnToolRunner.swift */,
+				AA1111111111111111111104 /* SpeechCoordinator.swift */,
+				AA1111111111111111111105 /* OpenAIProviderWrapper.swift */,
+				AA1111111111111111111106 /* STTDiagnosticsStore.swift */,
 				F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */,
 				F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */,
 				F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */,
@@ -388,6 +414,10 @@
 				F3A4B5C6D7E80001AA000062 /* OllamaRouterReliabilityTests.swift */,
 				F3A4B5C6D7E80001AA000064 /* KeychainStoreTests.swift */,
 				F3A4B5C6D7E80001AA000068 /* RouterPipelineTests.swift */,
+				AA2222222222222222221101 /* TurnRouterTests.swift */,
+				AA2222222222222222221102 /* TurnToolRunnerTests.swift */,
+				AA2222222222222222221103 /* SpeechCoordinatorTests.swift */,
+				AA2222222222222222221104 /* TurnPipelineContractTests.swift */,
 				F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */,
 				F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */,
 					F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */,
@@ -524,6 +554,12 @@
 				F3A4B5C6D7E80001AA000011 /* Plan.swift in Sources */,
 				F3A4B5C6D7E80001AA000013 /* PendingSlot.swift in Sources */,
 				F3A4B5C6D7E80001AA000021 /* TurnOrchestrator.swift in Sources */,
+				AA1111111111111111112101 /* TurnPipelineCore.swift in Sources */,
+				AA1111111111111111112102 /* TurnRouter.swift in Sources */,
+				AA1111111111111111112103 /* TurnToolRunner.swift in Sources */,
+				AA1111111111111111112104 /* SpeechCoordinator.swift in Sources */,
+				AA1111111111111111112105 /* OpenAIProviderWrapper.swift in Sources */,
+				AA1111111111111111112106 /* STTDiagnosticsStore.swift in Sources */,
 				F3A4B5C6D7E80001AA000023 /* TimezoneMapping.swift in Sources */,
 				F3A4B5C6D7E80001AA000051 /* ForgeQueueJob.swift in Sources */,
 				F3A4B5C6D7E80001AA000053 /* SkillForgeQueueService.swift in Sources */,
@@ -564,6 +600,10 @@
 				F3A4B5C6D7E80001AA000063 /* OllamaRouterReliabilityTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000065 /* KeychainStoreTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000069 /* RouterPipelineTests.swift in Sources */,
+				AA2222222222222222222101 /* TurnRouterTests.swift in Sources */,
+				AA2222222222222222222102 /* TurnToolRunnerTests.swift in Sources */,
+				AA2222222222222222222103 /* SpeechCoordinatorTests.swift in Sources */,
+				AA2222222222222222222104 /* TurnPipelineContractTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */,

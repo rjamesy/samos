@@ -224,6 +224,12 @@ final class VoicePipelineCoordinator {
     private var captureLease: AudioCoordinator.Lease?
     private var sttLease: AudioCoordinator.Lease?
     private var audioOwnerSequence = 0
+    private var lastTTSSuspendCompletedAt: Date?
+    private let postTTSSuspendDebounceMs: Int
+
+    init(postTTSSuspendDebounceMs: Int = 80) {
+        self.postTTSSuspendDebounceMs = max(0, postTTSSuspendDebounceMs)
+    }
 
     // MARK: - Start / Stop
 
@@ -450,6 +456,7 @@ final class VoicePipelineCoordinator {
         if listeningEnabled {
             setStatus(.listeningForWakeWord)
         }
+        lastTTSSuspendCompletedAt = Date()
         #if DEBUG
         print("[AUDIO_SESSION] event=tts_suspend_complete category=record mode=measurement activation=inactive")
         #endif
@@ -464,6 +471,13 @@ final class VoicePipelineCoordinator {
     private func startCaptureWithLease(noSpeechTimeoutMs: Int?) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if let lastTTSSuspendCompletedAt, self.postTTSSuspendDebounceMs > 0 {
+                let elapsedMs = Int(Date().timeIntervalSince(lastTTSSuspendCompletedAt) * 1000)
+                let remainingMs = self.postTTSSuspendDebounceMs - elapsedMs
+                if remainingMs > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(remainingMs) * 1_000_000)
+                }
+            }
             let owner = self.nextAudioOwner(prefix: "capture")
             let lease = await AudioCoordinator.shared.acquire(for: .capture, owner: owner)
             guard self.status == .capturingAudio else {

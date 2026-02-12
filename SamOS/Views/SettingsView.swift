@@ -261,7 +261,8 @@ struct SettingsView: View {
     }
 
     private var sttSection: some View {
-        Section("Speech-to-Text (Whisper)") {
+        let diagnostics = STTDiagnosticsStore.shared.snapshot()
+        return Section("Speech-to-Text (Whisper)") {
             HStack {
                 TextField("Whisper model (.bin) file", text: $whisperModelPath)
                     .textFieldStyle(.roundedBorder)
@@ -279,6 +280,32 @@ struct SettingsView: View {
                     Text("Configured").foregroundColor(.green)
                 } else {
                     Text("Not configured").foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            LabeledContent("Diagnostics • Engine") {
+                Text(diagnostics.selectedEngine).foregroundColor(.secondary)
+            }
+            LabeledContent("Diagnostics • Model Found") {
+                Text(diagnostics.modelFound ? "Yes" : "No")
+                    .foregroundColor(diagnostics.modelFound ? .green : .secondary)
+            }
+            LabeledContent("Diagnostics • Prewarmed") {
+                Text(diagnostics.prewarmed ? "Yes" : "No")
+                    .foregroundColor(diagnostics.prewarmed ? .green : .secondary)
+            }
+            LabeledContent("Diagnostics • Last Error") {
+                Text(diagnostics.lastError ?? "None")
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            if let fallbackNote = diagnostics.launchFallbackNote {
+                LabeledContent("Diagnostics • Model Fallback") {
+                    Text(fallbackNote)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
                 }
             }
         }

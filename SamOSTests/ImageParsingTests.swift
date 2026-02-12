@@ -1,7 +1,83 @@
 import XCTest
 @testable import SamOS
 
+private final class ImageProberStubURLProtocol: URLProtocol {
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        _ = request
+        return true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: NSError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorUnknown
+            ))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let data {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 final class ImageParsingTests: XCTestCase {
+
+    override func tearDown() {
+        ImageProberStubURLProtocol.requestHandler = nil
+        ImageProber.setSessionForTesting(nil)
+        super.tearDown()
+    }
+
+    private func installImageProberStub(_ handler: @escaping (URLRequest) throws -> (status: Int, contentType: String?)) {
+        ImageProberStubURLProtocol.requestHandler = { request in
+            guard let url = request.url else {
+                throw NSError(domain: NSURLErrorDomain, code: NSURLErrorBadURL)
+            }
+            let responseConfig = try handler(request)
+            var headers: [String: String] = [:]
+            if let contentType = responseConfig.contentType {
+                headers["Content-Type"] = contentType
+            }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: responseConfig.status,
+                httpVersion: nil,
+                headerFields: headers
+            )!
+            return (response, Data())
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ImageProberStubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ImageProber.setSessionForTesting(session)
+    }
+
+    private func installImageProberTimeoutStub() {
+        ImageProberStubURLProtocol.requestHandler = { _ in
+            throw NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ImageProberStubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ImageProber.setSessionForTesting(session)
+    }
 
     // MARK: - JSON Payload Decoding (multi-URL format)
 
@@ -562,7 +638,7 @@ final class ImageParsingTests: XCTestCase {
 
     @MainActor
     func testPlanExecutorReturnsImageUrlSlotOnDeadUrls() async {
-        // Use a URL that will fail the probe (non-routable address)
+        installImageProberTimeoutStub()
         let plan = Plan(steps: [
             .tool(name: "show_image", args: [
                 "urls": .string("https://192.0.2.1/does-not-exist.jpg"),
@@ -579,7 +655,7 @@ final class ImageParsingTests: XCTestCase {
 
     @MainActor
     func testPlanExecutorPassesThroughLiveImage() async {
-        // Use a real URL that should respond (Wikimedia favicon is small and fast)
+        installImageProberStub { _ in (status: 200, contentType: "image/png") }
         let plan = Plan(steps: [
             .tool(name: "show_image", args: [
                 "urls": .string("https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"),
@@ -610,13 +686,13 @@ final class ImageParsingTests: XCTestCase {
     // MARK: - ImageProber Unit Tests
 
     func testImageProberRejectsNonRoutableAddress() async {
-        // 192.0.2.1 is a TEST-NET address (RFC 5737) — should timeout or fail
+        installImageProberTimeoutStub()
         let verified = await ImageProber.probe(urls: ["https://192.0.2.1/fake.jpg"])
         XCTAssertTrue(verified.isEmpty)
     }
 
     func testImageProberAcceptsLiveImageUrl() async {
-        // Use a well-known, stable image URL
+        installImageProberStub { _ in (status: 200, contentType: "image/png") }
         let verified = await ImageProber.probe(urls: [
             "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
         ])
@@ -629,6 +705,12 @@ final class ImageParsingTests: XCTestCase {
     }
 
     func testImageProberFiltersDeadFromMixed() async {
+        installImageProberStub { request in
+            if request.url?.host == "192.0.2.1" {
+                throw NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+            }
+            return (status: 200, contentType: "image/png")
+        }
         let verified = await ImageProber.probe(urls: [
             "https://192.0.2.1/fake.jpg",
             "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
@@ -638,7 +720,7 @@ final class ImageParsingTests: XCTestCase {
     }
 
     func testImageProberRejectsNonImageContentType() async {
-        // An HTML page should fail content-type check
+        installImageProberStub { _ in (status: 200, contentType: "text/html") }
         let verified = await ImageProber.probe(urls: ["https://www.example.com/"])
         XCTAssertTrue(verified.isEmpty, "HTML page should be rejected by content-type check")
     }
