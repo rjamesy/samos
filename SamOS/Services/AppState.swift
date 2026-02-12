@@ -113,6 +113,7 @@ final class AppState: ObservableObject {
     private let selfLearningService: SelfLearningService
     private let thinkingFillerDelay: TimeInterval
     private let thinkingFillerSpeaker: ThinkingFillerSpeaker
+    private let speechCoordinator: TurnSpeechCoordinating
     private let outputCanvasLogStore: OutputCanvasLogStore
     private let cameraVisionService: CameraVisionService
 
@@ -130,8 +131,6 @@ final class AppState: ObservableObject {
     private static let alarmFollowUpSettleDelayNs: UInt64 = 120_000_000
     private static let followUpSettleDelayNs: UInt64 = 80_000_000
 
-    private var thinkingFillerSpokenThisTurn = false
-    private var thinkingFillerIndex = 0
     private var forgeLogItemByJobID: [UUID: UUID] = [:]
     private var forgeLogMarkdownByJobID: [UUID: String] = [:]
     private var activeTurnLatencyStartAt: Date?
@@ -146,7 +145,6 @@ final class AppState: ObservableObject {
     private var activeSpeechRetryAttempt: Int = 0
     private var activeSpeechStartedAt: Date?
     private var lastSpeechDropReason: String?
-    private var lastSpeechSlowStartCorrelationID: String?
     private var activeTurnID: String?
     private var turnSpeechPhase: TurnSpeechPhase = .idle
     private var turnSequence: Int = 0
@@ -184,6 +182,7 @@ final class AppState: ObservableObject {
         self.selfLearningService = .shared
         self.thinkingFillerDelay = 2.0
         self.questionAutoListenNoSpeechTimeoutMs = 3500
+        self.speechCoordinator = SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
         self.ttsStartDeadlineSeconds = 1.6
@@ -207,6 +206,7 @@ final class AppState: ObservableObject {
          ttsStartDeadlineSeconds: Double = 1.6,
          ttsTotalDeadlineSeconds: Double = 45.0,
          enforceStrictTurnSpeechPhases: Bool? = nil,
+         speechCoordinator: TurnSpeechCoordinating? = nil,
          thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
              Task { @MainActor in
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
@@ -219,6 +219,7 @@ final class AppState: ObservableObject {
         self.selfLearningService = .shared
         self.thinkingFillerDelay = thinkingFillerDelay
         self.questionAutoListenNoSpeechTimeoutMs = max(100, questionAutoListenNoSpeechTimeoutMs)
+        self.speechCoordinator = speechCoordinator ?? SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
         self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
@@ -239,6 +240,7 @@ final class AppState: ObservableObject {
          ttsStartDeadlineSeconds: Double = 1.6,
          ttsTotalDeadlineSeconds: Double = 45.0,
          enforceStrictTurnSpeechPhases: Bool? = nil,
+         speechCoordinator: TurnSpeechCoordinating? = nil,
          thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
              Task { @MainActor in
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
@@ -251,6 +253,7 @@ final class AppState: ObservableObject {
         self.selfLearningService = .shared
         self.thinkingFillerDelay = thinkingFillerDelay
         self.questionAutoListenNoSpeechTimeoutMs = max(100, questionAutoListenNoSpeechTimeoutMs)
+        self.speechCoordinator = speechCoordinator ?? SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
         self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
@@ -391,8 +394,26 @@ final class AppState: ObservableObject {
 
         voicePipeline.onError = { [weak self] error in
             IntentAudioDiagnosticsStore.shared.recordAudioError(error.localizedDescription)
-            self?.showError(error.localizedDescription)
+            guard let self else { return }
+            if let downgraded = self.debugOnlyAudioNoiseMessage(for: error.localizedDescription) {
+                #if DEBUG
+                print("[AUDIO_DEBUG] \(downgraded)")
+                #endif
+                return
+            }
+            self.showError(error.localizedDescription)
         }
+    }
+
+    private func debugOnlyAudioNoiseMessage(for message: String) -> String? {
+        let lower = message.lowercased()
+        if lower.contains("-10877") {
+            return "Suppressed benign AVAudio session hiccup (-10877); this is typically transient."
+        }
+        if lower.contains("halc_proxyiocontext") && lower.contains("overload") {
+            return "Suppressed HALC IO overload warning; short overload during capture/playback handoff."
+        }
+        return nil
     }
 
     private func setupCameraVision() {
@@ -536,6 +557,7 @@ final class AppState: ObservableObject {
         activeSpeechStartedAt = nil
         activeTurnID = nil
         turnSpeechPhase = .idle
+        speechCoordinator.clearSlowStartTracking()
         Task {
             await AudioCoordinator.shared.clearTTSPending(owner: nil)
         }
@@ -691,7 +713,7 @@ final class AppState: ObservableObject {
         awaitingUserReply = false
         awaitingQuestionAutoListen = false
         speechStartMonitorTask?.cancel()
-        thinkingFillerSpokenThisTurn = false
+        speechCoordinator.beginTurn()
         cancelThinkingFiller()
         if !preserveThinkingIndicator {
             clearThinkingFeedback()
@@ -869,7 +891,7 @@ final class AppState: ObservableObject {
         }
         TTSService.shared.clearLastDropReason()
         lastSpeechDropReason = nil
-        lastSpeechSlowStartCorrelationID = nil
+        speechCoordinator.clearSlowStartTracking()
         logSpeechEnqueue(lines: speakable, correlationID: correlationID, retryAttempt: 0)
         Task {
             await AudioCoordinator.shared.setTTSPending(owner: correlationID)
@@ -878,9 +900,12 @@ final class AppState: ObservableObject {
 
         speechStartMonitorTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let started = await self.waitForSpeechStart(timeoutSeconds: self.ttsStartDeadlineSeconds)
+            let started = await self.waitForSpeechStart(
+                correlationID: correlationID,
+                timeoutSeconds: self.ttsStartDeadlineSeconds
+            )
             guard !started else { return }
-            self.lastSpeechSlowStartCorrelationID = correlationID
+            self.speechCoordinator.recordSlowStart(correlationID: correlationID)
             #if DEBUG
             let deadlineMs = Int(self.ttsStartDeadlineSeconds * 1000)
             print("[TTS_SLOW_START] correlation_id=\(correlationID) tts_start_deadline_ms=\(deadlineMs)")
@@ -888,15 +913,24 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func waitForSpeechStart(timeoutSeconds: Double) async -> Bool {
-        if TTSService.shared.isSpeaking || activeSpeechStartedAt != nil {
+    private func waitForSpeechStart(correlationID: String, timeoutSeconds: Double) async -> Bool {
+        func didCurrentSpeechStart() -> Bool {
+            if activeSpeechCorrelationID == correlationID,
+               activeSpeechStartedAt != nil,
+               TTSService.shared.currentCorrelationID == correlationID {
+                return true
+            }
+            return TTSService.shared.isSpeaking && TTSService.shared.currentCorrelationID == correlationID
+        }
+
+        if didCurrentSpeechStart() {
             return true
         }
         let deadline = Date().addingTimeInterval(max(0.2, timeoutSeconds))
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 60_000_000)
             if Task.isCancelled { return false }
-            if TTSService.shared.isSpeaking || activeSpeechStartedAt != nil {
+            if didCurrentSpeechStart() {
                 return true
             }
         }
@@ -1359,9 +1393,6 @@ final class AppState: ObservableObject {
     }
 
     private func speakThinkingFillerIfAllowed() {
-        guard !thinkingFillerSpokenThisTurn else { return }
-        guard !TTSService.shared.isSpeaking else { return }
-        guard status != .capturing else { return }
         if enforceStrictTurnSpeechPhases && turnSpeechPhase == .routing {
             #if DEBUG
             if let turnID = activeTurnID {
@@ -1371,16 +1402,15 @@ final class AppState: ObservableObject {
             return
         }
 
-        thinkingFillerSpokenThisTurn = true
-        thinkingFillerSpeaker(nextThinkingFillerUtterance())
-    }
-
-    private func nextThinkingFillerUtterance() -> String {
-        let fillers = ["One sec.", "Hmm.", "Just a moment.", "Working on it.", "Okay, one sec."]
-        guard !fillers.isEmpty else { return "One sec." }
-        let value = fillers[thinkingFillerIndex % fillers.count]
-        thinkingFillerIndex = (thinkingFillerIndex + 1) % fillers.count
-        return value
+        let ttsIsSpeaking = enforceStrictTurnSpeechPhases ? TTSService.shared.isSpeaking : false
+        if let filler = speechCoordinator.consumeThinkingFillerIfAllowed(
+            isTTSSpeaking: ttsIsSpeaking,
+            isCapturing: status == .capturing,
+            enforceStrictPhases: enforceStrictTurnSpeechPhases,
+            isRoutingPhase: turnSpeechPhase == .routing
+        ) {
+            thinkingFillerSpeaker(filler)
+        }
     }
 
     // MARK: - Mute Toggle
@@ -1721,7 +1751,7 @@ final class AppState: ObservableObject {
     }
 
     func debugLastSpeechSlowStartCorrelationID() -> String? {
-        lastSpeechSlowStartCorrelationID
+        speechCoordinator.lastSlowStartCorrelationID
     }
 
     func debugActiveTurnID() -> String? {

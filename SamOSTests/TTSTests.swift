@@ -3,6 +3,20 @@ import XCTest
 
 final class TTSTests: XCTestCase {
 
+    @MainActor
+    override func setUp() {
+        super.setUp()
+        TTSService.shared.stopSpeaking(reason: .explicitCancel)
+        TTSService.shared.clearLastDropReason()
+    }
+
+    @MainActor
+    override func tearDown() {
+        TTSService.shared.stopSpeaking(reason: .explicitCancel)
+        TTSService.shared.clearLastDropReason()
+        super.tearDown()
+    }
+
     // MARK: - ElevenLabsSettings Defaults
 
     func testDefaultVoiceId() {

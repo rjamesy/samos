@@ -37,7 +37,10 @@ final class STTService {
 
     func loadModel() throws {
         // Skip if already loaded — reuse context across transcriptions
-        if ctx != nil { return }
+        if ctx != nil {
+            STTDiagnosticsStore.shared.recordPrewarm(success: true, error: nil)
+            return
+        }
 
         // 1. Try bundled model first (always works in sandbox)
         // 2. Fall back to security-scoped bookmark (user-selected file)
@@ -45,13 +48,23 @@ final class STTService {
         var scopedURL: URL?
 
         if let bundled = Bundle.main.path(forResource: "ggml-base.en", ofType: "bin") {
+            let bundledLargeExists = Bundle.main.path(forResource: "ggml-large", ofType: "bin") != nil
+            if !bundledLargeExists {
+                STTDiagnosticsStore.shared.recordBundleFallbackOnce(
+                    "Model size 'large' not found in bundle, falling back to 'base'."
+                )
+            }
             path = bundled
+            STTDiagnosticsStore.shared.recordModelFound(true)
         } else if let resolved = M2Settings.resolveWhisperModelURL() {
             path = resolved.path
             scopedURL = resolved
+            STTDiagnosticsStore.shared.recordModelFound(true)
         } else if !M2Settings.whisperModelDisplayPath.isEmpty {
+            STTDiagnosticsStore.shared.recordModelFound(false)
             throw STTError.modelFileNotFound(M2Settings.whisperModelDisplayPath)
         } else {
+            STTDiagnosticsStore.shared.recordModelFound(false)
             throw STTError.modelNotConfigured
         }
 
@@ -66,10 +79,12 @@ final class STTService {
         params.flash_attn = false
         guard let newCtx = whisper_init_from_file_with_params(path, params) else {
             scopedURL?.stopAccessingSecurityScopedResource()
+            STTDiagnosticsStore.shared.recordPrewarm(success: false, error: STTError.modelLoadFailed.localizedDescription)
             throw STTError.modelLoadFailed
         }
         self.ctx = newCtx
         modelAccessURL = scopedURL
+        STTDiagnosticsStore.shared.recordPrewarm(success: true, error: nil)
     }
 
     func unloadModel() {
@@ -88,7 +103,12 @@ final class STTService {
     /// Transcribes a 16 kHz mono WAV file and returns the text. Deletes the WAV file after processing.
     func transcribe(wavURL: URL) async throws -> String {
         let useRealtimeSTT = OpenAISettings.realtimeModeEnabled && !OpenAISettings.realtimeUseClassicSTT
+        STTDiagnosticsStore.shared.recordEngineSelection(
+            realtimeModeEnabled: OpenAISettings.realtimeModeEnabled,
+            useClassicSTT: OpenAISettings.realtimeUseClassicSTT
+        )
         if useRealtimeSTT {
+            STTDiagnosticsStore.shared.recordModelFound(true)
             defer { try? FileManager.default.removeItem(at: wavURL) }
             do {
                 return try await OpenAIRealtimeSocket.transcribeWav(wavURL)
@@ -98,6 +118,7 @@ final class STTService {
                 if message.lowercased().contains("audio buffer empty") {
                     return ""
                 }
+                STTDiagnosticsStore.shared.recordError(message)
                 throw OpenAIRealtimeSocket.RealtimeError.requestFailed(message)
             }
         }
@@ -128,6 +149,7 @@ final class STTService {
             free(langStr)
 
             guard result == 0 else {
+                STTDiagnosticsStore.shared.recordError("whisper_full returned \(result)")
                 throw STTError.transcriptionFailed("whisper_full returned \(result)")
             }
 
@@ -142,6 +164,7 @@ final class STTService {
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         }.value
 
+        STTDiagnosticsStore.shared.recordPrewarm(success: true, error: nil)
         return text
     }
 

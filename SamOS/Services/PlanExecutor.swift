@@ -25,6 +25,22 @@ enum ImageProber {
         return URLSession(configuration: config)
     }()
 
+#if DEBUG
+    private static var testSession: URLSession?
+
+    static func setSessionForTesting(_ session: URLSession?) {
+        testSession = session
+    }
+#endif
+
+    private static var activeSession: URLSession {
+#if DEBUG
+        testSession ?? session
+#else
+        session
+#endif
+    }
+
     /// Per-URL probe result with failure reason.
     struct ProbeDetail {
         let url: String
@@ -45,7 +61,7 @@ enum ImageProber {
             request.timeoutInterval = 5
 
             do {
-                let (_, response) = try await session.data(for: request)
+                let (_, response) = try await activeSession.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     details.append(ProbeDetail(url: urlString, passed: false, reason: "no HTTP response"))
                     continue
@@ -78,7 +94,7 @@ enum ImageProber {
             request.timeoutInterval = 5
 
             do {
-                let (_, response) = try await session.data(for: request)
+                let (_, response) = try await activeSession.data(for: request)
                 guard let http = response as? HTTPURLResponse,
                       (200...299).contains(http.statusCode) else {
                     #if DEBUG
@@ -115,23 +131,18 @@ enum ImageProber {
 final class PlanExecutor {
     static let shared = PlanExecutor()
     private let toolsRuntime: ToolsRuntimeProtocol
-    private enum SpeechSource {
-        case talk
-        case tool
-        case prompt
-    }
-    private struct SpeechEntry {
-        let text: String
-        let source: SpeechSource
-    }
+    private let speechCoordinator: SpeechLineSelecting
 
     private init() {
         self.toolsRuntime = ToolsRuntime.shared
+        self.speechCoordinator = SpeechCoordinator.shared
     }
 
     /// Test-only initialiser: inject a mock ToolsRuntime.
-    init(toolsRuntime: ToolsRuntimeProtocol) {
+    init(toolsRuntime: ToolsRuntimeProtocol,
+         speechCoordinator: SpeechLineSelecting? = nil) {
         self.toolsRuntime = toolsRuntime
+        self.speechCoordinator = speechCoordinator ?? SpeechCoordinator.shared
     }
 
     func execute(_ plan: Plan, originalInput: String, pendingSlotName: String? = nil) async -> PlanExecutionResult {
@@ -139,18 +150,18 @@ final class PlanExecutor {
         let _ = pendingSlotName // Retained for API compatibility with existing call sites/tests.
         let topLevelToolSay = singleToolPlanSay(in: plan)
         let turnCorrelationID = String(UUID().uuidString.prefix(8))
-        var speechEntries: [SpeechEntry] = []
+        var speechEntries: [SpeechLineEntry] = []
         var toolProducedUserFacingOutput = false
 
-        func appendSpeech(_ text: String, source: SpeechSource) {
+        func appendSpeech(_ text: String, source: SpeechLineSource) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
-            speechEntries.append(SpeechEntry(text: trimmed, source: source))
+            speechEntries.append(SpeechLineEntry(text: trimmed, source: source))
             result.spokenLines.append(trimmed)
         }
 
         func finalizedResult() -> PlanExecutionResult {
-            let selectedSpeech = speechLinesForTurn(
+            let selectedSpeech = speechCoordinator.selectSpokenLines(
                 entries: speechEntries,
                 toolProducedUserFacingOutput: toolProducedUserFacingOutput,
                 maxSpeakChars: M2Settings.maxSpeakChars
@@ -164,7 +175,7 @@ final class PlanExecutor {
 
         if let topLevelToolSay {
             result.chatMessages.append(ChatMessage(role: .assistant, text: topLevelToolSay))
-            appendSpeech(topLevelToolSay, source: .talk)
+                appendSpeech(topLevelToolSay, source: .talk)
         }
 
         for step in plan.steps {
@@ -432,51 +443,6 @@ final class PlanExecutor {
         value = value.replacingOccurrences(of: #"[*_>#]+"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func speechLinesForTurn(entries: [SpeechEntry], toolProducedUserFacingOutput: Bool, maxSpeakChars: Int) -> [String] {
-        guard !entries.isEmpty else { return [] }
-        let cappedChars = max(120, maxSpeakChars)
-
-        func pickToolEntry() -> String? {
-            if let explicitTool = entries.last(where: { $0.source == .tool || $0.source == .prompt }) {
-                return explicitTool.text
-            }
-            return nil
-        }
-
-        func pickTalkEntry() -> String? {
-            if let talk = entries.last(where: { $0.source == .talk && !containsUnresolvedTemplateToken($0.text) }) {
-                return talk.text
-            }
-            return nil
-        }
-
-        let selected: String
-        if toolProducedUserFacingOutput, let toolText = pickToolEntry() {
-            selected = toolText
-        } else if let talkText = pickTalkEntry() {
-            selected = talkText
-        } else {
-            selected = entries.last?.text ?? ""
-        }
-
-        let condensed = condensedSpeechLine(selected, maxChars: cappedChars)
-        guard !condensed.isEmpty else { return [] }
-        return [condensed]
-    }
-
-    private func condensedSpeechLine(_ text: String, maxChars: Int) -> String {
-        let cleaned = stripMarkdownForSpeech(stripPlaceholderTokens(text))
-        guard !cleaned.isEmpty else { return "" }
-        guard cleaned.count > maxChars else { return cleaned }
-        let prefix = String(cleaned.prefix(maxChars)).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prefix.isEmpty else { return "I've shown the full details on screen." }
-        return "\(prefix) ... I've shown the full details on screen."
-    }
-
-    private func containsUnresolvedTemplateToken(_ text: String) -> Bool {
-        text.range(of: #"\{[A-Za-z0-9_]+\}"#, options: .regularExpression) != nil
     }
 
     /// Returns plan-level say when this is a single-tool plan (legacy TOOL action shape).

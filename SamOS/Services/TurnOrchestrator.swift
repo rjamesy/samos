@@ -1,35 +1,5 @@
 import Foundation
 
-/// Result of a single turn processed by the orchestrator.
-struct TurnResult {
-    var appendedChat: [ChatMessage] = []
-    var appendedOutputs: [OutputItem] = []
-    var spokenLines: [String] = []
-    var triggerFollowUpCapture: Bool = false
-    var triggerQuestionAutoListen: Bool = false
-    var usedMemoryHints: Bool = false
-    var llmProvider: LLMProvider = .none
-    var intentProviderSelected: IntentClassificationProvider = .rule
-    var planProviderSelected: LLMProvider = .none
-    var knowledgeAttribution: KnowledgeAttribution?
-    var aiModelUsed: String?
-    var executedToolSteps: [(name: String, args: [String: String])] = []
-    var intentRouterMsLocal: Int?
-    var intentRouterMsOpenAI: Int?
-    var planLocalWireMs: Int?
-    var planLocalTotalMs: Int?
-    var planOpenAIMs: Int?
-    var toolMsTotal: Int?
-    var planRouterMs: Int?
-    var routerMs: Int? {
-        get { planRouterMs }
-        set { planRouterMs = newValue }
-    }
-    var originProvider: MessageOriginProvider = .local
-    var executionProvider: MessageOriginProvider = .local
-    var originReason: String?
-}
-
 private struct LocalKnowledgeContext {
     let items: [KnowledgeSourceSnippet]
 
@@ -1780,16 +1750,6 @@ struct IntentClassifier {
 
 }
 
-private struct IntentRoutePolicy {
-    let localFirst: Bool
-    let openAIFallback: Bool
-
-    init(useOllama: Bool) {
-        self.localFirst = useOllama
-        self.openAIFallback = true
-    }
-}
-
 private struct PlanRoutePolicy {
     let useOllama: Bool
     let preferOpenAIPlans: Bool
@@ -1809,21 +1769,6 @@ private struct PlanRoutePolicy {
             return useOllama ? [.ollama] : [.none]
         }
     }
-}
-
-private enum CapabilityGapRequestKind: Equatable {
-    case externalSource
-    case capabilityBuild
-}
-
-private struct PendingCapabilityRequest: Equatable {
-    let kind: CapabilityGapRequestKind
-    let desiredToolName: String
-    let originalUserGoal: String
-    let prefersWebsiteURL: Bool
-    let createdAt: Date
-    var lastAskedAt: Date
-    var reminderCount: Int
 }
 
 extension TurnOrchestrating {
@@ -1856,6 +1801,7 @@ func withTimeout<T: Sendable>(_ seconds: Double, _ op: @Sendable @escaping () as
 final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
     private let openAIRouter: OpenAIRouter
+    private let openAIProvider: OpenAIProviderRouting
     private let tonePreferenceStore: TonePreferenceStore
     private let faceGreetingManager: FaceGreetingManager
     private let cameraVision: CameraVisionProviding
@@ -1894,7 +1840,6 @@ final class TurnOrchestrator {
     private var lastFollowUpTurn: Int?
     private static let sharedIntentInferenceExecutor = IntentInferenceExecutor()
     private let openAIRouteTimeoutSeconds: Double = 5.0
-    private let openAIRouteRetryTimeoutSeconds: Double = 2.6
     private let intentLocalTimeoutSeconds: Double
     private let intentOpenAITimeoutSeconds: Double = 2.0
     private let openAITimeoutRetryMaxTokens: Int = 220
@@ -1906,6 +1851,10 @@ final class TurnOrchestrator {
     private let ollamaToolFeedbackTimeoutSeconds: Double = 1.2
     private let unknownToolPromptCooldownSeconds: TimeInterval = 300
     private let cameraBlindnessGraceWindowSeconds: TimeInterval = 10
+    private let toolRunner: TurnToolRunning
+    private let routerOverride: TurnRouting?
+    private lazy var defaultRouter: TurnRouting = makeDefaultRouter()
+    private var router: TurnRouting { routerOverride ?? defaultRouter }
     private var pendingCapabilityRequest: PendingCapabilityRequest?
     private var lastExternalSourcePromptAt: Date?
     private var currentIntentClassification: IntentClassificationResult?
@@ -1918,18 +1867,22 @@ final class TurnOrchestrator {
     init() {
         let ollama = OllamaRouter()
         let openAI = OpenAIRouter(parser: ollama)
+        let provider = RetryingOpenAIProvider(openAIRouter: openAI)
         self.ollamaRouter = ollama
         self.openAIRouter = openAI
+        self.openAIProvider = provider
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = FaceGreetingManager()
         self.cameraVision = CameraVisionService.shared
         self.intentLocalTimeoutSeconds = TurnOrchestrator.sanitizedLocalIntentTimeout(M2Settings.localIntentTimeoutSeconds)
         self.intentClassifier = TurnOrchestrator.makeIntentClassifier(
             ollamaRouter: ollama,
-            openAIRouter: openAI,
+            openAIProvider: provider,
             localTimeoutSeconds: intentLocalTimeoutSeconds,
             openAITimeoutSeconds: intentOpenAITimeoutSeconds
         )
+        self.toolRunner = TurnToolRunner(planExecutor: .shared, toolsRuntime: ToolsRuntime.shared)
+        self.routerOverride = nil
         self.memoryAckCooldownTurns = 20
         self.followUpCooldownTurns = 3
     }
@@ -1940,20 +1893,30 @@ final class TurnOrchestrator {
          faceGreetingManager: FaceGreetingManager? = nil,
          cameraVision: CameraVisionProviding = CameraVisionService.shared,
          localIntentTimeoutSeconds: Double? = nil,
+         router: TurnRouting? = nil,
+         openAIProvider: OpenAIProviderRouting? = nil,
+         toolRunner: TurnToolRunning? = nil,
          memoryAckCooldownTurns: Int = 20,
          followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
         self.openAIRouter = openAIRouter
+        self.openAIProvider = openAIProvider ?? RetryingOpenAIProvider(
+            openAIRouter: openAIRouter,
+            intentRetryBackoffMs: 1,
+            planRetryBackoffMs: 1
+        )
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = faceGreetingManager ?? FaceGreetingManager()
         self.cameraVision = cameraVision
         self.intentLocalTimeoutSeconds = TurnOrchestrator.sanitizedLocalIntentTimeout(localIntentTimeoutSeconds ?? M2Settings.localIntentTimeoutSeconds)
         self.intentClassifier = TurnOrchestrator.makeIntentClassifier(
             ollamaRouter: ollamaRouter,
-            openAIRouter: openAIRouter,
+            openAIProvider: self.openAIProvider,
             localTimeoutSeconds: intentLocalTimeoutSeconds,
             openAITimeoutSeconds: intentOpenAITimeoutSeconds
         )
+        self.routerOverride = router
+        self.toolRunner = toolRunner ?? TurnToolRunner(planExecutor: .shared, toolsRuntime: ToolsRuntime.shared)
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
         self.followUpCooldownTurns = max(1, followUpCooldownTurns)
     }
@@ -1963,6 +1926,9 @@ final class TurnOrchestrator {
                      openAIRouter: OpenAIRouter,
                      faceGreetingManager: FaceGreetingManager? = nil,
                      localIntentTimeoutSeconds: Double? = nil,
+                     router: TurnRouting? = nil,
+                     openAIProvider: OpenAIProviderRouting? = nil,
+                     toolRunner: TurnToolRunning? = nil,
                      memoryAckCooldownTurns: Int = 20,
                      followUpCooldownTurns: Int = 3) {
         self.init(ollamaRouter: ollamaRouter,
@@ -1970,12 +1936,61 @@ final class TurnOrchestrator {
                   faceGreetingManager: faceGreetingManager,
                   cameraVision: CameraVisionService.shared,
                   localIntentTimeoutSeconds: localIntentTimeoutSeconds,
+                  router: router,
+                  openAIProvider: openAIProvider,
+                  toolRunner: toolRunner,
                   memoryAckCooldownTurns: memoryAckCooldownTurns,
                   followUpCooldownTurns: followUpCooldownTurns)
     }
 
+    private func makeDefaultRouter() -> TurnRouting {
+        TurnRouter(
+            classifyIntent: { [intentClassifier] input, useLocalFirst, allowOpenAIFallback in
+                await intentClassifier.classify(
+                    input,
+                    useLocalFirst: useLocalFirst,
+                    allowOpenAIFallback: allowOpenAIFallback
+                )
+            },
+            routePlan: { [weak self] request in
+                guard let self else {
+                    return RouteDecision(
+                        plan: Plan(steps: [.talk(say: "Sorry — I had trouble generating a response. Please try again.")]),
+                        provider: .none,
+                        routerMs: 0,
+                        aiModelUsed: nil,
+                        routeReason: "router_deallocated",
+                        planLocalWireMs: nil,
+                        planLocalTotalMs: nil,
+                        planOpenAIMs: nil
+                    )
+                }
+                let routed = await self.routePlan(
+                    request.text,
+                    history: request.history,
+                    pendingSlot: request.pendingSlot,
+                    reason: request.reason,
+                    promptContext: request.promptContext
+                )
+                return RouteDecision(
+                    plan: routed.0,
+                    provider: routed.1,
+                    routerMs: routed.2,
+                    aiModelUsed: routed.3,
+                    routeReason: routed.4,
+                    planLocalWireMs: routed.5,
+                    planLocalTotalMs: routed.6,
+                    planOpenAIMs: routed.7
+                )
+            },
+            nativeToolExists: { category in
+                TurnOrchestrator.hasNativeTool(for: category)
+            }
+        )
+    }
+
     private static func makeIntentClassifier(ollamaRouter: OllamaRouter,
-                                             openAIRouter: OpenAIRouter,
+                                             openAIProvider: OpenAIProviderRouting,
                                              localTimeoutSeconds: Double? = nil,
                                              openAITimeoutSeconds: Double? = nil) -> IntentClassifier {
         IntentClassifier(
@@ -1983,11 +1998,14 @@ final class TurnOrchestrator {
                 try await ollamaRouter.classifyIntentWithTrace(input)
             },
             openAIClassifier: { input in
-                try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
+                try await openAIProvider.classifyIntentWithRetry(
+                    input,
+                    timeoutSeconds: openAITimeoutSeconds
+                ).output
             },
             localInferenceExecutor: sharedIntentInferenceExecutor,
             localTimeoutSeconds: localTimeoutSeconds,
-            openAITimeoutSeconds: openAITimeoutSeconds
+            openAITimeoutSeconds: nil
         )
     }
 
@@ -2099,10 +2117,9 @@ final class TurnOrchestrator {
         print("[INTENT_ROUTE_POLICY] local_first=\(intentRoutePolicy.localFirst) openai_fallback=\(intentRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) openai_status=\(OpenAISettings.apiKeyStatus)")
         #endif
         logIntentAudioCorrelation(inputMode: inputMode)
-        let intentClassification = await intentClassifier.classify(
+        let intentClassification = await router.classifyIntent(
             intentInput,
-            useLocalFirst: intentRoutePolicy.localFirst,
-            allowOpenAIFallback: intentRoutePolicy.openAIFallback
+            policy: intentRoutePolicy
         )
         currentIntentClassification = intentClassification
         lastIntentClassification = intentClassification
@@ -2227,10 +2244,15 @@ final class TurnOrchestrator {
             return capabilityResult
         }
 
-        if shouldEnterExternalSourceCapabilityGapFlow(
-            userText,
-            classification: intentClassification.classification,
-            provider: intentClassification.provider
+        if router.shouldEnterExternalSourceCapabilityGapFlow(
+            CapabilityGapRouteInput(
+                text: userText,
+                classification: intentClassification.classification,
+                provider: intentClassification.provider,
+                pendingSlot: pendingSlot,
+                pendingCapabilityRequest: pendingCapabilityRequest,
+                confidenceThreshold: intentClassification.confidenceThreshold
+            )
         ) {
             let sourcePlan = buildExternalSourceAskPlan(
                 toolName: "external_source",
@@ -2330,112 +2352,98 @@ final class TurnOrchestrator {
         lastPromptContext = promptContext
 
         // PendingSlot handling — always route through LLM
-        if var slot = pendingSlot {
-            if slot.isExpired {
-                pendingSlot = nil
-                if pendingCapabilityRequest?.kind == .externalSource {
-                    pendingCapabilityRequest = nil
-                }
-                // Fall through to normal routing
-            } else if slot.attempts >= 3 {
-                pendingSlot = nil
-                if pendingCapabilityRequest?.kind == .externalSource {
-                    pendingCapabilityRequest = nil
-                }
-                var result = TurnResult()
-                let msg = "I'm not getting it — can you rephrase?"
-                result.appendedChat.append(ChatMessage(role: .assistant, text: msg))
-                result.spokenLines.append(msg)
-                logIdentityTurn(decision: identityDecision,
-                                now: now,
-                                provider: .none,
-                                routeReason: "pending_slot_retry_exhausted",
-                                routerMs: nil)
-                applyRoutingAttribution(&result, planProvider: LLMProvider.none, planRouterMs: nil)
-                return result
-            } else {
-                // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason, planLocalWireMs, planLocalTotalMs, planOpenAIMs) = await routePlan(
-                    userText,
-                    history: history,
-                    pendingSlot: slot,
-                    reason: .pendingSlotReply,
-                    promptContext: promptContext
-                )
-                logPlanProviderSelection(provider: provider,
-                                         routeReason: routeProviderReason,
-                                         routerMs: routerMs,
-                                         aiModelUsed: aiModelUsed)
-                let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: userText)
-                let plan = await maybeRephraseRepeatedTalk(guardedPlan,
-                                                           userInput: userText,
-                                                           history: history,
-                                                           mode: mode,
-                                                           turnIndex: currentTurn,
-                                                           turnStartedAt: turnStartedAt)
-                let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
+        let pendingSlotEvaluation = router.evaluatePendingSlot(
+            pendingSlot,
+            pendingCapabilityRequest: pendingCapabilityRequest,
+            now: now
+        )
+        pendingSlot = pendingSlotEvaluation.pendingSlot
+        pendingCapabilityRequest = pendingSlotEvaluation.pendingCapabilityRequest
 
-                // Check if returned plan has an ask step for the same slot
-                let hasRepeatAsk = shapedPlan.steps.contains { step in
-                    if case .ask(let stepSlot, _) = step,
-                       !normalizedSlotSet(from: stepSlot).isDisjoint(with: normalizedSlotSet(from: slot.slotName)) {
-                        return true
-                    }
-                    return false
-                }
+        switch pendingSlotEvaluation.action {
+        case .retryExhausted(let msg):
+            var result = TurnResult()
+            result.appendedChat.append(ChatMessage(role: .assistant, text: msg))
+            result.spokenLines.append(msg)
+            logIdentityTurn(decision: identityDecision,
+                            now: now,
+                            provider: .none,
+                            routeReason: "pending_slot_retry_exhausted",
+                            routerMs: nil)
+            applyRoutingAttribution(&result, planProvider: LLMProvider.none, planRouterMs: nil)
+            return result
+        case .continueWithSlot(let slot):
+            let routed = await router.routePlan(TurnPlanRouteRequest(
+                text: userText,
+                history: history,
+                pendingSlot: slot,
+                reason: .pendingSlotReply,
+                promptContext: promptContext
+            ))
+            logPlanProviderSelection(provider: routed.provider,
+                                     routeReason: routed.routeReason,
+                                     routerMs: routed.routerMs,
+                                     aiModelUsed: routed.aiModelUsed)
+            let guardedPlan = enforceNoFalseBlindnessGuardrail(on: routed.plan, userInput: userText)
+            let plan = await maybeRephraseRepeatedTalk(guardedPlan,
+                                                       userInput: userText,
+                                                       history: history,
+                                                       mode: mode,
+                                                       turnIndex: currentTurn,
+                                                       turnStartedAt: turnStartedAt)
+            let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
 
-                if hasRepeatAsk {
-                    slot.attempts += 1
-                    pendingSlot = slot
-                } else {
-                    pendingSlot = nil
-                    if normalizedSlotSet(from: slot.slotName).contains("source_url_or_site"),
-                       pendingCapabilityRequest?.kind == .externalSource {
-                        pendingCapabilityRequest = nil
-                    }
-                }
+            let slotResolution = router.resolvePendingSlotAfterPlan(
+                shapedPlan,
+                previousSlot: slot,
+                pendingCapabilityRequest: pendingCapabilityRequest
+            )
+            pendingSlot = slotResolution.pendingSlot
+            pendingCapabilityRequest = slotResolution.pendingCapabilityRequest
 
-                lastFinalActionKind = inferredActionKind(for: shapedPlan)
-                var result = await executePlan(shapedPlan,
-                                               originalInput: userText,
-                                               history: history,
-                                               provider: provider,
-                                               aiModelUsed: aiModelUsed,
-                                               routerMs: routerMs,
-                                               planLocalWireMs: planLocalWireMs,
-                                               planLocalTotalMs: planLocalTotalMs,
-                                               planOpenAIMs: planOpenAIMs,
-                                               localKnowledgeContext: localKnowledgeContext,
-                                               hasMemoryHints: hasMemoryHints,
-                                               turnIndex: currentTurn,
-                                               feedbackDepth: 0,
-                                               turnStartedAt: turnStartedAt,
-                                               mode: mode,
-                                               toneRepairCue: toneRepairCue,
-                                               affect: effectiveAffect,
-                                               originReason: routeProviderReason)
-                appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
-                logIdentityTurn(decision: identityDecision,
-                                now: now,
-                                provider: provider,
-                                routeReason: routeProviderReason,
-                                routerMs: routerMs)
-                return result
-            }
+            lastFinalActionKind = inferredActionKind(for: shapedPlan)
+            var result = await executePlan(shapedPlan,
+                                           originalInput: userText,
+                                           history: history,
+                                           provider: routed.provider,
+                                           aiModelUsed: routed.aiModelUsed,
+                                           routerMs: routed.routerMs,
+                                           planLocalWireMs: routed.planLocalWireMs,
+                                           planLocalTotalMs: routed.planLocalTotalMs,
+                                           planOpenAIMs: routed.planOpenAIMs,
+                                           localKnowledgeContext: localKnowledgeContext,
+                                           hasMemoryHints: hasMemoryHints,
+                                           turnIndex: currentTurn,
+                                           feedbackDepth: 0,
+                                           turnStartedAt: turnStartedAt,
+                                           mode: mode,
+                                           toneRepairCue: toneRepairCue,
+                                           affect: effectiveAffect,
+                                           originReason: routed.routeReason)
+            appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
+            logIdentityTurn(decision: identityDecision,
+                            now: now,
+                            provider: routed.provider,
+                            routeReason: routed.routeReason,
+                            routerMs: routed.routerMs)
+            return result
+        case .none:
+            break
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason, planLocalWireMs, planLocalTotalMs, planOpenAIMs) = await routePlan(
-            userText,
+        let routed = await router.routePlan(TurnPlanRouteRequest(
+            text: userText,
             history: history,
+            pendingSlot: nil,
             reason: .userChat,
             promptContext: promptContext
-        )
-        logPlanProviderSelection(provider: provider,
-                                 routeReason: routeProviderReason,
-                                 routerMs: routerMs,
-                                 aiModelUsed: aiModelUsed)
-        let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: userText)
+        ))
+        logPlanProviderSelection(provider: routed.provider,
+                                 routeReason: routed.routeReason,
+                                 routerMs: routed.routerMs,
+                                 aiModelUsed: routed.aiModelUsed)
+        let guardedPlan = enforceNoFalseBlindnessGuardrail(on: routed.plan, userInput: userText)
         let plan = await maybeRephraseRepeatedTalk(guardedPlan,
                                                    userInput: userText,
                                                    history: history,
@@ -2447,12 +2455,12 @@ final class TurnOrchestrator {
         var result = await executePlan(shapedPlan,
                                        originalInput: userText,
                                        history: history,
-                                       provider: provider,
-                                       aiModelUsed: aiModelUsed,
-                                       routerMs: routerMs,
-                                       planLocalWireMs: planLocalWireMs,
-                                       planLocalTotalMs: planLocalTotalMs,
-                                       planOpenAIMs: planOpenAIMs,
+                                       provider: routed.provider,
+                                       aiModelUsed: routed.aiModelUsed,
+                                       routerMs: routed.routerMs,
+                                       planLocalWireMs: routed.planLocalWireMs,
+                                       planLocalTotalMs: routed.planLocalTotalMs,
+                                       planOpenAIMs: routed.planOpenAIMs,
                                        localKnowledgeContext: localKnowledgeContext,
                                        hasMemoryHints: hasMemoryHints,
                                        turnIndex: currentTurn,
@@ -2461,13 +2469,13 @@ final class TurnOrchestrator {
                                        mode: mode,
                                        toneRepairCue: toneRepairCue,
                                        affect: effectiveAffect,
-                                       originReason: routeProviderReason)
+                                       originReason: routed.routeReason)
         appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
         logIdentityTurn(decision: identityDecision,
                         now: now,
-                        provider: provider,
-                        routeReason: routeProviderReason,
-                        routerMs: routerMs)
+                        provider: routed.provider,
+                        routeReason: routed.routeReason,
+                        routerMs: routed.routerMs)
         return result
     }
 
@@ -2530,23 +2538,27 @@ final class TurnOrchestrator {
             let selectedModel = selectOpenAIModel(for: text, reason: reason)
             do {
                 let timeoutSeconds = openAIRouteTimeoutSecondsFor(input: text, reason: reason)
-                let plan = try await withTimeout(timeoutSeconds) {
-                    try await self.openAIRouter.routePlan(
-                        text,
+                let planDecision = try await self.openAIProvider.routePlanWithRetry(
+                    OpenAIPlanRequest(
+                        input: text,
                         history: history,
                         pendingSlot: pendingSlot,
                         promptContext: promptContext,
                         modelOverride: selectedModel,
-                        reason: .plan
+                        reason: .plan,
+                        timeoutSeconds: timeoutSeconds,
+                        retryMaxOutputTokens: openAITimeoutRetryMaxTokens
                     )
-                }
+                )
+                let plan = planDecision.plan
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 openAIMs = ms
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
                 if let failKind = ollamaLocalFirstFailKind {
                     return (plan, .openai, ms, selectedModel, "ollama_\(failKind)_fallback", localWireMs, localTotalMs, openAIMs)
                 }
-                return (plan, .openai, ms, selectedModel, "openai_success", localWireMs, localTotalMs, openAIMs)
+                let routeReason = planDecision.didRetry ? "openai_success_timeout_retry" : "openai_success"
+                return (plan, .openai, ms, selectedModel, routeReason, localWireMs, localTotalMs, openAIMs)
             } catch {
                 if let validationFailure = routerValidationFailure(from: error) {
                     let (plan, routeReason) = planForRouterValidationFailure(
@@ -2560,45 +2572,11 @@ final class TurnOrchestrator {
                     return (plan, .openai, ms, selectedModel, routeReason, localWireMs, localTotalMs, openAIMs)
                 }
 
-                if error is RouterTimeout {
-                    let firstMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                    logTimeoutRetryAttempt(provider: "openai", attempt: 1, ms: firstMs, error: error)
-                    do {
-                        let plan = try await withTimeout(openAIRouteRetryTimeoutSeconds) {
-                            try await self.openAIRouter.routePlan(
-                                text,
-                                history: history,
-                                pendingSlot: pendingSlot,
-                                promptContext: self.timeoutRetryPromptContext(from: promptContext),
-                                modelOverride: selectedModel,
-                                reason: .plan
-                            )
-                        }
-                        let retryMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                        logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: retryMs, error: nil)
-                        routerLog(provider: "openai", reason: reason.rawValue, ms: retryMs, ok: true)
-                        openAIMs = retryMs
-                        return (plan, .openai, retryMs, selectedModel, "openai_success_timeout_retry", localWireMs, localTotalMs, openAIMs)
-                    } catch {
-                        if let validationFailure = routerValidationFailure(from: error) {
-                            let (plan, routeReason) = planForRouterValidationFailure(
-                                validationFailure,
-                                userText: text,
-                                now: Date()
-                            )
-                            let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                            logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: ms, error: error)
-                            routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                            openAIMs = ms
-                            return (plan, .openai, ms, selectedModel, routeReason, localWireMs, localTotalMs, openAIMs)
-                        }
-
-                        let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-                        logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: ms, error: error)
-                        routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                        openAIMs = ms
-                        return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_timeout_retry_failed", localWireMs, localTotalMs, openAIMs)
-                    }
+                if isTimeoutLikeOpenAIError(error) {
+                    let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                    routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
+                    openAIMs = ms
+                    return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_timeout_retry_failed", localWireMs, localTotalMs, openAIMs)
                 }
 
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
@@ -2675,7 +2653,7 @@ final class TurnOrchestrator {
                              toneRepairCue: String? = nil,
                              affect: AffectMetadata = .neutral,
                              originReason: String? = nil) async -> TurnResult {
-        let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
+        let exec = await toolRunner.executePlan(plan, originalInput: originalInput, pendingSlotName: pendingSlot?.slotName)
 
         var result = TurnResult()
         result.llmProvider = provider
@@ -2862,7 +2840,7 @@ final class TurnOrchestrator {
                                     feedbackDepth: Int,
                                     turnStartedAt: Date,
                                     originReason: String?) async -> TurnResult? {
-        let exec = await PlanExecutor.shared.execute(plan, originalInput: originalInput)
+        let exec = await toolRunner.executePlan(plan, originalInput: originalInput, pendingSlotName: nil)
 
         // If the retry ALSO produced an image_url failure, give up
         if let req = exec.pendingSlotRequest, req.slot == "image_url" {
@@ -3326,23 +3304,6 @@ final class TurnOrchestrator {
                 && merged.contains("couldn't")
     }
 
-    private func shouldEnterExternalSourceCapabilityGapFlow(_ text: String,
-                                                            classification: IntentClassification,
-                                                            provider: IntentClassificationProvider) -> Bool {
-        guard pendingCapabilityRequest == nil else { return false }
-        guard pendingSlot == nil else { return false }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        guard extractFirstURL(from: text) == nil else { return false }
-
-        if classification.intent == .webRequest {
-            return provider == .rule
-        }
-        if classification.intent == .recipe && classification.needsWeb {
-            return provider == .rule
-        }
-        return false
-    }
-
     private func handlePendingCapabilityRequestTurn(text: String,
                                                     history: [ChatMessage],
                                                     mode: ConversationMode,
@@ -3355,38 +3316,33 @@ final class TurnOrchestrator {
         _ = history
         _ = localKnowledgeContext
         _ = turnStartedAt
-        guard let pending = pendingCapabilityRequest else { return nil }
-        guard pending.kind == .externalSource else { return nil }
-
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let url = extractFirstURL(from: trimmed) {
+        let resolution = router.resolvePendingCapabilityInput(
+            PendingCapabilityInput(
+                pendingRequest: pendingCapabilityRequest,
+                text: text,
+                now: now
+            )
+        )
+        switch resolution {
+        case .none:
+            return nil
+        case .learnSource(let url, let focus, let memoryContent, let successMessage):
             pendingSlot = nil
             pendingCapabilityRequest = nil
 
-            let focus = pending.prefersWebsiteURL
-                ? "How to find showtimes/listings and location filters"
-                : "How to retrieve the requested information from this source"
             let learnArgs = ["url": url, "focus": focus]
             let learnAction = ToolAction(name: "learn_website", args: learnArgs, say: nil)
-            let learnOutput = ToolsRuntime.shared.execute(learnAction)
+            let learnOutput = toolRunner.executeTool(learnAction)
 
             let memoryArgs = [
                 "type": "preference",
-                "content": pending.prefersWebsiteURL
-                    ? "Cinema listings source: \(url)"
-                    : "Capability source: \(url)",
+                "content": memoryContent,
                 "source": "capability_gap_external_source"
             ]
             let memoryAction = ToolAction(name: "save_memory", args: memoryArgs, say: nil)
-            _ = ToolsRuntime.shared.execute(memoryAction)
+            _ = toolRunner.executeTool(memoryAction)
 
-            var result = immediateTalkTurnResult(
-                message: pending.prefersWebsiteURL
-                    ? "Got it - I've learned that page. I can run start_skillforge next to build a cinema listings skill. Want me to build it?"
-                    : "Got it - I learned that source. I can run start_skillforge to build this capability next. Want me to build it?"
-            )
+            var result = immediateTalkTurnResult(message: successMessage)
             result.llmProvider = .none
             result.originProvider = .local
             result.executionProvider = .local
@@ -3416,20 +3372,10 @@ final class TurnOrchestrator {
                 routerMs: 0
             )
             return result
-        }
-
-        if pending.reminderCount == 0 {
-            let prompt = pending.prefersWebsiteURL
-                ? "I still need the exact URL for the listings page (for example, the Event Cinemas page). Paste that link and I'll learn it."
-                : "I still need a source URL/app/site for that request. Share one and I'll learn it."
-            pendingCapabilityRequest?.lastAskedAt = now
-            pendingCapabilityRequest?.reminderCount = 1
+        case .askForSource(let prompt, let pendingSlotValue, let updatedRequest):
+            pendingCapabilityRequest = updatedRequest
             lastExternalSourcePromptAt = now
-            pendingSlot = PendingSlot(
-                slotName: "source_url_or_site",
-                prompt: prompt,
-                originalUserText: pending.originalUserGoal
-            )
+            pendingSlot = pendingSlotValue
 
             var result = immediateTalkTurnResult(message: prompt)
             result.llmProvider = .none
@@ -3455,73 +3401,33 @@ final class TurnOrchestrator {
                 routerMs: 0
             )
             return result
-        }
+        case .drop(let message):
+            pendingSlot = nil
+            pendingCapabilityRequest = nil
 
-        pendingSlot = nil
-        pendingCapabilityRequest = nil
-
-        var result = immediateTalkTurnResult(
-            message: pending.prefersWebsiteURL
-                ? "No worries. When you have the exact URL, paste it and I'll learn it."
-                : "No worries. When you have a source URL/app/site, share it and I'll learn it."
-        )
-        result.llmProvider = .none
-        result.originProvider = .local
-        result.executionProvider = .local
-        result.originReason = "capability_gap_source_url_missing_drop"
-        result.routerMs = 0
-        applyResponsePolish(
-            &result,
-            plan: Plan(steps: [.talk(say: result.spokenLines.first ?? "")]),
-            hasMemoryHints: hasMemoryHints,
-            turnIndex: turnIndex
-        )
-        updateAssistantState(after: result, mode: mode)
-        rememberAssistantLines(result.appendedChat)
-        logIdentityTurn(
-            decision: identityDecision,
-            now: now,
-            provider: .none,
-            routeReason: "capability_gap_source_url_missing_drop",
-            routerMs: 0
-        )
-        return result
-    }
-
-    private func looksLikeSiteNameReply(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        guard extractFirstURL(from: trimmed) == nil else { return false }
-        guard !trimmed.contains("?") else { return false }
-
-        let words = trimmed.split(whereSeparator: \.isWhitespace)
-        guard words.count <= 8 else { return false }
-        let hasLetters = trimmed.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
-        guard hasLetters else { return false }
-        return true
-    }
-
-    private func extractFirstURL(from text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s]+"#, options: .caseInsensitive) else {
-            return nil
+            var result = immediateTalkTurnResult(message: message)
+            result.llmProvider = .none
+            result.originProvider = .local
+            result.executionProvider = .local
+            result.originReason = "capability_gap_source_url_missing_drop"
+            result.routerMs = 0
+            applyResponsePolish(
+                &result,
+                plan: Plan(steps: [.talk(say: result.spokenLines.first ?? "")]),
+                hasMemoryHints: hasMemoryHints,
+                turnIndex: turnIndex
+            )
+            updateAssistantState(after: result, mode: mode)
+            rememberAssistantLines(result.appendedChat)
+            logIdentityTurn(
+                decision: identityDecision,
+                now: now,
+                provider: .none,
+                routeReason: "capability_gap_source_url_missing_drop",
+                routerMs: 0
+            )
+            return result
         }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              let urlRange = Range(match.range, in: text) else {
-            return nil
-        }
-        var candidate = String(text[urlRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-        while let last = candidate.last,
-              [".", ",", ")", "]", "!", "?", ";", ":"].contains(String(last)) {
-            candidate.removeLast()
-        }
-        guard let url = URL(string: candidate),
-              let scheme = url.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              url.host?.isEmpty == false else {
-            return nil
-        }
-        return candidate
     }
 
     private func planForRouterValidationFailure(_ failure: RouterValidationFailure,
@@ -4310,7 +4216,7 @@ final class TurnOrchestrator {
             }
             guard hasToolStep else { break }
 
-            let exec = await PlanExecutor.shared.execute(
+            let exec = await toolRunner.executePlan(
                 feedbackPlan,
                 originalInput: originalInput,
                 pendingSlotName: pendingSlot?.slotName
@@ -5181,14 +5087,47 @@ final class TurnOrchestrator {
         return ("unknown", 0, String(describing: error).prefix(120).description)
     }
 
-    private func logTimeoutRetryAttempt(provider: String, attempt: Int, ms: Int, error: Error?) {
-        #if DEBUG
-        if let error {
-            print("[ROUTER] timeout_retry provider=\(provider) attempt=\(attempt) router_ms=\(ms) error=\(error.localizedDescription)")
-        } else {
-            print("[ROUTER] timeout_retry provider=\(provider) attempt=\(attempt) router_ms=\(ms) status=success")
+    private func isTimeoutLikeOpenAIError(_ error: Error) -> Bool {
+        if error is RouterTimeout {
+            return true
         }
-        #endif
+        if let openAIError = error as? OpenAIRouter.OpenAIError {
+            switch openAIError {
+            case .requestFailed(let message):
+                let lower = message.lowercased()
+                return lower.contains("timed out")
+                    || lower.contains("timeout")
+                    || lower.contains("-1001")
+            default:
+                return false
+            }
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+            return true
+        }
+        let lower = error.localizedDescription.lowercased()
+        return lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("-1001")
+    }
+
+    nonisolated private static func hasNativeTool(for category: CapabilityRequestCategory) -> Bool {
+        let toolName: String?
+        switch category {
+        case .weather:
+            toolName = "get_weather"
+        case .news:
+            toolName = "get_news"
+        case .sportsScores:
+            toolName = "get_scores"
+        case .time:
+            toolName = "get_time"
+        case .otherWeb:
+            toolName = nil
+        }
+        guard let toolName else { return false }
+        return ToolRegistry.shared.get(toolName) != nil
     }
 
     private func logAffectClassification(raw: AffectMetadata,
@@ -5286,29 +5225,9 @@ final class TurnOrchestrator {
         return openAIRouteTimeoutSeconds
     }
 
-    private func timeoutRetryPromptContext(from context: PromptRuntimeContext?) -> PromptRuntimeContext? {
-        guard let context else { return nil }
-        let reducedBudget = ResponseLengthBudget(
-            maxOutputTokens: min(openAITimeoutRetryMaxTokens, context.responseBudget.maxOutputTokens),
-            chatMinTokens: min(context.responseBudget.chatMinTokens, 120),
-            chatMaxTokens: min(context.responseBudget.chatMaxTokens, 220),
-            preferCanvasForLongResponses: context.responseBudget.preferCanvasForLongResponses
-        )
-        return PromptRuntimeContext(
-            mode: context.mode,
-            affect: context.affect,
-            tonePreferences: context.tonePreferences,
-            toneRepairCue: context.toneRepairCue,
-            sessionSummary: context.sessionSummary,
-            interactionStateJSON: context.interactionStateJSON,
-            identityContextLine: context.identityContextLine,
-            responseBudget: reducedBudget
-        )
-    }
-
     private func friendlyFallbackPlan(_ error: Error? = nil) -> Plan {
         let msg: String
-        if error is RouterTimeout {
+        if let error, isTimeoutLikeOpenAIError(error) {
             msg = "Sorry — that took too long. Please try again."
         } else if let e = error as? OpenAIRouter.OpenAIError {
             switch e {
@@ -5328,8 +5247,12 @@ final class TurnOrchestrator {
                 case .unknownTool:
                     msg = "I can't pull that data yet. Can you share the source URL?"
                 }
-            case .requestFailed:
-                msg = "I couldn't reach OpenAI. Check your connection and try again."
+            case .requestFailed(let detail):
+                if detail.lowercased().contains("timed out") || detail.lowercased().contains("-1001") {
+                    msg = "Sorry — OpenAI timed out twice, so I used a local fallback. Please try again."
+                } else {
+                    msg = "I couldn't reach OpenAI. Check your connection and try again."
+                }
             }
         } else {
             msg = "Sorry — I had trouble generating a response. Please try again."
