@@ -89,6 +89,7 @@
 		F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */; };
 		F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */; };
 		F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */; };
+		F3A4B5C6D7E80001AA000096 /* IntentAudioDiagnosticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */; };
 			F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */; };
 			F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */; };
 			F3A4B5C6D7E80001AA000087 /* FaceProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */; };
@@ -193,6 +194,7 @@
 		F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevSecretsStore.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveService.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentAudioDiagnosticsStore.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAttributionScorer.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAttributionCalibrationTests.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceProfileStore.swift; sourceTree = "<group>"; };
@@ -325,6 +327,7 @@
 				F3A4B5C6D7E80001AA000022 /* TimezoneMapping.swift */,
 				F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */,
 				F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */,
+				F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -529,6 +532,7 @@
 				F3A4B5C6D7E80001AA000071 /* TextUnescaper.swift in Sources */,
 				F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */,
 				F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */,
+				F3A4B5C6D7E80001AA000096 /* IntentAudioDiagnosticsStore.swift in Sources */,
 					F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */,
 					F3A4B5C6D7E80001AA000087 /* FaceProfileStore.swift in Sources */,
 					F3A4B5C6D7E80001AA000091 /* FaceGreetingManager.swift in Sources */,

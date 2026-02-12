@@ -289,6 +289,7 @@ final class AppState: ObservableObject {
         }
 
         voicePipeline.onError = { [weak self] error in
+            IntentAudioDiagnosticsStore.shared.recordAudioError(error.localizedDescription)
             self?.showError(error.localizedDescription)
         }
     }
@@ -566,6 +567,11 @@ final class AppState: ObservableObject {
         // Everything else → orchestrator
         startThinkingFillerTimer(baseChatCount: baseChatCount, baseOutputCount: baseOutputCount)
         let turnInputMode: TurnInputMode = existingTurnStart != nil ? .voice : .text
+        let intentAudioTimings = currentIntentAudioTimings()
+        IntentAudioDiagnosticsStore.shared.recordTiming(
+            captureMs: intentAudioTimings.captureMs,
+            sttMs: intentAudioTimings.sttMs
+        )
         Task(priority: .userInitiated) {
             let result = await orchestrator.processTurn(trimmed, history: chatMessages, inputMode: turnInputMode)
             markTurnRouteFinished(
@@ -644,7 +650,8 @@ final class AppState: ObservableObject {
             spokenLines: result.spokenLines,
             finalAssistantText: finalAssistantText
         )
-        let shouldAutoListenForQuestion = finalAssistantText.map(endsWithSingleQuestionMark(_:)) ?? false
+        let shouldAutoListenForQuestion = result.triggerQuestionAutoListen
+            || (finalAssistantText.map(endsWithSingleQuestionMark(_:)) ?? false)
 
         if isQuestionAutoListenFeatureEnabled && shouldAutoListenForQuestion && isListeningEnabled {
             awaitingUserReply = true
@@ -1452,6 +1459,21 @@ final class AppState: ObservableObject {
 
     private static func elapsedMs(since start: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(start) * 1000))
+    }
+
+    private static func durationMs(from start: Date?, to end: Date?) -> Int? {
+        guard let start, let end else { return nil }
+        return max(0, Int(end.timeIntervalSince(start) * 1000))
+    }
+
+    private func currentIntentAudioTimings() -> (captureMs: Int?, sttMs: Int?) {
+        guard let trace = turnLatencyTrace else {
+            return (nil, nil)
+        }
+        return (
+            captureMs: Self.durationMs(from: trace.captureStartedAt, to: trace.transcribeStartedAt),
+            sttMs: Self.durationMs(from: trace.transcribeStartedAt, to: trace.transcriptReadyAt)
+        )
     }
 
     private var isQuestionAutoListenFeatureEnabled: Bool {

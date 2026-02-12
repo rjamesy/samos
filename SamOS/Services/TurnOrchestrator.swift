@@ -1319,6 +1319,485 @@ enum VisionQueryIntent: Equatable {
     case findObject(query: String)
 }
 
+enum RoutedIntent: String, CaseIterable, Codable {
+    case greeting
+    case recipe
+    case webRequest = "web_request"
+    case visionDescribe = "vision_describe"
+    case visionQA = "vision_qa"
+    case visionFindObject = "vision_find_object"
+    case automationRequest = "automation_request"
+    case generalQnA = "general_qna"
+    case identityResponse = "identity_response"
+    case settingsCommand = "settings_command"
+    case unknown
+}
+
+struct IntentClassifierInput: Equatable, Sendable {
+    let userText: String
+    let cameraRunning: Bool
+    let faceKnown: Bool
+    let pendingSlot: String?
+    let lastAssistantLine: String?
+}
+
+struct IntentClassification: Codable, Equatable, Sendable {
+    let intent: RoutedIntent
+    let confidence: Double
+    let notes: String
+    let autoCaptureHint: Bool
+    let needsWeb: Bool
+
+    enum CodingKeys: String, CodingKey { case intent, confidence, notes, autoCaptureHint, needsWeb }
+}
+
+enum IntentClassificationProvider: String {
+    case rule
+    case ollama
+    case openai
+}
+
+struct IntentClassificationResult: Equatable, Sendable {
+    let classification: IntentClassification
+    let provider: IntentClassificationProvider
+    let attemptedLocal: Bool
+    let attemptedOpenAI: Bool
+    let localSkipReason: String?
+    let intentRouterMsLocal: Int?
+    let intentRouterMsOpenAI: Int?
+    let localConfidence: Double?
+    let openAIConfidence: Double?
+    let confidenceThreshold: Double
+    let localTimeoutSeconds: Double?
+    let escalationReason: String?
+}
+
+struct IntentLLMCallOutput: Sendable {
+    let rawText: String
+    let model: String?
+    let endpoint: String?
+    let prompt: String
+}
+
+actor IntentInferenceExecutor {
+    func run<T: Sendable>(priority: TaskPriority = .userInitiated,
+                          _ operation: @Sendable @escaping () async throws -> T) async throws -> T {
+        try await Task.detached(priority: priority) {
+            try await operation()
+        }.value
+    }
+}
+
+struct IntentClassifier {
+    private let localClassifier: (@Sendable (IntentClassifierInput) async throws -> IntentLLMCallOutput)?
+    private let openAIClassifier: (@Sendable (IntentClassifierInput) async throws -> IntentLLMCallOutput)?
+    private let localInferenceExecutor: IntentInferenceExecutor?
+    private let confidenceThreshold: Double
+    private let localTimeoutSeconds: Double?
+    private let openAITimeoutSeconds: Double?
+
+    init(localClassifier: (@Sendable (IntentClassifierInput) async throws -> IntentLLMCallOutput)?,
+         openAIClassifier: (@Sendable (IntentClassifierInput) async throws -> IntentLLMCallOutput)?,
+         localInferenceExecutor: IntentInferenceExecutor? = nil,
+         confidenceThreshold: Double = 0.70,
+         localTimeoutSeconds: Double? = nil,
+         openAITimeoutSeconds: Double? = nil) {
+        self.localClassifier = localClassifier
+        self.openAIClassifier = openAIClassifier
+        self.localInferenceExecutor = localInferenceExecutor
+        self.confidenceThreshold = confidenceThreshold
+        self.localTimeoutSeconds = localTimeoutSeconds
+        self.openAITimeoutSeconds = openAITimeoutSeconds
+    }
+
+    func classify(_ input: IntentClassifierInput,
+                  useLocalFirst: Bool,
+                  allowOpenAIFallback: Bool) async -> IntentClassificationResult {
+        enum AttemptFailureKind: String {
+            case timeout
+            case transport
+            case parseFail = "parse_fail"
+        }
+
+        struct AttemptOutcome {
+            let call: IntentLLMCallOutput?
+            let classification: IntentClassification?
+            let parseError: String?
+            let elapsedMs: Int?
+            let failureKind: AttemptFailureKind?
+            let failureDetail: String?
+        }
+
+        func outcomeReason(_ outcome: AttemptOutcome?) -> String? {
+            guard let outcome else { return nil }
+            if let kind = outcome.failureKind {
+                return kind.rawValue
+            }
+            if let confidence = outcome.classification?.confidence, confidence < confidenceThreshold {
+                return "low_conf"
+            }
+            return nil
+        }
+
+        func confidenceString(_ value: Double?) -> String {
+            guard let value else { return "nil" }
+            return String(format: "%.2f", value)
+        }
+
+        func msString(_ value: Int?) -> String {
+            guard let value else { return "nil" }
+            return "\(value)"
+        }
+
+        func timeoutString(_ value: Double?) -> String {
+            guard let value else { return "nil" }
+            return String(format: "%.2f", value)
+        }
+
+        func parsedJSONString(_ classification: IntentClassification) -> String {
+            """
+            {"intent":"\(classification.intent.rawValue)","confidence":\(String(format: "%.2f", classification.confidence)),"autoCaptureHint":\(classification.autoCaptureHint),"needsWeb":\(classification.needsWeb),"notes":"\(classification.notes)"}
+            """
+        }
+
+        func debugDumpAttempt(_ label: String, outcome: AttemptOutcome?) {
+            #if DEBUG
+            guard let outcome else { return }
+            if let call = outcome.call {
+                print("[INTENT_\(label)_REQUEST] model=\(call.model ?? "unknown") endpoint=\(call.endpoint ?? "unknown")")
+                print("[INTENT_\(label)_PROMPT_BEGIN]\n\(call.prompt)\n[INTENT_\(label)_PROMPT_END]")
+                print("[INTENT_\(label)_RAW] \(call.rawText)")
+            }
+            if let classification = outcome.classification {
+                print("[INTENT_\(label)_PARSED] \(parsedJSONString(classification))")
+            } else {
+                print("[INTENT_\(label)_PARSE_FAIL] detail=\(outcome.parseError ?? outcome.failureDetail ?? "unknown")")
+            }
+            #endif
+        }
+
+        func runAttempt(_ label: String,
+                        classifier: @escaping @Sendable (IntentClassifierInput) async throws -> IntentLLMCallOutput,
+                        timeout: Double?,
+                        runOnLocalExecutor: Bool = false) async -> AttemptOutcome {
+            let startedAt = CFAbsoluteTimeGetCurrent()
+            let attemptOperation: @Sendable () async throws -> AttemptOutcome = {
+                let call: IntentLLMCallOutput
+                if let timeout {
+                    call = try await withTimeout(timeout) { try await classifier(input) }
+                } else {
+                    call = try await classifier(input)
+                }
+                let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+                switch Self.decodeStrictJSON(call.rawText) {
+                case .success(let payload):
+                    return AttemptOutcome(
+                        call: call,
+                        classification: payload,
+                        parseError: nil,
+                        elapsedMs: elapsedMs,
+                        failureKind: nil,
+                        failureDetail: nil
+                    )
+                case .failure(let parseError):
+                    return AttemptOutcome(
+                        call: call,
+                        classification: nil,
+                        parseError: parseError,
+                        elapsedMs: elapsedMs,
+                        failureKind: .parseFail,
+                        failureDetail: parseError
+                    )
+                }
+            }
+
+            func executeAttemptOperation() async throws -> AttemptOutcome {
+                if runOnLocalExecutor, let localInferenceExecutor {
+                    return try await localInferenceExecutor.run(priority: .userInitiated, attemptOperation)
+                } else {
+                    return try await attemptOperation()
+                }
+            }
+
+            let result = await Task(priority: .userInitiated) {
+                do {
+                    return Result<AttemptOutcome, Error>.success(try await executeAttemptOperation())
+                } catch {
+                    return Result<AttemptOutcome, Error>.failure(error)
+                }
+            }.value
+
+            switch result {
+            case .success(let outcome):
+                return outcome
+            case .failure(let error):
+                let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+                if error is RouterTimeout {
+                    return AttemptOutcome(
+                        call: nil,
+                        classification: nil,
+                        parseError: nil,
+                        elapsedMs: elapsedMs,
+                        failureKind: .timeout,
+                        failureDetail: "local timeout exceeded"
+                    )
+                }
+                return AttemptOutcome(
+                    call: nil,
+                    classification: nil,
+                    parseError: nil,
+                    elapsedMs: elapsedMs,
+                    failureKind: .transport,
+                    failureDetail: error.localizedDescription
+                )
+            }
+        }
+
+        func buildResult(_ classification: IntentClassification,
+                         provider: IntentClassificationProvider,
+                         attemptedLocal: Bool,
+                         attemptedOpenAI: Bool,
+                         localSkipReason: String?,
+                         localOutcome: AttemptOutcome?,
+                         openAIOutcome: AttemptOutcome?,
+                         escalationReason: String?) -> IntentClassificationResult {
+            let result = IntentClassificationResult(
+                classification: classification,
+                provider: provider,
+                attemptedLocal: attemptedLocal,
+                attemptedOpenAI: attemptedOpenAI,
+                localSkipReason: localSkipReason,
+                intentRouterMsLocal: localOutcome?.elapsedMs,
+                intentRouterMsOpenAI: openAIOutcome?.elapsedMs,
+                localConfidence: localOutcome?.classification?.confidence,
+                openAIConfidence: openAIOutcome?.classification?.confidence,
+                confidenceThreshold: confidenceThreshold,
+                localTimeoutSeconds: localTimeoutSeconds,
+                escalationReason: escalationReason
+            )
+
+            #if DEBUG
+            print("[INTENT_DECISION] intent_provider_selected=\(result.provider.rawValue) local_attempted=\(result.attemptedLocal) openai_attempted=\(result.attemptedOpenAI) local_confidence=\(confidenceString(result.localConfidence)) openai_confidence=\(confidenceString(result.openAIConfidence)) threshold=\(String(format: "%.2f", result.confidenceThreshold)) local_timeout_s=\(timeoutString(result.localTimeoutSeconds)) reason_for_escalation=\(result.escalationReason ?? "none") local_skip_reason=\(result.localSkipReason ?? "none") intent_router_ms_local=\(msString(result.intentRouterMsLocal)) intent_router_ms_openai=\(msString(result.intentRouterMsOpenAI))")
+            #endif
+
+            return result
+        }
+
+        var attemptedLocal = false
+        var attemptedOpenAI = false
+        var localSkipReason: String?
+        var localOutcome: AttemptOutcome?
+        var openAIOutcome: AttemptOutcome?
+        var escalationReason: String?
+
+        if useLocalFirst {
+            if let localClassifier {
+                attemptedLocal = true
+                localOutcome = await runAttempt(
+                    "LOCAL",
+                    classifier: localClassifier,
+                    timeout: localTimeoutSeconds,
+                    runOnLocalExecutor: true
+                )
+                debugDumpAttempt("LOCAL", outcome: localOutcome)
+                if let local = localOutcome?.classification,
+                   local.confidence >= confidenceThreshold {
+                    return buildResult(
+                        local,
+                        provider: .ollama,
+                        attemptedLocal: attemptedLocal,
+                        attemptedOpenAI: false,
+                        localSkipReason: nil,
+                        localOutcome: localOutcome,
+                        openAIOutcome: nil,
+                        escalationReason: nil
+                    )
+                }
+                escalationReason = outcomeReason(localOutcome)
+            } else {
+                localSkipReason = "classifier_nil"
+                escalationReason = "classifier_nil"
+            }
+        } else {
+            localSkipReason = "policy_disabled"
+            escalationReason = "policy_disabled"
+        }
+
+        if allowOpenAIFallback, let openAIClassifier {
+            attemptedOpenAI = true
+            openAIOutcome = await runAttempt("OPENAI", classifier: openAIClassifier, timeout: openAITimeoutSeconds)
+            debugDumpAttempt("OPENAI", outcome: openAIOutcome)
+            if let openAI = openAIOutcome?.classification,
+               openAI.confidence >= confidenceThreshold {
+                return buildResult(
+                    openAI,
+                    provider: .openai,
+                    attemptedLocal: attemptedLocal,
+                    attemptedOpenAI: attemptedOpenAI,
+                    localSkipReason: localSkipReason,
+                    localOutcome: localOutcome,
+                    openAIOutcome: openAIOutcome,
+                    escalationReason: escalationReason
+                )
+            }
+            escalationReason = outcomeReason(openAIOutcome) ?? escalationReason
+        }
+
+        let ruleFallback = deterministicClassification(for: input)
+        if ruleFallback.intent != .unknown {
+            return buildResult(
+                ruleFallback,
+                provider: .rule,
+                attemptedLocal: attemptedLocal,
+                attemptedOpenAI: attemptedOpenAI,
+                localSkipReason: localSkipReason,
+                localOutcome: localOutcome,
+                openAIOutcome: openAIOutcome,
+                escalationReason: escalationReason
+            )
+        }
+
+        return buildResult(
+            IntentClassification(
+                intent: .unknown,
+                confidence: 0.20,
+                notes: "",
+                autoCaptureHint: false,
+                needsWeb: false,
+            ),
+            provider: .rule,
+            attemptedLocal: attemptedLocal,
+            attemptedOpenAI: attemptedOpenAI,
+            localSkipReason: localSkipReason,
+            localOutcome: localOutcome,
+            openAIOutcome: openAIOutcome,
+            escalationReason: escalationReason
+        )
+    }
+
+    private enum IntentDecodeOutcome {
+        case success(IntentClassification)
+        case failure(String)
+    }
+
+    private func deterministicClassification(for input: IntentClassifierInput) -> IntentClassification {
+        let trimmed = input.userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if trimmed.isEmpty {
+            return IntentClassification(
+                intent: .unknown,
+                confidence: 0.20,
+                notes: "",
+                autoCaptureHint: false,
+                needsWeb: false
+            )
+        }
+
+        // Rules are emergency brakes only: conservative and low confidence.
+        if lower.hasPrefix("turn on ")
+            || lower.hasPrefix("turn off ")
+            || lower.hasPrefix("enable ")
+            || lower.hasPrefix("disable ")
+            || lower == "settings" {
+            return IntentClassification(
+                intent: .settingsCommand,
+                confidence: 0.68,
+                notes: "",
+                autoCaptureHint: false,
+                needsWeb: false
+            )
+        }
+
+        if lower.range(of: #"^[\p{P}\p{S}\s]{1,12}$"#, options: .regularExpression) != nil {
+            return IntentClassification(
+                intent: .unknown,
+                confidence: 0.25,
+                notes: "",
+                autoCaptureHint: false,
+                needsWeb: false
+            )
+        }
+
+        return IntentClassification(
+            intent: .unknown,
+            confidence: 0.30,
+            notes: "",
+            autoCaptureHint: false,
+            needsWeb: false
+        )
+    }
+
+    private static func decodeStrictJSON(_ text: String) -> IntentDecodeOutcome {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure("empty_response") }
+        guard trimmed.first == "{", trimmed.last == "}",
+              let data = trimmed.data(using: .utf8),
+              let jsonObject = try? JSONSerialization.jsonObject(with: data, options: []),
+              let dictionary = jsonObject as? [String: Any] else {
+            return .failure("not_single_json_object")
+        }
+        let expectedKeys: Set<String> = [
+            "intent",
+            "confidence",
+            "autoCaptureHint",
+            "needsWeb",
+            "notes"
+        ]
+        let actualKeys = Set(dictionary.keys)
+        guard actualKeys == expectedKeys else {
+            let missing = expectedKeys.subtracting(actualKeys).sorted().joined(separator: ",")
+            let extra = actualKeys.subtracting(expectedKeys).sorted().joined(separator: ",")
+            return .failure("key_mismatch missing=[\(missing)] extra=[\(extra)]")
+        }
+        guard var payload = try? JSONDecoder().decode(IntentClassification.self, from: data) else {
+            return .failure("decode_failed_type_mismatch")
+        }
+        let trimmedNotes = payload.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clamped = min(1.0, max(0.0, payload.confidence))
+        payload = IntentClassification(
+            intent: payload.intent,
+            confidence: clamped,
+            notes: trimmedNotes,
+            autoCaptureHint: payload.autoCaptureHint,
+            needsWeb: payload.needsWeb
+        )
+        return .success(payload)
+    }
+
+}
+
+private struct IntentRoutePolicy {
+    let localFirst: Bool
+    let openAIFallback: Bool
+
+    init(useOllama: Bool) {
+        self.localFirst = useOllama
+        self.openAIFallback = true
+    }
+}
+
+private struct PlanRoutePolicy {
+    let useOllama: Bool
+    let preferLocalPlans: Bool
+    let openAIStatus: OpenAISettings.APIKeyStatus
+
+    var localFirst: Bool { routeOrder.first == .ollama }
+    var openAIFallback: Bool { routeOrder.contains(.openai) }
+
+    var routeOrder: [LLMProvider] {
+        switch openAIStatus {
+        case .ready:
+            // Default policy: OpenAI first when configured.
+            // Dev override: allow local-first plans when explicitly enabled.
+            return (useOllama && preferLocalPlans) ? [.ollama, .openai] : [.openai]
+        case .invalid:
+            return [.none]
+        case .missing:
+            return useOllama ? [.ollama] : [.none]
+        }
+    }
+}
+
 private enum CapabilityGapRequestKind: Equatable {
     case externalSource
     case capabilityBuild
@@ -1328,6 +1807,7 @@ private struct PendingCapabilityRequest: Equatable {
     let kind: CapabilityGapRequestKind
     let desiredToolName: String
     let originalUserGoal: String
+    let prefersWebsiteURL: Bool
     let createdAt: Date
     var lastAskedAt: Date
     var reminderCount: Int
@@ -1358,7 +1838,7 @@ func withTimeout<T: Sendable>(_ seconds: Double, _ op: @Sendable @escaping () as
 
 /// The ONLY brain for processing user input.
 /// Calls LLM, validates structure, executes plan steps.
-/// No Swift heuristics for intent, reply-vs-new-topic, or approvals.
+/// Uses a deterministic intent classifier with optional LLM fallback, then executes plan steps.
 @MainActor
 final class TurnOrchestrator {
     private let ollamaRouter: OllamaRouter
@@ -1366,6 +1846,7 @@ final class TurnOrchestrator {
     private let tonePreferenceStore: TonePreferenceStore
     private let faceGreetingManager: FaceGreetingManager
     private let cameraVision: CameraVisionProviding
+    private let intentClassifier: IntentClassifier
     private let summaryService = SessionSummaryService()
     private let intentRepetitionTracker = IntentRepetitionTracker()
     private let memoryAckCooldownTurns: Int
@@ -1403,8 +1884,11 @@ final class TurnOrchestrator {
     private var lastMemoryAckTurn: Int?
     private var lastFollowUpTurn: Int?
     private var followUpQuestionIndex = 0
+    private static let sharedIntentInferenceExecutor = IntentInferenceExecutor()
     private let openAIRouteTimeoutSeconds: Double = 5.0
     private let openAIRouteRetryTimeoutSeconds: Double = 2.6
+    private let intentLocalTimeoutSeconds: Double
+    private let intentOpenAITimeoutSeconds: Double = 2.0
     private let openAITimeoutRetryMaxTokens: Int = 220
     private let openAIImageRepairTimeoutSeconds: Double = 3.0
     private let toolFeedbackLoopMaxDepth = 2
@@ -1416,17 +1900,28 @@ final class TurnOrchestrator {
     private let cameraBlindnessGraceWindowSeconds: TimeInterval = 10
     private var pendingCapabilityRequest: PendingCapabilityRequest?
     private var lastExternalSourcePromptAt: Date?
+    private var currentIntentClassification: IntentClassificationResult?
+    private var lastIntentClassification: IntentClassificationResult?
+    private var currentTurnCaptureAfterReplyHint: Bool = false
 
     var pendingSlot: PendingSlot? = nil
 
     // Production init
     init() {
         let ollama = OllamaRouter()
+        let openAI = OpenAIRouter(parser: ollama)
         self.ollamaRouter = ollama
-        self.openAIRouter = OpenAIRouter(parser: ollama)
+        self.openAIRouter = openAI
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = FaceGreetingManager()
         self.cameraVision = CameraVisionService.shared
+        self.intentLocalTimeoutSeconds = TurnOrchestrator.sanitizedLocalIntentTimeout(M2Settings.localIntentTimeoutSeconds)
+        self.intentClassifier = TurnOrchestrator.makeIntentClassifier(
+            ollamaRouter: ollama,
+            openAIRouter: openAI,
+            localTimeoutSeconds: intentLocalTimeoutSeconds,
+            openAITimeoutSeconds: intentOpenAITimeoutSeconds
+        )
         self.memoryAckCooldownTurns = 20
         self.followUpCooldownTurns = 3
     }
@@ -1436,6 +1931,7 @@ final class TurnOrchestrator {
          openAIRouter: OpenAIRouter,
          faceGreetingManager: FaceGreetingManager? = nil,
          cameraVision: CameraVisionProviding = CameraVisionService.shared,
+         localIntentTimeoutSeconds: Double? = nil,
          memoryAckCooldownTurns: Int = 20,
          followUpCooldownTurns: Int = 3) {
         self.ollamaRouter = ollamaRouter
@@ -1443,6 +1939,13 @@ final class TurnOrchestrator {
         self.tonePreferenceStore = .shared
         self.faceGreetingManager = faceGreetingManager ?? FaceGreetingManager()
         self.cameraVision = cameraVision
+        self.intentLocalTimeoutSeconds = TurnOrchestrator.sanitizedLocalIntentTimeout(localIntentTimeoutSeconds ?? M2Settings.localIntentTimeoutSeconds)
+        self.intentClassifier = TurnOrchestrator.makeIntentClassifier(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            localTimeoutSeconds: intentLocalTimeoutSeconds,
+            openAITimeoutSeconds: intentOpenAITimeoutSeconds
+        )
         self.memoryAckCooldownTurns = max(1, memoryAckCooldownTurns)
         self.followUpCooldownTurns = max(1, followUpCooldownTurns)
     }
@@ -1451,31 +1954,145 @@ final class TurnOrchestrator {
     convenience init(ollamaRouter: OllamaRouter,
                      openAIRouter: OpenAIRouter,
                      faceGreetingManager: FaceGreetingManager? = nil,
+                     localIntentTimeoutSeconds: Double? = nil,
                      memoryAckCooldownTurns: Int = 20,
                      followUpCooldownTurns: Int = 3) {
         self.init(ollamaRouter: ollamaRouter,
                   openAIRouter: openAIRouter,
                   faceGreetingManager: faceGreetingManager,
                   cameraVision: CameraVisionService.shared,
+                  localIntentTimeoutSeconds: localIntentTimeoutSeconds,
                   memoryAckCooldownTurns: memoryAckCooldownTurns,
                   followUpCooldownTurns: followUpCooldownTurns)
     }
 
+    private static func makeIntentClassifier(ollamaRouter: OllamaRouter,
+                                             openAIRouter: OpenAIRouter,
+                                             localTimeoutSeconds: Double? = nil,
+                                             openAITimeoutSeconds: Double? = nil) -> IntentClassifier {
+        IntentClassifier(
+            localClassifier: { input in
+                try await ollamaRouter.classifyIntentWithTrace(input)
+            },
+            openAIClassifier: { input in
+                try await openAIRouter.classifyIntentWithTrace(input)
+            },
+            localInferenceExecutor: sharedIntentInferenceExecutor,
+            localTimeoutSeconds: localTimeoutSeconds,
+            openAITimeoutSeconds: openAITimeoutSeconds
+        )
+    }
+
+    private static func sanitizedLocalIntentTimeout(_ value: Double) -> Double {
+        min(10.0, max(0.2, value))
+    }
+
+    private func resolvedVisionIntent(from classification: IntentClassification,
+                                      userInput: String) -> VisionQueryIntent {
+        switch classification.intent {
+        case .visionDescribe:
+            return .describe
+        case .visionQA:
+            return .visualQA(question: classification.notes.isEmpty ? userInput : classification.notes)
+        case .visionFindObject:
+            return .findObject(query: classification.notes.isEmpty ? userInput : classification.notes)
+        default:
+            return .none
+        }
+    }
+
+    private func logIntentClassification(_ result: IntentClassificationResult) {
+        #if DEBUG
+        let confidence = String(format: "%.2f", result.classification.confidence)
+        var line = "[INTENT] intent=\(result.classification.intent.rawValue) " +
+            "conf=\(confidence) provider=\(result.provider.rawValue) " +
+            "local_attempted=\(result.attemptedLocal) openai_attempted=\(result.attemptedOpenAI) " +
+            "intent_router_ms_local=\(result.intentRouterMsLocal.map(String.init) ?? "nil") " +
+            "intent_router_ms_openai=\(result.intentRouterMsOpenAI.map(String.init) ?? "nil") " +
+            "local_timeout_s=\(result.localTimeoutSeconds.map { String(format: "%.2f", $0) } ?? "nil")"
+        if let reason = result.localSkipReason {
+            line += " local_skip_reason=\(reason)"
+        }
+        if let reason = result.escalationReason {
+            line += " escalation_reason=\(reason)"
+        }
+        print(line)
+        #endif
+    }
+
+    private func logPlanProviderSelection(provider: LLMProvider,
+                                          routeReason: String,
+                                          routerMs: Int,
+                                          aiModelUsed: String?) {
+        #if DEBUG
+        print("[PLAN] provider=\(provider.rawValue) route_reason=\(routeReason) router_ms=\(routerMs) model=\(aiModelUsed ?? "n/a")")
+        #endif
+    }
+
+    private func logIntentAudioCorrelation(inputMode: TurnInputMode) {
+        #if DEBUG
+        let mode: String
+        switch inputMode {
+        case .voice:
+            mode = "voice"
+        case .text:
+            mode = "text"
+        case .unspecified:
+            mode = "unspecified"
+        }
+        let snapshot = IntentAudioDiagnosticsStore.shared.snapshot()
+        let capture = snapshot.captureMs.map(String.init) ?? "n/a"
+        let stt = snapshot.sttMs.map(String.init) ?? "n/a"
+        let error = snapshot.recentAudioError ?? "none"
+        print("[INTENT_AUDIO] input_mode=\(mode) capture_ms=\(capture) stt_ms=\(stt) recent_audio_error=\(error) local_timeout_s=\(String(format: "%.2f", intentLocalTimeoutSeconds))")
+        #endif
+    }
+
     func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult {
         turnCounter += 1
+        defer {
+            currentIntentClassification = nil
+            currentTurnCaptureAfterReplyHint = false
+        }
         let currentTurn = turnCounter
         let now = Date()
         let turnStartedAt = Date()
-        let localKnowledgeContext = buildLocalKnowledgeContext(for: text)
+        let sanitized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userText = sanitized.isEmpty ? text : sanitized
+        let localKnowledgeContext = buildLocalKnowledgeContext(for: userText)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
-        let mode = ConversationModeClassifier.classify(text)
+        let mode = ConversationModeClassifier.classify(userText)
         let identityDecision = faceGreetingManager.prepareTurn(
-            userInput: text,
+            userInput: userText,
             inputMode: inputMode,
             now: now,
             userInitiated: true
         )
         currentFaceIdentityContext = identityDecision.context
+        let lastAssistantLine = history.reversed().first(where: { $0.role == .assistant })?.text
+        let intentInput = IntentClassifierInput(
+            userText: userText,
+            cameraRunning: cameraVision.isRunning,
+            faceKnown: !(identityDecision.context.recognizedUserName?.isEmpty ?? true),
+            pendingSlot: pendingSlot?.slotName,
+            lastAssistantLine: lastAssistantLine
+        )
+        OpenAISettings.preloadAPIKey()
+        OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
+        let intentRoutePolicy = IntentRoutePolicy(useOllama: M2Settings.useOllama)
+        #if DEBUG
+        print("[INTENT_ROUTE_POLICY] local_first=\(intentRoutePolicy.localFirst) openai_fallback=\(intentRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) openai_status=\(OpenAISettings.apiKeyStatus)")
+        #endif
+        logIntentAudioCorrelation(inputMode: inputMode)
+        let intentClassification = await intentClassifier.classify(
+            intentInput,
+            useLocalFirst: intentRoutePolicy.localFirst,
+            allowOpenAIFallback: intentRoutePolicy.openAIFallback
+        )
+        currentIntentClassification = intentClassification
+        lastIntentClassification = intentClassification
+        currentTurnCaptureAfterReplyHint = intentClassification.classification.autoCaptureHint
+        logIntentClassification(intentClassification)
 
         if case .enroll(let name, let confirmation, let providerNoneReason) = identityDecision.action {
             var immediate = immediateTalkTurnResult(message: confirmation)
@@ -1499,7 +2116,10 @@ final class TurnOrchestrator {
             return immediate
         }
 
-        let visionIntent = detectVisionQueryIntent(text)
+        let visionIntent = resolvedVisionIntent(
+            from: intentClassification.classification,
+            userInput: userText
+        )
         if case .none = visionIntent {
             // Not a camera vision intent.
         } else {
@@ -1560,7 +2180,7 @@ final class TurnOrchestrator {
             if shouldRunVisionToolFirst(for: visionIntent) {
                 let visionResult = await runVisionToolFirstTurn(
                     intent: visionIntent,
-                    text: text,
+                    text: userText,
                     history: history,
                     mode: mode,
                     localKnowledgeContext: localKnowledgeContext,
@@ -1575,7 +2195,7 @@ final class TurnOrchestrator {
         }
 
         if let capabilityResult = await handlePendingCapabilityRequestTurn(
-            text: text,
+            text: userText,
             history: history,
             mode: mode,
             localKnowledgeContext: localKnowledgeContext,
@@ -1588,16 +2208,21 @@ final class TurnOrchestrator {
             return capabilityResult
         }
 
-        if shouldEnterExternalSourceCapabilityGapFlow(text) {
+        if shouldEnterExternalSourceCapabilityGapFlow(
+            userText,
+            classification: intentClassification.classification,
+            provider: intentClassification.provider
+        ) {
             let sourcePlan = buildExternalSourceAskPlan(
                 toolName: "external_source",
-                userText: text,
-                now: now
+                userText: userText,
+                now: now,
+                prefersWebsiteURL: true
             )
             lastFinalActionKind = inferredActionKind(for: sourcePlan)
             var result = await executePlan(
                 sourcePlan,
-                originalInput: text,
+                originalInput: userText,
                 history: history,
                 provider: .none,
                 aiModelUsed: nil,
@@ -1623,7 +2248,8 @@ final class TurnOrchestrator {
         }
 
         if let recipeResult = await runRecipeToolFirstTurnIfNeeded(
-            text: text,
+            text: userText,
+            intent: intentClassification.classification.intent,
             history: history,
             mode: mode,
             localKnowledgeContext: localKnowledgeContext,
@@ -1636,14 +2262,14 @@ final class TurnOrchestrator {
             return recipeResult
         }
 
-        let rawAffect = ConversationAffectClassifier.classify(text, history: history)
+        let rawAffect = ConversationAffectClassifier.classify(userText, history: history)
         let affectMirroringEnabled = M2Settings.affectMirroringEnabled
         let useEmotionalTone = M2Settings.useEmotionalTone
-        let containsClinicalOrCrisis = TonePreferenceLearner.containsClinicalOrCrisisLanguage(text, mode: mode)
+        let containsClinicalOrCrisis = TonePreferenceLearner.containsClinicalOrCrisisLanguage(userText, mode: mode)
         var toneProfile = tonePreferenceStore.loadProfile()
         var toneRepairCue: String?
         if let learningOutcome = TonePreferenceLearner.learn(
-            from: text,
+            from: userText,
             mode: mode,
             affect: rawAffect,
             profile: toneProfile,
@@ -1664,19 +2290,19 @@ final class TurnOrchestrator {
                                 userToneEnabled: useEmotionalTone)
         intentRepetitionTracker.record(mode.intent, at: now)
         purgeExpiredFacts(now: now)
-        updateRecentFacts(with: text, mode: mode, now: now)
-        updateQuestionAnswerState(with: text)
+        updateRecentFacts(with: userText, mode: mode, now: now)
+        updateQuestionAnswerState(with: userText)
         let sessionSummary = summaryService.currentSummary(
             history: history,
             currentMode: mode,
-            latestUserTurn: text
+            latestUserTurn: userText
         )
         let promptContext = buildPromptRuntimeContext(
             mode: mode,
             affect: effectiveAffect,
             tonePreferences: effectiveToneProfile,
             toneRepairCue: toneRepairCue,
-            userInput: text,
+            userInput: userText,
             history: history,
             sessionSummary: sessionSummary,
             now: now,
@@ -1710,15 +2336,19 @@ final class TurnOrchestrator {
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
                 let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
-                    text,
+                    userText,
                     history: history,
                     pendingSlot: slot,
                     reason: .pendingSlotReply,
                     promptContext: promptContext
                 )
-                let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: text)
+                logPlanProviderSelection(provider: provider,
+                                         routeReason: routeProviderReason,
+                                         routerMs: routerMs,
+                                         aiModelUsed: aiModelUsed)
+                let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: userText)
                 let plan = await maybeRephraseRepeatedTalk(guardedPlan,
-                                                           userInput: text,
+                                                           userInput: userText,
                                                            history: history,
                                                            mode: mode,
                                                            turnIndex: currentTurn,
@@ -1747,7 +2377,7 @@ final class TurnOrchestrator {
 
                 lastFinalActionKind = inferredActionKind(for: shapedPlan)
                 var result = await executePlan(shapedPlan,
-                                               originalInput: text,
+                                               originalInput: userText,
                                                history: history,
                                                provider: provider,
                                                aiModelUsed: aiModelUsed,
@@ -1773,14 +2403,18 @@ final class TurnOrchestrator {
 
         // Normal LLM routing (no pending slot)
         let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
-            text,
+            userText,
             history: history,
             reason: .userChat,
             promptContext: promptContext
         )
-        let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: text)
+        logPlanProviderSelection(provider: provider,
+                                 routeReason: routeProviderReason,
+                                 routerMs: routerMs,
+                                 aiModelUsed: aiModelUsed)
+        let guardedPlan = enforceNoFalseBlindnessGuardrail(on: rawPlan, userInput: userText)
         let plan = await maybeRephraseRepeatedTalk(guardedPlan,
-                                                   userInput: text,
+                                                   userInput: userText,
                                                    history: history,
                                                    mode: mode,
                                                    turnIndex: currentTurn,
@@ -1788,7 +2422,7 @@ final class TurnOrchestrator {
         let shapedPlan = enforceLengthPresentationPolicy(plan, mode: mode)
         lastFinalActionKind = inferredActionKind(for: shapedPlan)
         var result = await executePlan(shapedPlan,
-                                       originalInput: text,
+                                       originalInput: userText,
                                        history: history,
                                        provider: provider,
                                        aiModelUsed: aiModelUsed,
@@ -1813,18 +2447,52 @@ final class TurnOrchestrator {
 
     // MARK: - Brain Router Pipeline
 
-    /// Routes: OpenAI ONLY when configured → Ollama ONLY when OpenAI missing and enabled → auth error fallback.
-    /// No provider hopping. If JSON parses, accept it. No validation repair loops.
+    /// Routes plans through PlanRoutePolicy.
+    /// Default policy: OpenAI first when key is ready.
+    /// Local plan routing is only used when OpenAI is unavailable, or when the explicit local-plan dev override is enabled.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
                            reason: LLMCallReason = .userChat,
                            promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?, String) {
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
-        let keyStatus = OpenAISettings.apiKeyStatus
+        let planRoutePolicy = PlanRoutePolicy(
+            useOllama: M2Settings.useOllama,
+            preferLocalPlans: M2Settings.preferLocalPlans,
+            openAIStatus: OpenAISettings.apiKeyStatus
+        )
+        #if DEBUG
+        print("[PLAN_ROUTE_POLICY] local_first=\(planRoutePolicy.localFirst) openai_fallback=\(planRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) prefer_local_plans=\(M2Settings.preferLocalPlans) openai_status=\(planRoutePolicy.openAIStatus)")
+        #endif
 
-        // A) OpenAI ONLY (when configured — no Ollama fallback)
-        if keyStatus == .ready {
+        var ollamaLocalFirstFailKind: String?
+
+        // Local-first: attempt Ollama before OpenAI when both are available
+        if planRoutePolicy.routeOrder.first == .ollama && planRoutePolicy.routeOrder.contains(.openai) {
+            let start = CFAbsoluteTimeGetCurrent()
+            do {
+                let plan = try await withTimeout(3.0) {
+                    try await self.ollamaRouter.routePlan(
+                        text, history: history, pendingSlot: pendingSlot, promptContext: promptContext,
+                        skipRepairRetry: true
+                    )
+                }
+                let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
+                return (plan, .ollama, ms, nil, "ollama_local_first_success")
+            } catch {
+                let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                let failInfo = classifyOllamaFailure(error)
+                routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
+                #if DEBUG
+                print("[OLLAMA_PLAN_FAIL] kind=\(failInfo.kind) reasons=\(failInfo.reasonCount) ms=\(ms) detail=\(failInfo.detail)")
+                #endif
+                // Fall through to OpenAI with specific fallback reason
+                ollamaLocalFirstFailKind = failInfo.kind
+            }
+        }
+
+        if planRoutePolicy.routeOrder.contains(.openai) {
             let start = CFAbsoluteTimeGetCurrent()
             let selectedModel = selectOpenAIModel(for: text, reason: reason)
             do {
@@ -1840,6 +2508,9 @@ final class TurnOrchestrator {
                 }
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
+                if let failKind = ollamaLocalFirstFailKind {
+                    return (plan, .openai, ms, selectedModel, "ollama_\(failKind)_fallback")
+                }
                 return (plan, .openai, ms, selectedModel, "openai_success")
             } catch {
                 if let validationFailure = routerValidationFailure(from: error) {
@@ -1896,17 +2567,15 @@ final class TurnOrchestrator {
             }
         }
 
-        // A2) OpenAI key is present but known invalid (401/403) — fail fast with explicit auth error.
-        if keyStatus == .invalid {
+        if planRoutePolicy.routeOrder.first == LLMProvider.none,
+           planRoutePolicy.openAIStatus == .invalid || OpenAISettings.authFailureStatusCode == 401 || OpenAISettings.authFailureStatusCode == 403 {
             return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil, "openai_invalid_key")
         }
 
-        // B) Ollama standalone (OpenAI not configured, useOllama enabled)
-        if M2Settings.useOllama {
+        if planRoutePolicy.routeOrder.first == .ollama {
             return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason, promptContext: promptContext)
         }
 
-        // C) No usable model route — return clear auth error.
         return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil, "no_provider_configured")
     }
 
@@ -2036,6 +2705,9 @@ final class TurnOrchestrator {
         applyAffectMirroringResponsePolicy(&result, affect: affect)
         applyToneRepairResponsePolicy(&result, cue: toneRepairCue)
         applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
+        if currentTurnCaptureAfterReplyHint, !result.triggerFollowUpCapture {
+            result.triggerQuestionAutoListen = true
+        }
         applyKnowledgeAttribution(&result,
                                   userInput: originalInput,
                                   provider: provider,
@@ -2209,6 +2881,9 @@ final class TurnOrchestrator {
         applyCanvasPresentationPolicy(&result)
         applyResponsePolish(&result, plan: plan, hasMemoryHints: hasMemoryHints, turnIndex: turnIndex)
         applyFollowUpQuestionPolicy(&result, turnIndex: turnIndex)
+        if currentTurnCaptureAfterReplyHint, !result.triggerFollowUpCapture {
+            result.triggerQuestionAutoListen = true
+        }
         applyKnowledgeAttribution(&result,
                                   userInput: originalInput,
                                   provider: provider,
@@ -2451,65 +3126,8 @@ final class TurnOrchestrator {
         }
     }
 
-    private func detectVisionQueryIntent(_ input: String) -> VisionQueryIntent {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return .none }
-        let lower = trimmed.lowercased()
-
-        if let query = extractFindObjectQuery(from: trimmed) {
-            return .findObject(query: query)
-        }
-
-        let describePhrases = [
-            "what do you see",
-            "what can you see",
-            "describe the camera",
-            "describe what you see",
-            "show me what",
-            "what's in front of",
-            "what's happening"
-        ]
-        if describePhrases.contains(where: { lower.contains($0) }) {
-            return .describe
-        }
-
-        if lower == "look" || lower == "look around" || lower == "take a look" {
-            return .describe
-        }
-
-        if lower.contains("do you see")
-            || lower.contains("can you see")
-            || lower.contains("are there")
-            || lower.contains("who is in the room")
-            || lower.contains("who s in the room")
-            || lower.range(of: #"\bis\s+the\b.*\b(open|closed|visible)\b"#, options: .regularExpression) != nil {
-            return .visualQA(question: trimmed)
-        }
-
-        return .none
-    }
-
-    private func extractFindObjectQuery(from input: String) -> String? {
-        let lower = input.lowercased()
-        guard let range = lower.range(of: #"\bfind\s+(?:my\s+)?([a-z0-9][a-z0-9\s'\-]{0,40})"#, options: .regularExpression) else {
-            return nil
-        }
-        let raw = String(input[range])
-        var candidate = raw
-            .replacingOccurrences(of: #"(?i)^find\s+(my\s+)?"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"[?.!,;:]$"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if candidate.lowercased() == "out" || candidate.lowercased().hasPrefix("out ") {
-            return nil
-        }
-        if candidate.count > 40 {
-            candidate = String(candidate.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return candidate.isEmpty ? nil : candidate
-    }
-
     private func runRecipeToolFirstTurnIfNeeded(text: String,
+                                                intent: RoutedIntent,
                                                 history: [ChatMessage],
                                                 mode: ConversationMode,
                                                 localKnowledgeContext: LocalKnowledgeContext,
@@ -2518,6 +3136,7 @@ final class TurnOrchestrator {
                                                 turnStartedAt: Date,
                                                 identityDecision: IdentityTurnDecision,
                                                 now: Date) async -> TurnResult? {
+        guard intent == .recipe else { return nil }
         guard let query = recipeToolFirstQuery(from: text) else { return nil }
 
         let recipePlan = Plan(steps: [
@@ -2647,36 +3266,21 @@ final class TurnOrchestrator {
                 && merged.contains("couldn't")
     }
 
-    private func shouldEnterExternalSourceCapabilityGapFlow(_ text: String) -> Bool {
+    private func shouldEnterExternalSourceCapabilityGapFlow(_ text: String,
+                                                            classification: IntentClassification,
+                                                            provider: IntentClassificationProvider) -> Bool {
         guard pendingCapabilityRequest == nil else { return false }
         guard pendingSlot == nil else { return false }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard extractFirstURL(from: text) == nil else { return false }
 
-        let lower = text.lowercased()
-        let directExternalMarkers = [
-            "what's playing",
-            "what is playing",
-            "showtimes",
-            "cinema",
-            "movie times",
-            "tickets",
-            "flights",
-            "availability",
-            "prices",
-            "score",
-            "scores",
-            "news"
-        ]
-        guard directExternalMarkers.contains(where: { lower.contains($0) }) else {
-            return false
+        if classification.intent == .webRequest {
+            return provider == .rule
         }
-
-        let coveredByLocalTools = lower.contains("weather")
-            || lower.contains("time")
-            || lower.contains("timer")
-            || lower.contains("recipe")
-        return !coveredByLocalTools
+        if classification.intent == .recipe && classification.needsWeb {
+            return provider == .rule
+        }
+        return false
     }
 
     private func handlePendingCapabilityRequestTurn(text: String,
@@ -2701,21 +3305,27 @@ final class TurnOrchestrator {
             pendingSlot = nil
             pendingCapabilityRequest = nil
 
-            let focus = "How to find showtimes/listings and location filters"
+            let focus = pending.prefersWebsiteURL
+                ? "How to find showtimes/listings and location filters"
+                : "How to retrieve the requested information from this source"
             let learnArgs = ["url": url, "focus": focus]
             let learnAction = ToolAction(name: "learn_website", args: learnArgs, say: nil)
             let learnOutput = ToolsRuntime.shared.execute(learnAction)
 
             let memoryArgs = [
                 "type": "preference",
-                "content": "Cinema listings source: \(url)",
+                "content": pending.prefersWebsiteURL
+                    ? "Cinema listings source: \(url)"
+                    : "Capability source: \(url)",
                 "source": "capability_gap_external_source"
             ]
             let memoryAction = ToolAction(name: "save_memory", args: memoryArgs, say: nil)
             _ = ToolsRuntime.shared.execute(memoryAction)
 
             var result = immediateTalkTurnResult(
-                message: "Got it - I've learned that page. I can run start_skillforge next to build a cinema listings skill. Want me to build it?"
+                message: pending.prefersWebsiteURL
+                    ? "Got it - I've learned that page. I can run start_skillforge next to build a cinema listings skill. Want me to build it?"
+                    : "Got it - I learned that source. I can run start_skillforge to build this capability next. Want me to build it?"
             )
             result.llmProvider = .none
             result.originProvider = .local
@@ -2749,7 +3359,9 @@ final class TurnOrchestrator {
         }
 
         if pending.reminderCount == 0 {
-            let prompt = "I still need the exact URL for the listings page (for example, the Event Cinemas page). Paste that link and I'll learn it."
+            let prompt = pending.prefersWebsiteURL
+                ? "I still need the exact URL for the listings page (for example, the Event Cinemas page). Paste that link and I'll learn it."
+                : "I still need a source URL/app/site for that request. Share one and I'll learn it."
             pendingCapabilityRequest?.lastAskedAt = now
             pendingCapabilityRequest?.reminderCount = 1
             lastExternalSourcePromptAt = now
@@ -2789,7 +3401,9 @@ final class TurnOrchestrator {
         pendingCapabilityRequest = nil
 
         var result = immediateTalkTurnResult(
-            message: "No worries. When you have the exact URL, paste it and I'll learn it."
+            message: pending.prefersWebsiteURL
+                ? "No worries. When you have the exact URL, paste it and I'll learn it."
+                : "No worries. When you have a source URL/app/site, share it and I'll learn it."
         )
         result.llmProvider = .none
         result.originProvider = .local
@@ -2871,7 +3485,8 @@ final class TurnOrchestrator {
                 let plan = buildExternalSourceAskPlan(
                     toolName: failure.toolName,
                     userText: userText,
-                    now: now
+                    now: now,
+                    prefersWebsiteURL: prefersWebsiteURLForUnknownTool()
                 )
                 let routeReason: String
                 if plan.steps.contains(where: { step in
@@ -2884,34 +3499,49 @@ final class TurnOrchestrator {
                 }
                 return (plan, routeReason)
             case .capabilityBuild:
-                pendingCapabilityRequest = nil
-                let talk = "I can't do that directly yet. Which app or service should this integrate with, and what inputs/outputs do you need?"
-                return (Plan(steps: [.talk(say: talk)]), "unknown_tool_capability_gap")
+                let plan = buildExternalSourceAskPlan(
+                    toolName: failure.toolName,
+                    userText: userText,
+                    now: now,
+                    prefersWebsiteURL: false
+                )
+                return (plan, "unknown_tool_source_ask_generic")
             }
         }
     }
 
     private func buildExternalSourceAskPlan(toolName: String,
                                             userText: String,
-                                            now: Date) -> Plan {
+                                            now: Date,
+                                            prefersWebsiteURL: Bool) -> Plan {
+        let reminderLine = prefersWebsiteURL
+            ? "Still need the link to the listings page."
+            : "Still need a source (URL/app/site) so I know where to get that info."
         if let lastAsked = lastExternalSourcePromptAt,
            now.timeIntervalSince(lastAsked) < unknownToolPromptCooldownSeconds {
             pendingCapabilityRequest = PendingCapabilityRequest(
                 kind: .externalSource,
                 desiredToolName: toolName,
                 originalUserGoal: userText,
+                prefersWebsiteURL: prefersWebsiteURL,
                 createdAt: pendingCapabilityRequest?.createdAt ?? now,
                 lastAskedAt: lastAsked,
                 reminderCount: pendingCapabilityRequest?.reminderCount ?? 0
             )
-            return Plan(steps: [.talk(say: "Still need the link to the listings page.")])
+            return Plan(steps: [.talk(say: reminderLine)])
         }
 
-        let prompt = "I don't have a built-in way to fetch that yet. Where do you normally check it? Paste the URL (for example, the Event Cinemas page) and I'll learn it."
+        let prompt: String
+        if prefersWebsiteURL {
+            prompt = "I don't have a built-in way to do that yet. Where do you normally check it? Paste the URL (for example, the Event Cinemas page) and I'll learn it."
+        } else {
+            prompt = "I don't have a built-in way to do that yet. Where should I get that info from? Share the URL, app, or site and I'll learn it."
+        }
         pendingCapabilityRequest = PendingCapabilityRequest(
             kind: .externalSource,
             desiredToolName: toolName,
             originalUserGoal: userText,
+            prefersWebsiteURL: prefersWebsiteURL,
             createdAt: now,
             lastAskedAt: now,
             reminderCount: 0
@@ -2921,19 +3551,22 @@ final class TurnOrchestrator {
     }
 
     private func classifyUnknownToolFailure(toolName: String, userText: String) -> CapabilityGapRequestKind {
-        let toolLower = toolName.lowercased()
-        let userLower = userText.lowercased()
-        let buildMarkers = [
-            "automat",
-            "remind",
-            "notif",
-            "workflow",
-            "routine"
-        ]
-        if buildMarkers.contains(where: { toolLower.contains($0) || userLower.contains($0) }) {
+        if prefersWebsiteURLForUnknownTool() {
+            return .externalSource
+        }
+        if let intent = currentIntentClassification?.classification.intent,
+           intent == .automationRequest {
             return .capabilityBuild
         }
         return .externalSource
+    }
+
+    private func prefersWebsiteURLForUnknownTool() -> Bool {
+        guard let classification = currentIntentClassification?.classification else { return true }
+        if classification.needsWeb {
+            return true
+        }
+        return classification.intent == .webRequest
     }
 
     private func canonicalEnrollmentPlanIfNeeded(toolName: String,
@@ -3039,17 +3672,29 @@ final class TurnOrchestrator {
             ])
         }
 
-        let detectedIntent = detectVisionQueryIntent(userInput)
-        let intent: VisionQueryIntent
-        if case .none = detectedIntent {
-            intent = .describe
-        } else {
-            intent = detectedIntent
+        let intent = resolvedVisionIntent(
+            from: currentIntentClassification?.classification ?? IntentClassification(
+                intent: .unknown,
+                confidence: 0.0,
+                notes: "",
+                autoCaptureHint: false,
+                needsWeb: false
+            ),
+            userInput: userInput
+        )
+        guard case .none = intent else {
+            #if DEBUG
+            print("[VISION_GUARD] Replacing blind-claim response with camera tool plan")
+            #endif
+            return visionToolPlan(for: intent, preface: "Let me take a look.")
         }
+
         #if DEBUG
-        print("[VISION_GUARD] Replacing blind-claim response with camera tool plan")
+        print("[VISION_GUARD] Replacing blind-claim response with non-vision camera status message")
         #endif
-        return visionToolPlan(for: intent, preface: "Let me take a look.")
+        return Plan(steps: [
+            .talk(say: "My camera feed is lagging or not updating right now - try turning the camera off/on.")
+        ])
     }
 
     private func planContainsFalseBlindnessClaim(_ plan: Plan) -> Bool {
@@ -3429,6 +4074,10 @@ final class TurnOrchestrator {
 
     func debugClassify(_ input: String) -> ConversationMode {
         ConversationModeClassifier.classify(input)
+    }
+
+    func debugLastIntentClassification() -> IntentClassificationResult? {
+        lastIntentClassification
     }
 
     func debugDetectAffect(_ input: String, history: [ChatMessage] = []) -> AffectMetadata {
@@ -4425,6 +5074,27 @@ final class TurnOrchestrator {
         #if DEBUG
         print("[ROUTER] provider=\(provider) reason=\(reason) ms=\(ms) ok=\(ok)")
         #endif
+    }
+
+    private func classifyOllamaFailure(_ error: Error) -> (kind: String, reasonCount: Int, detail: String) {
+        if error is RouterTimeout {
+            return ("timeout", 0, "exceeded local-first deadline")
+        }
+        if let e = error as? OllamaRouter.OllamaError {
+            switch e {
+            case .jsonParseFailed(let raw):
+                return ("json_parse", 0, String(raw.prefix(120)))
+            case .schemaMismatch(_, let reasons):
+                return ("schema", reasons.count, reasons.joined(separator: "; "))
+            case .validationFailure(let f):
+                return ("unknown_tool", 0, f.toolName)
+            case .unreachable(let msg):
+                return ("transport", 0, String(msg.prefix(120)))
+            case .invalidResponse:
+                return ("transport", 0, "invalid HTTP response")
+            }
+        }
+        return ("unknown", 0, String(describing: error).prefix(120).description)
     }
 
     private func logTimeoutRetryAttempt(provider: String, attempt: Int, ms: Int, error: Error?) {

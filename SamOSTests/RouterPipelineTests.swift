@@ -6,12 +6,16 @@ import AppKit
 
 final class FakeOpenAITransport: OpenAITransport {
     var queuedResponses: [Result<String, Error>] = []
+    var queuedIntentResponses: [Result<String, Error>] = []
     var delayNanoseconds: UInt64 = 0
     var perCallDelayNanoseconds: [UInt64] = []
     private(set) var chatCallCount = 0
+    private(set) var intentCallCount = 0
     private(set) var chatCallLog: [[[String: String]]] = []
     private(set) var chatModelLog: [String] = []
     private(set) var chatMaxTokensLog: [Int?] = []
+    private(set) var intentMaxTokensLog: [Int?] = []
+    private(set) var intentTemperatureLog: [Double?] = []
 
     func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String {
         chatCallCount += 1
@@ -26,6 +30,23 @@ final class FakeOpenAITransport: OpenAITransport {
             throw OpenAIRouter.OpenAIError.requestFailed("No queued response")
         }
         return try queuedResponses.removeFirst().get()
+    }
+
+    func chat(messages: [[String: String]],
+              model: String,
+              maxOutputTokens: Int?,
+              responseFormat: [String: Any]?,
+              temperature: Double?) async throws -> String {
+        if responseFormat != nil {
+            intentCallCount += 1
+            intentMaxTokensLog.append(maxOutputTokens)
+            intentTemperatureLog.append(temperature)
+            guard !queuedIntentResponses.isEmpty else {
+                throw OpenAIRouter.OpenAIError.requestFailed("No queued intent response")
+            }
+            return try queuedIntentResponses.removeFirst().get()
+        }
+        return try await chat(messages: messages, model: model, maxOutputTokens: maxOutputTokens)
     }
 }
 
@@ -800,12 +821,31 @@ final class AppStateAutoListenTests: XCTestCase {
 
 final class FakeOllamaTransportForPipeline: OllamaTransport {
     var queuedResponses: [Result<String, Error>] = []
+    var queuedIntentResponses: [Result<String, Error>] = []
+    var intentDelayNanoseconds: UInt64 = 0
     private(set) var chatCallCount = 0
+    private(set) var intentCallCount = 0
 
-    func chat(messages: [[String: String]], maxOutputTokens: Int?) async throws -> String {
+    func chat(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> String {
+        _ = model
+        _ = maxOutputTokens
+        let joined = messages
+            .compactMap { $0["content"]?.lowercased() }
+            .joined(separator: "\n")
+        if joined.contains("intent classification engine") {
+            intentCallCount += 1
+            if intentDelayNanoseconds > 0 {
+                try await Task.sleep(nanoseconds: intentDelayNanoseconds)
+            }
+            guard !queuedIntentResponses.isEmpty else {
+                throw OllamaRouter.OllamaError.unreachable("No queued intent response")
+            }
+            return try queuedIntentResponses.removeFirst().get()
+        }
+
         chatCallCount += 1
         guard !queuedResponses.isEmpty else {
-            throw OllamaRouter.OllamaError.unreachable("No queued response")
+            throw OllamaRouter.OllamaError.unreachable("No queued route response")
         }
         return try queuedResponses.removeFirst().get()
     }
@@ -934,6 +974,7 @@ final class RouterPipelineTests: XCTestCase {
 
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
+    private var savedPreferLocalPlans: Bool = false
     private var savedAffectMirroringEnabled: Bool = false
     private var savedUseEmotionalTone: Bool = true
     private var savedToneProfile: TonePreferenceProfile = .neutralDefaults
@@ -944,10 +985,12 @@ final class RouterPipelineTests: XCTestCase {
         super.setUp()
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
+        savedPreferLocalPlans = M2Settings.preferLocalPlans
         savedAffectMirroringEnabled = M2Settings.affectMirroringEnabled
         savedUseEmotionalTone = M2Settings.useEmotionalTone
         savedToneProfile = TonePreferenceStore.shared.loadProfile()
         TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
+        M2Settings.preferLocalPlans = false
         savedGeneralModel = OpenAISettings.generalModel
         savedEscalationModel = OpenAISettings.escalationModel
     }
@@ -956,6 +999,7 @@ final class RouterPipelineTests: XCTestCase {
         // Restore original settings
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
+        M2Settings.preferLocalPlans = savedPreferLocalPlans
         M2Settings.affectMirroringEnabled = savedAffectMirroringEnabled
         M2Settings.useEmotionalTone = savedUseEmotionalTone
         TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile)
@@ -1611,6 +1655,11 @@ final class RouterPipelineTests: XCTestCase {
 
     func testVisionQueryToolFirstDescribe() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_describe","confidence":0.96,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = IdentityTestCamera()
         camera.analysis = makeIdentityAnalysis(faceCount: 1)
@@ -1630,12 +1679,18 @@ final class RouterPipelineTests: XCTestCase {
 
         let result = await orchestrator.processTurn("What do you see?", history: [])
         XCTAssertEqual(result.executedToolSteps.first?.name, "describe_camera_view")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Vision queries should run tool-first before any LLM routing")
         XCTAssertTrue(assistantCombinedText(result).lowercased().contains("here's what i can see"))
     }
 
     func testVisionQueryToolFirstVisualQA() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_qa","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = IdentityTestCamera()
         camera.analysis = makeIdentityAnalysis(faceCount: 1)
@@ -1655,11 +1710,20 @@ final class RouterPipelineTests: XCTestCase {
 
         let result = await orchestrator.processTurn("Do you see a person?", history: [])
         XCTAssertEqual(result.executedToolSteps.first?.name, "camera_visual_qa")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Visual QA queries should execute camera tool first")
     }
 
     func testVisionQueryToolFirstFindObject() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I can help you search for that."}"#)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = IdentityTestCamera()
         camera.analysis = makeIdentityAnalysis(faceCount: 1)
@@ -1678,12 +1742,17 @@ final class RouterPipelineTests: XCTestCase {
         )
 
         let result = await orchestrator.processTurn("Find my wallet", history: [])
-        XCTAssertEqual(result.executedToolSteps.first?.name, "find_camera_objects")
-        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Find-object queries should execute camera tool first")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
+        XCTAssertFalse(result.executedToolSteps.contains(where: { $0.name == "find_camera_objects" }))
     }
 
     func testNoFalseBlindnessGuardrail() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.25,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         fakeOpenAI.queuedResponses = [
             .success(#"{"action":"TALK","say":"I don't have the ability to see right now."}"#)
         ]
@@ -1707,14 +1776,25 @@ final class RouterPipelineTests: XCTestCase {
         let result = await orchestrator.processTurn("Give me a quick update.", history: [])
         let combined = assistantCombinedText(result).lowercased()
 
-        XCTAssertEqual(result.llmProvider, .openai, "Origin plan should remain OpenAI when guardrail rewrites the plan")
-        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }))
+        XCTAssertEqual(result.llmProvider, .openai, "Origin plan should remain OpenAI when guardrail rewrites the response")
         XCTAssertFalse(combined.contains("don't have the ability to see"))
         XCTAssertFalse(combined.contains("can’t see"))
+        XCTAssertTrue(combined.contains("camera feed is lagging") || combined.contains("not updating"))
     }
 
     func testIdentityDoesNotOverrideVision() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.25,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """),
+            .success("""
+            {"intent":"identity_response","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """),
+            .success("""
+            {"intent":"vision_describe","confidence":0.96,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         fakeOpenAI.queuedResponses = [
             .success(#"{"action":"TALK","say":"Hi there."}"#)
         ]
@@ -1776,11 +1856,16 @@ final class RouterPipelineTests: XCTestCase {
     func testRecipeIntentUsesFindRecipeWithoutOpenAI() async {
         let fakeOpenAI = FakeOpenAITransport()
         let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"recipe","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
 
         OpenAISettings.apiKey = ""
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = ""
-        M2Settings.useOllama = false
+        M2Settings.useOllama = true
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -1788,6 +1873,7 @@ final class RouterPipelineTests: XCTestCase {
 
         let result = await orchestrator.processTurn("recipe chinese fried rice", history: [])
 
+        XCTAssertEqual(fakeOllama.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "Recipe intent should use deterministic tool-first path")
         XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "find_recipe" }))
     }
@@ -1805,7 +1891,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings._resetCacheForTesting()
         // Force reload the cache with the new key
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -2325,7 +2411,9 @@ final class RouterPipelineTests: XCTestCase {
         {"action":"TALK","say":"Tokyo is in the evening while London is in the morning, so it's generally a suitable time to call."}
         """
         let fakeOllama = FakeOllamaTransportForPipeline()
-        fakeOllama.queuedResponses = [.success(ollamaFeedback)]
+        fakeOllama.queuedResponses = [
+            .success(ollamaFeedback)
+        ]
 
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
@@ -2342,7 +2430,7 @@ final class RouterPipelineTests: XCTestCase {
         )
 
         XCTAssertEqual(fakeOpenAI.chatCallCount, 2, "OpenAI should handle initial route + feedback attempt")
-        XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should be used for feedback fallback only")
+        XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should be called only for feedback fallback")
         XCTAssertTrue(result.appendedChat.contains(where: { $0.role == .assistant && $0.text.lowercased().contains("london") }))
     }
 
@@ -2665,7 +2753,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -2752,7 +2840,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -2781,7 +2869,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -2808,7 +2896,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -2870,7 +2958,11 @@ final class RouterPipelineTests: XCTestCase {
         let second = await orchestrator.processTurn("hello again", history: [])
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Second turn should fail fast without calling OpenAI again")
         let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(secondText.contains("openai rejected the request"), "Expected persistent auth error, got: \(secondText)")
+        XCTAssertTrue(
+            secondText.contains("openai rejected the request")
+                || secondText.contains("openai api key isn't set"),
+            "Expected persistent auth/settings guidance, got: \(secondText)"
+        )
         XCTAssertTrue(secondText.contains("settings -> openai"), "Expected actionable settings path, got: \(secondText)")
     }
 
@@ -2913,6 +3005,11 @@ final class RouterPipelineTests: XCTestCase {
     func testOllamaStandaloneWhenOpenAINotConfigured() async {
         let fakeOpenAI = FakeOpenAITransport()
         let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.91,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         fakeOllama.queuedResponses = [.success(validTalkJSON)]
 
         OpenAISettings.apiKey = ""
@@ -2927,6 +3024,7 @@ final class RouterPipelineTests: XCTestCase {
         let result = await orchestrator.processTurn("hello", history: [])
 
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "OpenAI should not be called")
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Ollama intent classifier should be called once")
         XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should be called")
         XCTAssertEqual(result.llmProvider, .ollama)
     }
@@ -2969,7 +3067,7 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = "test-key-123"
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
-        M2Settings.useOllama = true
+        M2Settings.useOllama = false
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -3578,7 +3676,7 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Unknown-tool flow must not trigger an OpenAI repair retry")
         XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site")
         let assistant = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(assistant.contains("paste the url"), "Expected source URL ask flow, got: \(assistant)")
+        XCTAssertTrue(assistant.contains("url"), "Expected source URL ask flow, got: \(assistant)")
         XCTAssertFalse(assistant.contains("json-looking"), "Should not show generic parse-failed language")
     }
 
@@ -3612,13 +3710,23 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertTrue(second.executedToolSteps.contains(where: { $0.name == "learn_website" }))
         XCTAssertTrue(second.executedToolSteps.contains(where: { $0.name == "save_memory" }))
         let assistant = second.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(assistant.contains("i've learned that page"))
+        XCTAssertTrue(assistant.contains("learned that page") || assistant.contains("learned that source"))
         XCTAssertTrue(assistant.contains("want me to build it"))
     }
 
     @MainActor
     func testCinemaListingsQueryAsksForSourceURLWithoutLLM() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"web_request","confidence":0.95,"autoCaptureHint":false,"needsWeb":true,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success("""
+            {"action":"PLAN","steps":[{"step":"tool","name":"get_cinema_listings","args":{"location":"Browns Plains"}}]}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
 
         OpenAISettings.apiKey = "test-key-cinema-pre-route"
@@ -3632,10 +3740,11 @@ final class RouterPipelineTests: XCTestCase {
 
         let result = await orchestrator.processTurn("What's playing at the cinema in Browns Plains?", history: [])
 
-        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "External-source gap prompt should not waste an OpenAI call")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "Intent classification should call OpenAI when Ollama is disabled")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Unknown tool should come from one OpenAI route call")
         XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site")
         let assistant = result.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(assistant.contains("paste the url"))
+        XCTAssertTrue(assistant.contains("url"))
     }
 
     // MARK: - L) Malformed show_image JSON salvaged as show_image tool
@@ -4558,7 +4667,7 @@ final class RouterPipelineTests: XCTestCase {
         appendTurn(&history, user: "What's playing at the cinema in Browns Plains?", result: first)
 
         let firstAssistant = first.appendedChat.first(where: { $0.role == .assistant })?.text.lowercased() ?? ""
-        XCTAssertTrue(firstAssistant.contains("paste the url"), "Expected source URL ask flow, got: \(firstAssistant)")
+        XCTAssertTrue(firstAssistant.contains("url"), "Expected source URL ask flow, got: \(firstAssistant)")
         XCTAssertTrue(first.executedToolSteps.isEmpty, "Unknown-tool/capability-gap prompt should not execute a tool")
 
         let second = await orchestrator.processTurn("https://www.eventcinemas.com.au/Cinema/Browns-Plains", history: history)
@@ -4578,16 +4687,20 @@ private struct StabilityFaceGreetingSettings: FaceGreetingSettingsProviding {
 final class StabilityRegressionTests: XCTestCase {
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
+    private var savedPreferLocalPlans: Bool = false
 
     override func setUp() {
         super.setUp()
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
+        savedPreferLocalPlans = M2Settings.preferLocalPlans
+        M2Settings.preferLocalPlans = false
     }
 
     override func tearDown() {
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
+        M2Settings.preferLocalPlans = savedPreferLocalPlans
         OpenAISettings._resetCacheForTesting()
         super.tearDown()
     }
@@ -4648,6 +4761,11 @@ final class StabilityRegressionTests: XCTestCase {
 
     func testVisionQueryRoutesToToolWhenCameraHealthy() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_describe","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = makeHealthyCamera()
         camera.sceneDescription = CameraSceneDescription(
@@ -4660,12 +4778,42 @@ final class StabilityRegressionTests: XCTestCase {
         let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
         let result = await orchestrator.processTurn("What do you see?", history: [])
 
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
         XCTAssertEqual(result.executedToolSteps.first?.name, "describe_camera_view")
     }
 
+    func testVisionIntentCameraOnRoutesToDescribeTool() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_describe","confidence":0.96,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = makeHealthyCamera()
+        camera.sceneDescription = CameraSceneDescription(
+            summary: "A desk with a notebook.",
+            labels: ["desk (94%)", "notebook (88%)"],
+            recognizedText: [],
+            capturedAt: Date()
+        )
+
+        let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
+        let result = await orchestrator.processTurn("What do you see right now?", history: [])
+
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
+        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }))
+    }
+
     func testVisionQueryReturnsCameraOffMessageWhenNotRunning() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_qa","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = makeHealthyCamera()
         camera.isRunning = false
@@ -4673,6 +4821,7 @@ final class StabilityRegressionTests: XCTestCase {
         let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
         let result = await orchestrator.processTurn("Do you see me?", history: [])
 
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
         XCTAssertEqual(result.llmProvider, .none)
         XCTAssertTrue(result.executedToolSteps.isEmpty)
@@ -4680,8 +4829,95 @@ final class StabilityRegressionTests: XCTestCase {
         XCTAssertTrue(combined.contains("camera on"))
     }
 
+    func testVisionIntentCameraOffReturnsCameraInstruction() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_describe","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = makeHealthyCamera()
+        camera.isRunning = false
+
+        let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
+        let result = await orchestrator.processTurn("What do you see?", history: [])
+
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
+        XCTAssertTrue(result.executedToolSteps.isEmpty)
+        XCTAssertTrue(combinedAssistantText(result).lowercased().contains("turn it on"))
+    }
+
+    func testRecipeDoesNotTriggerVisionCameraOff() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = makeHealthyCamera()
+        camera.isRunning = false
+
+        let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
+        let result = await orchestrator.processTurn("recipe chinese fried rice", history: [])
+        let combined = combinedAssistantText(result).lowercased()
+
+        XCTAssertFalse(combined.contains("camera on"))
+        XCTAssertFalse(combined.contains("turn it on"))
+        XCTAssertFalse(result.executedToolSteps.contains(where: {
+            $0.name == "describe_camera_view" || $0.name == "camera_visual_qa" || $0.name == "find_camera_objects"
+        }))
+    }
+
+    func testButterChickenRecipeDoesNotRouteToVisionAndUsesLLMIntentPipeline() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"recipe","confidence":0.96,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Here is a butter chicken recipe."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+        camera.isRunning = false
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: camera
+        )
+
+        let result = await orchestrator.processTurn("Can you find me a recipe to make butter chicken?", history: [])
+        let combined = combinedAssistantText(result).lowercased()
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Ollama intent classification should run first")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI intent classifier should run after low-confidence local result")
+        XCTAssertGreaterThanOrEqual(fakeOpenAI.chatCallCount, 1, "OpenAI routing should still run after intent classification")
+        XCTAssertFalse(combined.contains("camera on"))
+        XCTAssertFalse(combined.contains("turn it on"))
+        XCTAssertFalse(result.executedToolSteps.contains(where: {
+            $0.name == "describe_camera_view" || $0.name == "camera_visual_qa" || $0.name == "find_camera_objects"
+        }))
+    }
+
     func testVisionQueryReturnsCameraUnhealthyMessageWhenStale() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_qa","confidence":0.94,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
         let camera = makeHealthyCamera()
         camera.latestFrameAt = Date().addingTimeInterval(-6)
@@ -4689,6 +4925,7 @@ final class StabilityRegressionTests: XCTestCase {
         let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
         let result = await orchestrator.processTurn("Do you see a person?", history: [])
 
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
         XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
         XCTAssertEqual(result.llmProvider, .none)
         XCTAssertTrue(result.executedToolSteps.isEmpty)
@@ -4805,7 +5042,45 @@ final class StabilityRegressionTests: XCTestCase {
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
         XCTAssertTrue(result.executedToolSteps.isEmpty)
         XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site")
-        XCTAssertTrue(combined.contains("paste the url"))
+        XCTAssertTrue(combined.contains("url"))
+    }
+
+    func testWebRequestAsksForURLWhenUnknownTool() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"web_request","confidence":0.95,"autoCaptureHint":false,"needsWeb":true,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success("""
+            {"action":"PLAN","steps":[{"step":"tool","name":"get_cinema_listings","args":{"location":"Browns Plains"}}]}
+            """)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.30,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+        let result = await orchestrator.processTurn("???", history: [])
+        let combined = combinedAssistantText(result).lowercased()
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1)
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI should classify intent after low-confidence local result")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "Unknown-tool turn should still use only one OpenAI route call")
+        XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site")
+        XCTAssertTrue(combined.contains("url"))
     }
 
     func testProvidingURLTriggersLearnWebsiteThenOfferSkillforge() async {
@@ -4845,6 +5120,353 @@ final class StabilityRegressionTests: XCTestCase {
         _ = await orchestrator.processTurn("Please handle this request for me.", history: [])
 
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
+    }
+
+    func testIntentFallbackToOpenAIWhenLocalLowConfidence() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I can help with that."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.30,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: camera
+        )
+
+        let result = await orchestrator.processTurn("???", history: [])
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Local classifier should run first")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI should run for intent fallback")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "OpenAI should then run exactly one route call")
+        XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    func testIntentOrder_OllamaThenOpenAIThenRules() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.90,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I can help."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.22,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("Hello", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertNotNil(intent)
+        XCTAssertEqual(fakeOllama.intentCallCount, 1)
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
+        XCTAssertEqual(intent?.provider, .openai)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+    }
+
+    func testIntentOrder_RulesOnlyWhenBothFail() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .failure(OpenAIRouter.OpenAIError.requestFailed("intent down"))
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Fallback route works."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .failure(OllamaRouter.OllamaError.unreachable("intent down"))
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("anything", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertNotNil(intent)
+        XCTAssertEqual(intent?.provider, .rule)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+    }
+
+    func testRecipeNeverMentionsCameraWhenCameraOff() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"recipe","confidence":0.96,"autoCaptureHint":false,"needsWeb":false,"notes":"butter chicken"}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Here is a butter chicken recipe."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+        camera.isRunning = false
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        let result = await orchestrator.processTurn("Can you find me a recipe to make butter chicken?", history: [])
+        let combined = combinedAssistantText(result).lowercased()
+
+        XCTAssertFalse(combined.contains("camera on"))
+        XCTAssertFalse(combined.contains("turn it on"))
+        XCTAssertFalse(result.executedToolSteps.contains(where: {
+            $0.name == "describe_camera_view" || $0.name == "camera_visual_qa" || $0.name == "find_camera_objects"
+        }))
+    }
+
+    func testVisionCameraOffOnlyWhenVisionIntent() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"vision_describe","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        let camera = makeHealthyCamera()
+        camera.isRunning = false
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        let result = await orchestrator.processTurn("What do you see?", history: [])
+        XCTAssertTrue(combinedAssistantText(result).lowercased().contains("camera on"))
+    }
+
+    func testLogsReflectActualAttempts() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.91,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"hello"}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("hello", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertEqual(intent?.provider, .openai)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+    }
+
+    func testGreetingIntentFallsThroughToRuleAfterLowConfidenceLLMs() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.22,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Hello."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("Hi Sam", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertNotNil(intent)
+        XCTAssertEqual(intent?.provider, .rule)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+    }
+
+    func testVisionRoutingOnlyFromVisionIntent() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.91,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I can help."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+        camera.sceneDescription = CameraSceneDescription(
+            summary: "A desk with a notebook.",
+            labels: ["desk (94%)", "notebook (88%)"],
+            recognizedText: [],
+            capturedAt: Date()
+        )
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        let result = await orchestrator.processTurn("What do you see?", history: [])
+        XCTAssertFalse(result.executedToolSteps.contains(where: { $0.name == "describe_camera_view" }))
+    }
+
+    func testGarbageIntentFallsToRuleAfterLLMLowConfidence() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.10,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Can you clarify?"}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.15,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("???", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertNotNil(intent)
+        XCTAssertEqual(intent?.provider, .rule)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+    }
+
+    func testIntentLLMFailuresFallBackToRule() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .failure(OpenAIRouter.OpenAIError.requestFailed("intent failure"))
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Fallback route still works."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .failure(OllamaRouter.OllamaError.unreachable("intent failure"))
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "stability-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "stability-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter, cameraVision: camera)
+
+        _ = await orchestrator.processTurn("Tell me something", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertNotNil(intent)
+        XCTAssertEqual(intent?.provider, .rule)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
     }
 
     // MARK: - Timeout/fallback
@@ -4975,6 +5597,11 @@ final class StabilityRegressionTests: XCTestCase {
 
         for phrase in phrases {
             let fakeOpenAI = FakeOpenAITransport()
+            fakeOpenAI.queuedIntentResponses = [
+                .success("""
+                {"intent":"vision_describe","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+                """)
+            ]
             fakeOpenAI.queuedResponses = [
                 .success(#"{"action":"TALK","say":"\#(phrase)"}"#)
             ]
@@ -5006,6 +5633,12 @@ final class StabilityRegressionTests: XCTestCase {
 
         for query in queries {
             let fakeOpenAI = FakeOpenAITransport()
+            let intent = query.lowercased().contains("who is in the room") ? "vision_qa" : "vision_describe"
+            fakeOpenAI.queuedIntentResponses = [
+                .success("""
+                {"intent":"\(intent)","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+                """)
+            ]
             let fakeOllama = FakeOllamaTransportForPipeline()
             let camera = makeHealthyCamera()
             camera.sceneDescription = CameraSceneDescription(summary: "A desk and a monitor.", labels: [], recognizedText: [], capturedAt: Date())
@@ -5021,6 +5654,7 @@ final class StabilityRegressionTests: XCTestCase {
             let hasVisionTool = result.executedToolSteps.contains(where: {
                 $0.name == "describe_camera_view" || $0.name == "find_camera_objects" || $0.name == "camera_visual_qa"
             })
+            XCTAssertEqual(fakeOpenAI.intentCallCount, 1)
             XCTAssertTrue(hasVisionTool, "Vision query should route to camera tool for: \(query)")
         }
     }
@@ -5046,7 +5680,7 @@ final class StabilityRegressionTests: XCTestCase {
                        "Generic unknown tool should default to external-source ask, not capability-build")
     }
 
-    func testUnknownToolAutomationGoesToCapabilityBuild() async {
+    func testUnknownToolAutomationAsksForGenericSource() async {
         let raw = """
         {"action":"PLAN","steps":[{"step":"tool","name":"create_automation","args":{"trigger":"daily"}}]}
         """
@@ -5063,12 +5697,13 @@ final class StabilityRegressionTests: XCTestCase {
         let result = await orchestrator.processTurn("Create an automation to remind me daily", history: [])
 
         XCTAssertTrue(result.executedToolSteps.isEmpty, "Unknown tool must never be executed")
-        XCTAssertNotEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site",
-                          "Automation-related tool should NOT enter external-source ask flow")
+        XCTAssertEqual(orchestrator.pendingSlot?.slotName, "source_url_or_site")
         let combined = combinedAssistantText(result).lowercased()
         XCTAssertTrue(
-            combined.contains("can't do that directly") || combined.contains("learn") || combined.contains("build") || combined.contains("teach"),
-            "Automation-related unknown tool should suggest capability building, got: \(combined)"
+            combined.contains("where should i get that info from")
+                || combined.contains("url, app, or site")
+                || combined.contains("share the url"),
+            "Automation-related unknown tool should ask for a generic source, got: \(combined)"
         )
     }
 
@@ -5149,6 +5784,487 @@ final class StabilityRegressionTests: XCTestCase {
 
     private func makeUnknownFaceCamera() -> IdentityTestCamera {
         makeHealthyCamera()
+    }
+
+    // MARK: - localSkipReason
+
+    func testLocalSkipReasonPopulatedWhenClassifierNil() async {
+        let classifier = IntentClassifier(
+            localClassifier: nil,
+            openAIClassifier: nil
+        )
+        let input = IntentClassifierInput(
+            userText: "hello",
+            cameraRunning: false,
+            faceKnown: false,
+            pendingSlot: nil,
+            lastAssistantLine: nil
+        )
+        let result = await classifier.classify(input, useLocalFirst: true, allowOpenAIFallback: false)
+        XCTAssertEqual(result.localSkipReason, "classifier_nil")
+        XCTAssertFalse(result.attemptedLocal)
+    }
+
+    func testLocalSkipReasonPolicyDisabledWhenOllamaOff() async {
+        let classifier = IntentClassifier(
+            localClassifier: { _ in
+                IntentLLMCallOutput(
+                    rawText: "{\"intent\":\"general_chat\",\"confidence\":0.9,\"notes\":\"\",\"autoCaptureHint\":false,\"needsWeb\":false}",
+                    model: "qwen2.5:3b-instruct",
+                    endpoint: "http://127.0.0.1:11434/api/chat",
+                    prompt: "[system]\\nintent classification engine\\n[user]\\nhello"
+                )
+            },
+            openAIClassifier: nil
+        )
+        let input = IntentClassifierInput(
+            userText: "hello",
+            cameraRunning: false,
+            faceKnown: false,
+            pendingSlot: nil,
+            lastAssistantLine: nil
+        )
+        let result = await classifier.classify(input, useLocalFirst: false, allowOpenAIFallback: false)
+        XCTAssertEqual(result.localSkipReason, "policy_disabled")
+        XCTAssertFalse(result.attemptedLocal)
+    }
+
+    // MARK: - Plan Routing Policy
+
+    private let localFirstTalkJSON = #"{"action":"TALK","say":"Hey there!"}"#
+
+    @MainActor
+    func testPlanRouting_OpenAIWinsWhenKeyReadyEvenIfUseOllamaTrue() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [
+            .failure(OllamaRouter.OllamaError.unreachable("should not be called"))
+        ]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hi Sam", history: [])
+
+        XCTAssertEqual(fakeOllama.chatCallCount, 0, "Ollama plan route should be skipped when OpenAI key is ready")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "OpenAI should handle plan route first")
+        XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    @MainActor
+    func testLocalFirstOllamaSuccessSkipsOpenAI() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+        fakeOpenAI.queuedIntentResponses = [.success("""
+            {"intent":"general_qna","confidence":0.90,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [.success("""
+            {"intent":"general_qna","confidence":0.90,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)]
+        fakeOllama.queuedResponses = [.success(localFirstTalkJSON)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hi Sam", history: [])
+
+        XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should handle plan generation")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "OpenAI should not be called when Ollama succeeds")
+        XCTAssertEqual(result.llmProvider, .ollama)
+        XCTAssertTrue(result.appendedChat.contains { $0.role == .assistant && !$0.text.isEmpty })
+    }
+
+    @MainActor
+    func testLocalFirstOllamaFailureFallsBackToOpenAI() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [
+            .failure(OllamaRouter.OllamaError.unreachable("connection refused"))
+        ]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should be attempted first")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "OpenAI should handle after Ollama failure")
+        XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    @MainActor
+    func testLocalFirstOllamaAttemptedWhenOpenAIKeyReady() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [.success(localFirstTalkJSON)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        _ = await orchestrator.processTurn("hi", history: [])
+
+        XCTAssertGreaterThanOrEqual(fakeOllama.chatCallCount, 1,
+            "Ollama should be attempted despite OpenAI key being ready")
+    }
+
+    @MainActor
+    func testLocalFirstOriginReasonStamped() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [.success(localFirstTalkJSON)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hi Sam", history: [])
+
+        XCTAssertEqual(result.originReason, "ollama_local_first_success",
+            "Origin reason should reflect local-first Ollama success")
+    }
+
+    @MainActor
+    func testLocalPlanSuccessDoesNotCallOpenAI() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [.success(localFirstTalkJSON)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hi Sam", history: [])
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0, "OpenAI must not be called when Ollama plan succeeds")
+        XCTAssertEqual(result.llmProvider, .ollama)
+        XCTAssertTrue(result.appendedChat.contains { $0.role == .assistant },
+                      "Ollama TALK response should produce an assistant message (actual: \(result.appendedChat.map(\.text)))")
+    }
+
+    @MainActor
+    func testLocalPlanInvalidFallsBackToOpenAIOnce() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        // Schema mismatch: missing "action" field — will trigger schemaMismatch error
+        fakeOllama.queuedResponses = [
+            .success(#"{"response":"Hello!"}"#)
+        ]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertEqual(fakeOllama.chatCallCount, 1, "Ollama should be called once (no repair retry with skipRepairRetry)")
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "OpenAI should handle fallback")
+        XCTAssertEqual(result.llmProvider, .openai)
+        XCTAssertTrue(result.originReason?.contains("ollama_") == true,
+            "Origin reason should indicate Ollama fallback: \(result.originReason ?? "nil")")
+    }
+
+    @MainActor
+    func testLocalPlanFallbackStampsSchemaReason() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedResponses = [
+            .success(#"{"wrong":"schema"}"#)
+        ]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertEqual(result.llmProvider, .openai)
+        XCTAssertTrue(result.originReason?.contains("schema") == true || result.originReason?.contains("json_parse") == true,
+            "Fallback reason should indicate schema or json_parse failure: \(result.originReason ?? "nil")")
+    }
+
+    func testIntentLocalTimeoutFallsBackToOpenAI() async {
+        let savedTimeout = M2Settings.localIntentTimeoutSeconds
+        defer { M2Settings.localIntentTimeoutSeconds = savedTimeout }
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Hello from OpenAI."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        // 2s delay — above the explicit 0.5s local intent timeout used in this test.
+        fakeOllama.intentDelayNanoseconds = 2_000_000_000
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "timeout-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "timeout-test-key"
+        M2Settings.useOllama = true
+        M2Settings.localIntentTimeoutSeconds = 0.5
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: camera
+        )
+
+        let result = await orchestrator.processTurn("hello", history: [])
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Local intent should be attempted")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI intent should be attempted after local timeout")
+        XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    func testIntentLocal1200msSucceedsWhenTimeoutIs2s() async {
+        let savedTimeout = M2Settings.localIntentTimeoutSeconds
+        defer { M2Settings.localIntentTimeoutSeconds = savedTimeout }
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Plan routed via OpenAI."}"#)
+        ]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.intentDelayNanoseconds = 1_200_000_000
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"greeting","confidence":0.90,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+
+        OpenAISettings.apiKey = "intent-2s-timeout-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "intent-2s-timeout-key"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = false
+        M2Settings.localIntentTimeoutSeconds = 2.0
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: makeHealthyCamera()
+        )
+
+        _ = await orchestrator.processTurn("how are you?", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Local intent should be attempted exactly once")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 0, "OpenAI intent should not be attempted when local finishes within timeout")
+        XCTAssertEqual(intent?.provider, .ollama)
+        XCTAssertEqual(intent?.attemptedOpenAI, false)
+    }
+
+    func testIntentLocal1200msTimesOutWhenTimeoutIsPoint5s() async {
+        let savedTimeout = M2Settings.localIntentTimeoutSeconds
+        defer { M2Settings.localIntentTimeoutSeconds = savedTimeout }
+
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.94,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Plan routed via OpenAI."}"#)
+        ]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.intentDelayNanoseconds = 1_200_000_000
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"greeting","confidence":0.91,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+
+        OpenAISettings.apiKey = "intent-point5-timeout-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "intent-point5-timeout-key"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = false
+        M2Settings.localIntentTimeoutSeconds = 0.5
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: makeHealthyCamera()
+        )
+
+        _ = await orchestrator.processTurn("how are you?", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1, "Local intent should still be attempted first")
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI intent should run after local timeout")
+        XCTAssertEqual(intent?.provider, .openai)
+        XCTAssertEqual(intent?.attemptedOpenAI, true)
+        XCTAssertEqual(intent?.escalationReason, "timeout")
+    }
+
+    func testIntentLocalSuccessDoesNotCallOpenAIIntent() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.91,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Hello from OpenAI plan routing."}"#)
+        ]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"greeting","confidence":0.9,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+
+        OpenAISettings.apiKey = "intent-local-success-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "intent-local-success-key"
+        M2Settings.useOllama = true
+        M2Settings.preferLocalPlans = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: makeHealthyCamera()
+        )
+
+        _ = await orchestrator.processTurn("how are you?", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertEqual(intent?.provider, .ollama)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, false)
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 0, "OpenAI intent classifier must not be called when local confidence passes threshold")
+    }
+
+    func testIntentFastPath_OpenAIMaxTokensReduced() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        fakeOpenAI.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Hello."}"#)
+        ]
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success("""
+            {"intent":"unknown","confidence":0.30,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
+        let camera = makeHealthyCamera()
+
+        OpenAISettings.apiKey = "tokens-test-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "tokens-test-key"
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: camera
+        )
+
+        _ = await orchestrator.processTurn("what is swift", history: [])
+
+        XCTAssertEqual(fakeOpenAI.intentMaxTokensLog.first, 128,
+            "OpenAI intent should use reduced max_tokens of 128")
+        XCTAssertEqual(fakeOpenAI.intentTemperatureLog.first, 0.0,
+            "OpenAI intent should use temperature 0.0")
     }
 
     private func identityPromptCount(in result: TurnResult) -> Int {

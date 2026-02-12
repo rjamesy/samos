@@ -23,6 +23,8 @@ enum M2Settings {
         static let faceRecognitionEnabled = "m3_faceRecognitionEnabled"
         static let personalizedGreetingsEnabled = "m3_personalizedGreetingsEnabled"
         static let useOllama = "m3_useOllama"
+        static let preferLocalPlans = "m3_preferLocalPlans"
+        static let localIntentTimeoutSeconds = "m3_localIntentTimeoutSeconds"
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
     }
@@ -212,6 +214,24 @@ enum M2Settings {
     static var useOllama: Bool {
         get { defaults.bool(forKey: Key.useOllama) }
         set { defaults.set(newValue, forKey: Key.useOllama) }
+    }
+
+    /// Dev override: when true and OpenAI is configured, plan routing uses local-first order.
+    /// Default is false, which keeps plan routing OpenAI-first when a key is ready.
+    static var preferLocalPlans: Bool {
+        get { defaults.bool(forKey: Key.preferLocalPlans) }
+        set { defaults.set(newValue, forKey: Key.preferLocalPlans) }
+    }
+
+    /// Timeout budget for local intent classification, in seconds.
+    /// Defaults to 2.0s to accommodate small local models under audio load.
+    static var localIntentTimeoutSeconds: Double {
+        get {
+            guard defaults.object(forKey: Key.localIntentTimeoutSeconds) != nil else { return 2.0 }
+            let value = defaults.double(forKey: Key.localIntentTimeoutSeconds)
+            return value > 0 ? value : 2.0
+        }
+        set { defaults.set(max(0.1, newValue), forKey: Key.localIntentTimeoutSeconds) }
     }
 
     static var ollamaEndpoint: String {
