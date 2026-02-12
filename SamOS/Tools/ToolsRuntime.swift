@@ -24,7 +24,10 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
     private init() {}
 
     func toolExists(_ name: String) -> Bool {
-        if registry.get(name) != nil { return true }
+        if let canonical = registry.normalizeToolName(name),
+           registry.get(canonical) != nil {
+            return true
+        }
         if matchInstalledSkill(named: name) != nil { return true }
         return false
     }
@@ -32,7 +35,8 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
     /// Execute a ToolAction and return the resulting OutputItem.
     /// Returns nil if the tool is not found.
     func execute(_ toolAction: ToolAction) -> OutputItem? {
-        if let tool = registry.get(toolAction.name) {
+        if let canonical = registry.normalizeToolName(toolAction.name),
+           let tool = registry.get(canonical) {
             return tool.execute(args: toolAction.args)
         }
 
@@ -66,7 +70,8 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
                     spokenLines.append(line)
                 }
             case .tool(let nestedToolAction):
-                guard let nestedTool = registry.get(nestedToolAction.name) else {
+                guard let canonicalName = registry.normalizeToolName(nestedToolAction.name),
+                      let nestedTool = registry.get(canonicalName) else {
                     outputItems.append(OutputItem(
                         kind: .markdown,
                         payload: "**Error:** Skill `\(skill.name)` references unknown tool `\(nestedToolAction.name)`."

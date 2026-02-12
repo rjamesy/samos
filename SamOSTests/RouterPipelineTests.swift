@@ -6800,7 +6800,16 @@ final class SamOSRealPerfSmokeTests: XCTestCase {
         )
 
         let ollamaRouter = OllamaRouter()
-        let openAIRouter = OpenAIRouter(parser: ollamaRouter)
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = Array(
+            repeating: .success(#"{"intent":"general_qna","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#),
+            count: 16
+        )
+        fakeOpenAI.queuedResponses = Array(
+            repeating: .success(#"{"action":"TALK","say":"Okay."}"#),
+            count: 16
+        )
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
         let orchestrator = TurnOrchestrator(
             ollamaRouter: ollamaRouter,
             openAIRouter: openAIRouter,

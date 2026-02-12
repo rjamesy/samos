@@ -1985,6 +1985,12 @@ final class TurnOrchestrator {
             },
             nativeToolExists: { category in
                 TurnOrchestrator.hasNativeTool(for: category)
+            },
+            normalizeToolName: { raw in
+                ToolRegistry.shared.normalizeToolName(raw)
+            },
+            isAllowedTool: { name in
+                ToolRegistry.shared.isAllowedTool(name)
             }
         )
     }
@@ -2378,7 +2384,8 @@ final class TurnOrchestrator {
                 history: history,
                 pendingSlot: slot,
                 reason: .pendingSlotReply,
-                promptContext: promptContext
+                promptContext: promptContext,
+                intentClassification: currentIntentClassification?.classification
             ))
             logPlanProviderSelection(provider: routed.provider,
                                      routeReason: routed.routeReason,
@@ -2437,7 +2444,8 @@ final class TurnOrchestrator {
             history: history,
             pendingSlot: nil,
             reason: .userChat,
-            promptContext: promptContext
+            promptContext: promptContext,
+            intentClassification: currentIntentClassification?.classification
         ))
         logPlanProviderSelection(provider: routed.provider,
                                  routeReason: routed.routeReason,
@@ -5113,21 +5121,27 @@ final class TurnOrchestrator {
     }
 
     nonisolated private static func hasNativeTool(for category: CapabilityRequestCategory) -> Bool {
-        let toolName: String?
+        let candidateNames: [String]
         switch category {
         case .weather:
-            toolName = "get_weather"
+            candidateNames = ["get_weather", "weather"]
         case .news:
-            toolName = "get_news"
+            candidateNames = ["get_news", "news"]
         case .sportsScores:
-            toolName = "get_scores"
+            candidateNames = ["get_scores", "sports_scores"]
         case .time:
-            toolName = "get_time"
+            candidateNames = ["get_time", "time"]
         case .otherWeb:
-            toolName = nil
+            candidateNames = []
         }
-        guard let toolName else { return false }
-        return ToolRegistry.shared.get(toolName) != nil
+        guard !candidateNames.isEmpty else { return false }
+        for candidate in candidateNames {
+            guard let canonical = ToolRegistry.shared.normalizeToolName(candidate) else { continue }
+            if ToolRegistry.shared.isAllowedTool(canonical) {
+                return true
+            }
+        }
+        return false
     }
 
     private func logAffectClassification(raw: AffectMetadata,

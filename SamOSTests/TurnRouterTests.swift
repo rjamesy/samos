@@ -16,6 +16,12 @@ final class TurnRouterTests: XCTestCase {
                 case .news, .sportsScores, .otherWeb:
                     return false
                 }
+            },
+            normalizeToolName: { raw in
+                ToolRegistry.shared.normalizeToolName(raw)
+            },
+            isAllowedTool: { name in
+                ToolRegistry.shared.isAllowedTool(name)
             }
         )
     }
@@ -116,6 +122,176 @@ final class TurnRouterTests: XCTestCase {
         XCTAssertEqual(result.plan, Plan(steps: [.talk(say: "route this")]))
         XCTAssertEqual(result.provider, .openai)
         XCTAssertEqual(result.routerMs, 25)
+    }
+
+    func testWeatherBrisbaneRouteNormalizesToolAndAvoidsSourceURLSlot() async {
+        let router = makeRouter(
+            classify: { _, _, _ in Self.makeClassification(.webRequest, needsWeb: true) },
+            route: { _ in
+                RouteDecision(
+                    plan: Plan(steps: [.tool(name: "weather", args: ["place": .string("Brisbane")], say: nil)]),
+                    provider: .openai,
+                    routerMs: 12,
+                    aiModelUsed: "gpt-test",
+                    routeReason: "raw_weather_tool",
+                    planLocalWireMs: nil,
+                    planLocalTotalMs: nil,
+                    planOpenAIMs: 12
+                )
+            }
+        )
+
+        let decision = await router.routePlan(
+            TurnPlanRouteRequest(
+                text: "weather brisbane",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.95,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+
+        guard case .tool(let name, _, _) = decision.plan.steps.first else {
+            return XCTFail("Expected tool step")
+        }
+        XCTAssertEqual(name, "get_weather")
+        let hasSourceSlotAsk = decision.plan.steps.contains { step in
+            guard case .ask(let slot, _) = step else { return false }
+            return slot == "source_url_or_site"
+        }
+        XCTAssertFalse(hasSourceSlotAsk)
+    }
+
+    func testOpenAITimeoutFallbackPlanKeepsNormalizedToolName() async {
+        let router = makeRouter(
+            classify: { _, _, _ in Self.makeClassification(.webRequest, needsWeb: true) },
+            route: { _ in
+                RouteDecision(
+                    plan: Plan(steps: [.tool(name: "getWeather", args: ["place": .string("Brisbane")], say: nil)]),
+                    provider: .ollama,
+                    routerMs: 18,
+                    aiModelUsed: "local-fallback",
+                    routeReason: "openai_timeout_fallback_ollama",
+                    planLocalWireMs: 4,
+                    planLocalTotalMs: 7,
+                    planOpenAIMs: nil
+                )
+            }
+        )
+
+        let decision = await router.routePlan(
+            TurnPlanRouteRequest(
+                text: "weather brisbane",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+
+        XCTAssertEqual(decision.provider, .ollama)
+        guard case .tool(let name, _, _) = decision.plan.steps.first else {
+            return XCTFail("Expected tool step")
+        }
+        XCTAssertEqual(name, "get_weather")
+    }
+
+    func testNeedsWebWithoutAllowedToolReturnsDeterministicSourceAsk() async {
+        let router = makeRouter(
+            classify: { _, _, _ in Self.makeClassification(.webRequest, needsWeb: true) },
+            route: { _ in
+                RouteDecision(
+                    plan: Plan(steps: [.talk(say: "Let me think.")]),
+                    provider: .openai,
+                    routerMs: 9,
+                    aiModelUsed: "gpt-test",
+                    routeReason: "talk_only",
+                    planLocalWireMs: nil,
+                    planLocalTotalMs: nil,
+                    planOpenAIMs: 9
+                )
+            }
+        )
+
+        let decision = await router.routePlan(
+            TurnPlanRouteRequest(
+                text: "latest headlines",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+
+        guard case .ask(let slot, let prompt) = decision.plan.steps.first else {
+            return XCTFail("Expected deterministic clarifying ask")
+        }
+        XCTAssertEqual(slot, "source_url_or_site")
+        XCTAssertTrue(prompt.lowercased().contains("url"))
+        XCTAssertEqual(decision.routeReason, "needs_web_missing_tool_requires_source")
+    }
+
+    func testNeedsWebWithoutAllowedToolAndNativeToolReturnsDetailClarifier() async {
+        let router = makeRouter(
+            classify: { _, _, _ in Self.makeClassification(.webRequest, needsWeb: true) },
+            route: { _ in
+                RouteDecision(
+                    plan: Plan(steps: [.talk(say: "Let me think.")]),
+                    provider: .openai,
+                    routerMs: 9,
+                    aiModelUsed: "gpt-test",
+                    routeReason: "talk_only",
+                    planLocalWireMs: nil,
+                    planLocalTotalMs: nil,
+                    planOpenAIMs: 9
+                )
+            }
+        )
+
+        let decision = await router.routePlan(
+            TurnPlanRouteRequest(
+                text: "weather in brisbane today",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+
+        guard case .ask(let slot, let prompt) = decision.plan.steps.first else {
+            return XCTFail("Expected deterministic clarifying ask")
+        }
+        XCTAssertEqual(slot, "web_query_detail")
+        XCTAssertEqual(prompt, "What location or source should I check for that live update?")
+        XCTAssertEqual(decision.routeReason, "needs_web_clarify_missing_tool_plan")
     }
 
     func testEvaluatePendingSlotRetryExhaustedAtMaxAttempts() {

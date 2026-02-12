@@ -3,6 +3,38 @@ import XCTest
 
 @MainActor
 final class TurnOrchestratorTests: XCTestCase {
+    private final class DeterministicOpenAITransport: OpenAITransport {
+        let intentJSON: String
+        let planJSON: String
+
+        init(intentJSON: String, planJSON: String) {
+            self.intentJSON = intentJSON
+            self.planJSON = planJSON
+        }
+
+        func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String {
+            _ = messages
+            _ = model
+            _ = maxOutputTokens
+            return planJSON
+        }
+
+        func chat(messages: [[String: String]],
+                  model: String,
+                  maxOutputTokens: Int?,
+                  responseFormat: [String: Any]?,
+                  temperature: Double?) async throws -> String {
+            _ = messages
+            _ = model
+            _ = maxOutputTokens
+            _ = temperature
+            if responseFormat != nil {
+                return intentJSON
+            }
+            return planJSON
+        }
+    }
+
     private var savedToneProfile: TonePreferenceProfile = .neutralDefaults
 
     override func setUp() {
@@ -446,7 +478,26 @@ final class TurnOrchestratorTests: XCTestCase {
     // MARK: - PendingSlot Loop Breaker
 
     func testLoopBreakerClearsAfter3Attempts() async {
-        let orchestrator = TurnOrchestrator()
+        let savedUseOllama = M2Settings.useOllama
+        let savedAPIKey = OpenAISettings.apiKey
+        defer { M2Settings.useOllama = savedUseOllama }
+        defer {
+            OpenAISettings.apiKey = savedAPIKey
+            OpenAISettings._resetCacheForTesting()
+            OpenAISettings.apiKey = savedAPIKey
+        }
+        M2Settings.useOllama = false
+        OpenAISettings.apiKey = "sk-test-local"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "sk-test-local"
+
+        let transport = DeterministicOpenAITransport(
+            intentJSON: #"{"intent":"unknown","confidence":0.20,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#,
+            planJSON: #"{"action":"TALK","say":"Fallback."}"#
+        )
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: transport)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
 
         // Simulate a pending slot with 3 failed attempts
         orchestrator.pendingSlot = PendingSlot(
@@ -465,7 +516,26 @@ final class TurnOrchestratorTests: XCTestCase {
 
     @MainActor
     func testExpiredSlotClears() async {
-        let orchestrator = TurnOrchestrator()
+        let savedUseOllama = M2Settings.useOllama
+        let savedAPIKey = OpenAISettings.apiKey
+        defer { M2Settings.useOllama = savedUseOllama }
+        defer {
+            OpenAISettings.apiKey = savedAPIKey
+            OpenAISettings._resetCacheForTesting()
+            OpenAISettings.apiKey = savedAPIKey
+        }
+        M2Settings.useOllama = false
+        OpenAISettings.apiKey = "sk-test-local"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "sk-test-local"
+
+        let transport = DeterministicOpenAITransport(
+            intentJSON: #"{"intent":"general_qna","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#,
+            planJSON: #"{"action":"TALK","say":"Hello there."}"#
+        )
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: transport)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
 
         // Expired slot
         orchestrator.pendingSlot = PendingSlot(

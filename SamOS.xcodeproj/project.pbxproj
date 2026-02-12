@@ -96,6 +96,7 @@
 		AA2222222222222222222102 /* TurnToolRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221102 /* TurnToolRunnerTests.swift */; };
 		AA2222222222222222222103 /* SpeechCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221103 /* SpeechCoordinatorTests.swift */; };
 		AA2222222222222222222104 /* TurnPipelineContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221104 /* TurnPipelineContractTests.swift */; };
+		AA2222222222222222222105 /* ToolNormalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221105 /* ToolNormalizationTests.swift */; };
 		F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */; };
 		F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */; };
 		F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */; };
@@ -211,6 +212,7 @@
 		AA2222222222222222221102 /* TurnToolRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnToolRunnerTests.swift; sourceTree = "<group>"; };
 		AA2222222222222222221103 /* SpeechCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCoordinatorTests.swift; sourceTree = "<group>"; };
 		AA2222222222222222221104 /* TurnPipelineContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnPipelineContractTests.swift; sourceTree = "<group>"; };
+		AA2222222222222222221105 /* ToolNormalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolNormalizationTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevSecretsStore.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveService.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveTests.swift; sourceTree = "<group>"; };
@@ -418,6 +420,7 @@
 				AA2222222222222222221102 /* TurnToolRunnerTests.swift */,
 				AA2222222222222222221103 /* SpeechCoordinatorTests.swift */,
 				AA2222222222222222221104 /* TurnPipelineContractTests.swift */,
+				AA2222222222222222221105 /* ToolNormalizationTests.swift */,
 				F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */,
 				F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */,
 					F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */,
@@ -604,6 +607,7 @@
 				AA2222222222222222222102 /* TurnToolRunnerTests.swift in Sources */,
 				AA2222222222222222222103 /* SpeechCoordinatorTests.swift in Sources */,
 				AA2222222222222222222104 /* TurnPipelineContractTests.swift in Sources */,
+				AA2222222222222222222105 /* ToolNormalizationTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */,

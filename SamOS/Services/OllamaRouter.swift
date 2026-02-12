@@ -900,12 +900,17 @@ final class OllamaRouter {
     }
 
     private func isKnownToolName(_ name: String, toolNames: Set<String>) -> Bool {
-        let normalized = canonicalToolName(name)
-        guard !normalized.isEmpty else { return false }
+        let normalized = ToolRegistry.shared.normalizeToolName(name) ?? canonicalToolName(name)
+        guard !normalized.isEmpty else {
+            return false
+        }
         return toolNames.contains(normalized) || Self.planStepToolAliasAllowlist.contains(normalized)
     }
 
     private func canonicalToolName(_ value: String) -> String {
+        if let normalized = ToolRegistry.shared.normalizeToolName(value) {
+            return normalized
+        }
         let normalized = normalizeToken(value)
         let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
         switch compact {

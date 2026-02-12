@@ -10,8 +10,52 @@ protocol Tool {
 
 // MARK: - Tool Registry
 
-final class ToolRegistry {
+final class ToolRegistry: ToolNameNormalizing {
     static let shared = ToolRegistry()
+
+    /// Canonical aliases accepted from planner/model outputs.
+    /// Keys are normalized identifiers (snake_case and compact forms).
+    static let toolNameAliases: [String: String] = [
+        "weather": "get_weather",
+        "getweather": "get_weather",
+        "get_weather": "get_weather",
+
+        "time": "get_time",
+        "gettime": "get_time",
+        "get_time": "get_time",
+
+        "showtext": "show_text",
+        "show_text": "show_text",
+        "text": "show_text",
+
+        "showimage": "show_image",
+        "show_image": "show_image",
+        "image": "show_image",
+
+        "findimage": "find_image",
+        "find_image": "find_image",
+        "findvideo": "find_video",
+        "find_video": "find_video",
+        "findrecipe": "find_recipe",
+        "find_recipe": "find_recipe",
+        "findfiles": "find_files",
+        "find_files": "find_files",
+
+        "learnwebsite": "learn_website",
+        "learn_website": "learn_website",
+
+        // Kept for clean rejection when no canonical browser tool exists.
+        "web": "browse_web",
+        "browseweb": "browse_web",
+        "browse_web": "browse_web",
+
+        "enrollfacetool": "enroll_camera_face",
+        "enroll_face_tool": "enroll_camera_face",
+        "enrollface": "enroll_camera_face",
+        "enrollcameraface": "enroll_camera_face",
+        "enrolluserface": "enroll_camera_face",
+        "enrollfacerecognition": "enroll_camera_face"
+    ]
 
     private var tools: [String: Tool] = [:]
 
@@ -56,8 +100,71 @@ final class ToolRegistry {
         tools[name]
     }
 
+    /// Canonical tool names currently registered in the runtime.
+    var canonicalToolNames: [String] {
+        tools.keys.sorted()
+    }
+
+    /// Exported alias lookup table.
+    var aliases: [String: String] {
+        Self.toolNameAliases
+    }
+
+    /// Maps planner/model tool names to canonical runtime tool names.
+    /// Returns nil for unknown or unsupported tools.
+    func normalizeToolName(_ raw: String) -> String? {
+        let knownTools = Set(tools.keys)
+        for key in Self.lookupKeys(for: raw) {
+            if knownTools.contains(key) {
+                return key
+            }
+            guard let alias = Self.toolNameAliases[key] else { continue }
+            let canonical = Self.normalizedSnakeCase(alias)
+            if knownTools.contains(canonical) {
+                return canonical
+            }
+        }
+        return nil
+    }
+
+    /// Returns true when the provided tool name resolves to an allowed canonical tool.
+    func isAllowedTool(_ name: String) -> Bool {
+        normalizeToolName(name) != nil
+    }
+
     var allTools: [Tool] {
         Array(tools.values)
+    }
+
+    private static func lookupKeys(for raw: String) -> [String] {
+        let snake = normalizedSnakeCase(raw)
+        let compact = compactIdentifier(raw)
+        if compact == snake || compact.isEmpty {
+            return [snake]
+        }
+        return [snake, compact]
+    }
+
+    private static func normalizedSnakeCase(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let withSnakeBoundaries = trimmed.replacingOccurrences(
+            of: #"([a-z0-9])([A-Z])"#,
+            with: "$1_$2",
+            options: .regularExpression
+        )
+        let lowered = withSnakeBoundaries.lowercased()
+        let separated = lowered.replacingOccurrences(
+            of: #"[^a-z0-9]+"#,
+            with: "_",
+            options: .regularExpression
+        )
+        return separated.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+    }
+
+    private static func compactIdentifier(_ raw: String) -> String {
+        normalizedSnakeCase(raw)
+            .replacingOccurrences(of: "_", with: "")
     }
 }
 

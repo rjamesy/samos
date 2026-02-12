@@ -45,6 +45,21 @@ struct TurnPlanRouteRequest {
     let pendingSlot: PendingSlot?
     let reason: LLMCallReason
     let promptContext: PromptRuntimeContext?
+    let intentClassification: IntentClassification?
+
+    init(text: String,
+         history: [ChatMessage],
+         pendingSlot: PendingSlot?,
+         reason: LLMCallReason,
+         promptContext: PromptRuntimeContext?,
+         intentClassification: IntentClassification? = nil) {
+        self.text = text
+        self.history = history
+        self.pendingSlot = pendingSlot
+        self.reason = reason
+        self.promptContext = promptContext
+        self.intentClassification = intentClassification
+    }
 }
 
 struct TurnPlanRouteResponse {
@@ -175,4 +190,11 @@ struct PendingCapabilityRequest: Equatable {
     let createdAt: Date
     var lastAskedAt: Date
     var reminderCount: Int
+}
+
+protocol ToolNameNormalizing: AnyObject {
+    var canonicalToolNames: [String] { get }
+    var aliases: [String: String] { get }
+    func normalizeToolName(_ raw: String) -> String?
+    func isAllowedTool(_ name: String) -> Bool
 }

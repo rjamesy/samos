@@ -18,6 +18,25 @@ final class SpeechCoordinatorTests: XCTestCase {
         )
 
         XCTAssertEqual(selected, ["Tool answer"])
+        XCTAssertEqual(selected.count, 1)
+    }
+
+    func testToolUserFacingSelectionSpeaksExactlyOneLine() {
+        let coordinator = SpeechCoordinator()
+        let entries = [
+            SpeechLineEntry(text: "Earlier line", source: .tool),
+            SpeechLineEntry(text: "Most recent tool line", source: .tool),
+            SpeechLineEntry(text: "Prompt line", source: .prompt)
+        ]
+
+        let decision = coordinator.selectSpeechDecision(
+            entries: entries,
+            toolProducedUserFacingOutput: true,
+            maxSpeakChars: 500
+        )
+
+        XCTAssertEqual(decision.spokenLines.count, 1)
+        XCTAssertEqual(decision.spokenLines.first, "Prompt line")
     }
 
     func testSelectSpokenLinesSkipsTemplateTalkTokens() {
@@ -100,8 +119,13 @@ final class SpeechCoordinatorTests: XCTestCase {
 
         coordinator.recordSlowStart(correlationID: "turn_42")
         XCTAssertEqual(coordinator.lastSlowStartCorrelationID, "turn_42")
+        XCTAssertEqual(
+            coordinator.lastSlowStartDropReason,
+            TTSService.SpeechDropReason.ttsStartDeadline.rawValue
+        )
 
         coordinator.clearSlowStartTracking()
         XCTAssertNil(coordinator.lastSlowStartCorrelationID)
+        XCTAssertNil(coordinator.lastSlowStartDropReason)
     }
 }

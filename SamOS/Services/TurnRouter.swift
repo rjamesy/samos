@@ -5,17 +5,30 @@ final class TurnRouter: TurnRouting {
     typealias IntentClassificationHandler = @Sendable (IntentClassifierInput, Bool, Bool) async -> IntentClassificationResult
     typealias PlanRouteHandler = @Sendable (TurnPlanRouteRequest) async -> RouteDecision
     typealias NativeToolExistsHandler = @Sendable (CapabilityRequestCategory) -> Bool
+    typealias NormalizeToolNameHandler = @Sendable (String) -> String?
+    typealias IsAllowedToolHandler = @Sendable (String) -> Bool
 
     private let classifyIntentHandler: IntentClassificationHandler
     private let routePlanHandler: PlanRouteHandler
     private let nativeToolExistsHandler: NativeToolExistsHandler
+    private let normalizeToolNameHandler: NormalizeToolNameHandler
+    private let isAllowedToolHandler: IsAllowedToolHandler
+
+    private let needsWebClarifyingPrompt =
+        "What location or source should I check for that live update?"
+    private let needsWebSourcePrompt =
+        "I still need the exact URL or site for that request. Share it and I'll use it."
 
     init(classifyIntent: @escaping IntentClassificationHandler,
          routePlan: @escaping PlanRouteHandler,
-         nativeToolExists: @escaping NativeToolExistsHandler = { _ in false }) {
+         nativeToolExists: @escaping NativeToolExistsHandler = { _ in false },
+         normalizeToolName: @escaping NormalizeToolNameHandler = { _ in nil },
+         isAllowedTool: @escaping IsAllowedToolHandler = { _ in false }) {
         self.classifyIntentHandler = classifyIntent
         self.routePlanHandler = routePlan
         self.nativeToolExistsHandler = nativeToolExists
+        self.normalizeToolNameHandler = normalizeToolName
+        self.isAllowedToolHandler = isAllowedTool
     }
 
     func classifyIntent(_ input: IntentClassifierInput,
@@ -24,7 +37,37 @@ final class TurnRouter: TurnRouting {
     }
 
     func routePlan(_ request: TurnPlanRouteRequest) async -> RouteDecision {
-        await routePlanHandler(request)
+        let routed = await routePlanHandler(request)
+        let normalized = normalizedRouteDecision(routed)
+        guard let classification = request.intentClassification, classification.needsWeb else {
+            return normalized
+        }
+        guard !hasAllowedToolPlan(normalized.plan) else { return normalized }
+
+        let category = categoryForCapabilityRequest(text: request.text, classification: classification)
+        if nativeToolExistsHandler(category) {
+            return RouteDecision(
+                plan: Plan(steps: [.ask(slot: "web_query_detail", prompt: needsWebClarifyingPrompt)]),
+                provider: normalized.provider,
+                routerMs: normalized.routerMs,
+                aiModelUsed: normalized.aiModelUsed,
+                routeReason: "needs_web_clarify_missing_tool_plan",
+                planLocalWireMs: normalized.planLocalWireMs,
+                planLocalTotalMs: normalized.planLocalTotalMs,
+                planOpenAIMs: normalized.planOpenAIMs
+            )
+        }
+
+        return RouteDecision(
+            plan: Plan(steps: [.ask(slot: "source_url_or_site", prompt: needsWebSourcePrompt)]),
+            provider: normalized.provider,
+            routerMs: normalized.routerMs,
+            aiModelUsed: normalized.aiModelUsed,
+            routeReason: "needs_web_missing_tool_requires_source",
+            planLocalWireMs: normalized.planLocalWireMs,
+            planLocalTotalMs: normalized.planLocalTotalMs,
+            planOpenAIMs: normalized.planOpenAIMs
+        )
     }
 
     func evaluatePendingSlot(_ pendingSlot: PendingSlot?,
@@ -248,5 +291,40 @@ final class TurnRouter: TurnRouting {
             "time is it"
         ]
         return markers.contains { lower.contains($0) }
+    }
+
+    private func normalizedRouteDecision(_ decision: RouteDecision) -> RouteDecision {
+        var normalizedSteps: [PlanStep] = []
+        normalizedSteps.reserveCapacity(decision.plan.steps.count)
+
+        for step in decision.plan.steps {
+            switch step {
+            case .tool(let name, let args, let say):
+                let canonical = normalizeToolNameHandler(name) ?? name
+                normalizedSteps.append(.tool(name: canonical, args: args, say: say))
+            default:
+                normalizedSteps.append(step)
+            }
+        }
+
+        return RouteDecision(
+            plan: Plan(steps: normalizedSteps, say: decision.plan.say),
+            provider: decision.provider,
+            routerMs: decision.routerMs,
+            aiModelUsed: decision.aiModelUsed,
+            routeReason: decision.routeReason,
+            planLocalWireMs: decision.planLocalWireMs,
+            planLocalTotalMs: decision.planLocalTotalMs,
+            planOpenAIMs: decision.planOpenAIMs
+        )
+    }
+
+    private func hasAllowedToolPlan(_ plan: Plan) -> Bool {
+        let toolNames = plan.steps.compactMap { step -> String? in
+            guard case .tool(let name, _, _) = step else { return nil }
+            return normalizeToolNameHandler(name) ?? name
+        }
+        guard !toolNames.isEmpty else { return false }
+        return toolNames.allSatisfy { isAllowedToolHandler($0) }
     }
 }

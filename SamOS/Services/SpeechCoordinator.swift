@@ -48,6 +48,7 @@ protocol TurnSpeechCoordinating: SpeechLineSelecting {
     func clearSlowStartTracking()
     func recordSlowStart(correlationID: String)
     var lastSlowStartCorrelationID: String? { get }
+    var lastSlowStartDropReason: String? { get }
 }
 
 @MainActor
@@ -57,6 +58,7 @@ final class SpeechCoordinator: TurnSpeechCoordinating {
     private var thinkingFillerSpokenThisTurn = false
     private var thinkingFillerIndex = 0
     private(set) var lastSlowStartCorrelationID: String?
+    private(set) var lastSlowStartDropReason: String?
 
     private let thinkingFillers = [
         "One sec.",
@@ -90,10 +92,12 @@ final class SpeechCoordinator: TurnSpeechCoordinating {
 
     func clearSlowStartTracking() {
         lastSlowStartCorrelationID = nil
+        lastSlowStartDropReason = nil
     }
 
     func recordSlowStart(correlationID: String) {
         lastSlowStartCorrelationID = correlationID
+        lastSlowStartDropReason = TTSService.SpeechDropReason.ttsStartDeadline.rawValue
     }
 
     func selectSpokenLines(entries: [SpeechLineEntry],
