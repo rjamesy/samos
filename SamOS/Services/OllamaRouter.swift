@@ -12,6 +12,13 @@ enum LLMCallReason: String {
     case imageRepair
 }
 
+struct OllamaPlanTiming: Sendable, Equatable {
+    let wireMs: Int
+    let parseMs: Int
+    let totalMs: Int
+    let deadlineMs: Int?
+}
+
 enum RouterValidationFailureKind: Equatable {
     case unknownTool
 }
@@ -28,11 +35,16 @@ struct RouterValidationFailure: Error, Equatable {
 
 /// Abstraction over the Ollama HTTP API so tests can inject a fake.
 protocol OllamaTransport {
-    func chat(messages: [[String: String]], maxOutputTokens: Int?) async throws -> String
+    func chat(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> String
+}
+
+/// Optional transport capability for precise wire timing (URLSession send -> bytes received).
+protocol OllamaWireTimedTransport {
+    func chatWithWireTiming(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> (responseText: String, wireMs: Int)
 }
 
 /// Real transport that hits the Ollama /api/chat endpoint.
-struct RealOllamaTransport: OllamaTransport {
+struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
     static let inferenceOptions: [String: Any] = [
         "temperature": 0.1,
         "top_p": 0.9,
@@ -41,14 +53,21 @@ struct RealOllamaTransport: OllamaTransport {
 
     private static var didLogStartup = false
 
-    func chat(messages: [[String: String]], maxOutputTokens: Int?) async throws -> String {
+    func chat(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> String {
+        let timed = try await chatWithWireTiming(messages: messages, model: model, maxOutputTokens: maxOutputTokens)
+        return timed.responseText
+    }
+
+    func chatWithWireTiming(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> (responseText: String, wireMs: Int) {
         let endpoint = M2Settings.ollamaEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = M2Settings.ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? model!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : M2Settings.ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
         #if DEBUG
         if !Self.didLogStartup {
             Self.didLogStartup = true
-            print("[Ollama] model=\(model) endpoint=\(endpoint)")
+            print("[Ollama] model=\(resolvedModel) endpoint=\(endpoint)")
         }
         #endif
 
@@ -59,7 +78,7 @@ struct RealOllamaTransport: OllamaTransport {
         let adaptive = Self.adaptiveNumPredict(for: messages)
         let numPredict = min(1200, max(120, maxOutputTokens ?? adaptive))
         let requestBody: [String: Any] = [
-            "model": model,
+            "model": resolvedModel,
             "messages": messages,
             "stream": false,
             "format": "json",
@@ -77,8 +96,11 @@ struct RealOllamaTransport: OllamaTransport {
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let data: Data
+        let wireMs: Int
         do {
+            let wireStartedAt = CFAbsoluteTimeGetCurrent()
             let (responseData, response) = try await URLSession.shared.data(for: request)
+            wireMs = Int((CFAbsoluteTimeGetCurrent() - wireStartedAt) * 1000)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 throw OllamaRouter.OllamaError.invalidResponse
             }
@@ -101,7 +123,7 @@ struct RealOllamaTransport: OllamaTransport {
             throw OllamaRouter.OllamaError.invalidResponse
         }
 
-        return trimmed
+        return (trimmed, max(0, wireMs))
     }
 
     private static func adaptiveNumPredict(for messages: [[String: String]]) -> Int {
@@ -153,6 +175,12 @@ struct RealOllamaTransport: OllamaTransport {
 /// Falls back with an error if Ollama is unreachable.
 final class OllamaRouter {
 
+    private static let warmupLock = NSLock()
+    private static var didWarmup = false
+    #if DEBUG
+    static var debugParseDelayNanoseconds: UInt64 = 0
+    #endif
+
     // MARK: - Errors
 
     enum OllamaError: Error, LocalizedError {
@@ -161,6 +189,7 @@ final class OllamaRouter {
         case jsonParseFailed(String)
         case schemaMismatch(raw: String, reasons: [String])
         case validationFailure(RouterValidationFailure)
+        case wireDeadlineExceeded(wireMs: Int, deadlineMs: Int)
 
         var errorDescription: String? {
             switch self {
@@ -171,6 +200,8 @@ final class OllamaRouter {
                 return "LLM returned non-schema JSON: \(reasons.joined(separator: "; ")) — raw: \(raw.prefix(200))"
             case .validationFailure(let failure):
                 return "Router validation failure (\(failure.kind)): \(failure.reason)"
+            case .wireDeadlineExceeded(let wireMs, let deadlineMs):
+                return "Wire deadline exceeded (\(wireMs)ms > \(deadlineMs)ms)"
             }
         }
     }
@@ -179,6 +210,92 @@ final class OllamaRouter {
 
     init(transport: OllamaTransport = RealOllamaTransport()) {
         self.transport = transport
+    }
+
+    func warmupIfNeeded() async {
+        guard M2Settings.useOllama else { return }
+        guard Self.claimWarmupToken() else { return }
+
+        let warmupModel = M2Settings.ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let messages: [[String: String]] = [
+            ["role": "system", "content": "You are a warmup probe. Return ONLY {}."],
+            ["role": "user", "content": "Return ONLY {}"]
+        ]
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            _ = try await transport.chat(messages: messages, model: warmupModel, maxOutputTokens: 16)
+            #if DEBUG
+            let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            print("[OLLAMA_WARMUP] ok=true model=\(warmupModel) ms=\(ms)")
+            #endif
+        } catch {
+            #if DEBUG
+            let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            print("[OLLAMA_WARMUP] ok=false model=\(warmupModel) ms=\(ms) error=\(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    func classifyIntentWithTrace(_ input: IntentClassifierInput) async throws -> IntentLLMCallOutput {
+        let endpoint = M2Settings.ollamaEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Investigation override: keep local intent classification on the faster 3B model.
+        let intentModel = "qwen2.5:3b-instruct"
+        let state: [String: Any?] = [
+            "camera_running": input.cameraRunning,
+            "face_known": input.faceKnown,
+            "pending_slot": input.pendingSlot,
+            "last_assistant_line": input.lastAssistantLine
+        ]
+        let cleanedState = state.reduce(into: [String: Any]()) { partial, pair in
+            if let value = pair.value {
+                partial[pair.key] = value
+            }
+        }
+        let stateData = try JSONSerialization.data(withJSONObject: cleanedState)
+        let stateJSON = String(data: stateData, encoding: .utf8) ?? "{}"
+
+        let systemPrompt = """
+        You are an intent classification engine. The assistant is named Sam. \
+        Return ONLY one JSON object.
+        {"intent":"<INTENT>","confidence":0.0-1.0,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+        Intents:
+        greeting=hi/hello/hey/good morning (including "Hi Sam" — Sam is the assistant); \
+        recipe=cooking/food/ingredients; general_qna=static facts/trivia/explanations/how things work; \
+        automation_request=set timer/alarm/reminder, schedule, save note, cancel task, list tasks, what time; \
+        settings_command=turn on/off or enable/disable an app setting or feature; \
+        identity_response=user telling their own name ("I'm John", "My name is..."); \
+        vision_describe/vision_qa/vision_find_object=about camera/image the user sees; \
+        web_request=ONLY when answer needs live/current internet data (weather now/today, latest news, live scores, current prices); \
+        unknown=unclear/gibberish/single words.
+        Example: "what is the capital of australia" => intent=general_qna, needsWeb=false.
+        needsWeb MUST be true iff intent=web_request.
+        If uncertain: intent="unknown", confidence<0.7.
+        """
+        let userPrompt = """
+        USER_TEXT: \(input.userText)
+        STATE_JSON: \(stateJSON)
+        """
+        let messages: [[String: String]] = [
+            ["role": "system", "content": systemPrompt],
+            ["role": "user", "content": userPrompt]
+        ]
+        let raw = try await transport.chat(messages: messages, model: intentModel, maxOutputTokens: 80)
+        let prompt = """
+        [system]
+        \(systemPrompt)
+        [user]
+        \(userPrompt)
+        """
+        return IntentLLMCallOutput(
+            rawText: raw,
+            model: intentModel,
+            endpoint: "\(endpoint)/api/chat",
+            prompt: prompt
+        )
+    }
+
+    func classifyIntent(_ input: IntentClassifierInput) async throws -> String {
+        try await classifyIntentWithTrace(input).rawText
     }
 
     // MARK: - Route
@@ -190,7 +307,7 @@ final class OllamaRouter {
         var messages = buildMessages(input: input, history: history, systemPrompt: systemPrompt, pendingSlot: nil, promptContext: nil)
         appendRepairBlock(to: &messages, repairReasons: repairReasons)
 
-        let responseText = try await transport.chat(messages: messages, maxOutputTokens: nil)
+        let responseText = try await transport.chat(messages: messages, model: nil, maxOutputTokens: nil)
         print("[OllamaRouter] Raw response text: \(responseText)")
         return try parseAction(from: responseText)
     }
@@ -205,21 +322,85 @@ final class OllamaRouter {
                    repairReasons: [String]? = nil,
                    repairRawSnippet: String? = nil,
                    alarmContext: AlarmContext? = nil,
-                   promptContext: PromptRuntimeContext? = nil) async throws -> Plan {
+                   promptContext: PromptRuntimeContext? = nil,
+                   skipRepairRetry: Bool = false) async throws -> Plan {
+        let (plan, _) = try await routePlanWithTiming(
+            input,
+            history: history,
+            pendingSlot: pendingSlot,
+            repairReasons: repairReasons,
+            repairRawSnippet: repairRawSnippet,
+            alarmContext: alarmContext,
+            promptContext: promptContext,
+            skipRepairRetry: skipRepairRetry,
+            wireDeadlineMs: nil
+        )
+        return plan
+    }
+
+    func routePlanWithTiming(_ input: String, history: [ChatMessage] = [],
+                             pendingSlot: PendingSlot? = nil,
+                             repairReasons: [String]? = nil,
+                             repairRawSnippet: String? = nil,
+                             alarmContext: AlarmContext? = nil,
+                             promptContext: PromptRuntimeContext? = nil,
+                             skipRepairRetry: Bool = false,
+                             wireDeadlineMs: Int?) async throws -> (plan: Plan, timing: OllamaPlanTiming) {
+        let totalStartedAt = CFAbsoluteTimeGetCurrent()
         let systemPrompt = buildSystemPrompt(forInput: input, promptContext: promptContext)
         var messages = buildMessages(input: input, history: history, systemPrompt: systemPrompt,
                                      pendingSlot: pendingSlot, alarmContext: alarmContext, promptContext: promptContext)
         appendRepairBlock(to: &messages, repairReasons: repairReasons, rawSnippet: repairRawSnippet)
 
-        let responseText = try await transport.chat(
-            messages: messages,
-            maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
-        )
+        let responseText: String
+        let wireMs: Int
+        if let timedTransport = transport as? OllamaWireTimedTransport {
+            let timed = try await timedTransport.chatWithWireTiming(
+                messages: messages,
+                model: nil,
+                maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
+            )
+            responseText = timed.responseText
+            wireMs = timed.wireMs
+        } else {
+            let wireStartedAt = CFAbsoluteTimeGetCurrent()
+            responseText = try await transport.chat(
+                messages: messages,
+                model: nil,
+                maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
+            )
+            wireMs = Int((CFAbsoluteTimeGetCurrent() - wireStartedAt) * 1000)
+        }
+        if let wireDeadlineMs, wireMs > wireDeadlineMs {
+            throw OllamaError.wireDeadlineExceeded(wireMs: wireMs, deadlineMs: wireDeadlineMs)
+        }
+        #if DEBUG
         print("[OllamaRouter] Raw plan response: \(responseText)")
+        #endif
+
+        let parseStartedAt = CFAbsoluteTimeGetCurrent()
+        #if DEBUG
+        if Self.debugParseDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: Self.debugParseDelayNanoseconds)
+        }
+        #endif
+        let parsedPlan: Plan
+        // Fast path: skip repair retry (used by local-first routing for low latency)
+        if skipRepairRetry {
+            parsedPlan = try parsePlanOrAction(from: responseText)
+            let parseMs = Int((CFAbsoluteTimeGetCurrent() - parseStartedAt) * 1000)
+            let totalMs = Int((CFAbsoluteTimeGetCurrent() - totalStartedAt) * 1000)
+            let timing = OllamaPlanTiming(wireMs: max(0, wireMs), parseMs: max(0, parseMs), totalMs: max(0, totalMs), deadlineMs: wireDeadlineMs)
+            #if DEBUG
+            let turnID = TurnExecutionContext.turnID ?? "unknown"
+            print("[OLLAMA_PLAN_TIMING] turn_id=\(turnID) wire_ms=\(timing.wireMs) parse_ms=\(timing.parseMs) total_ms=\(timing.totalMs) deadline_ms=\(timing.deadlineMs.map(String.init) ?? "n/a")")
+            #endif
+            return (parsedPlan, timing)
+        }
 
         // Parse with repair retry for schemaMismatch OR jsonParseFailed
         do {
-            return try parsePlanOrAction(from: responseText)
+            parsedPlan = try parsePlanOrAction(from: responseText)
         } catch OllamaError.schemaMismatch(let raw, let reasons) where repairReasons == nil {
             if let failure = unknownToolValidationFailure(from: reasons, userInput: input, raw: raw) {
                 throw OllamaError.validationFailure(failure)
@@ -228,24 +409,43 @@ final class OllamaRouter {
             #if DEBUG
             print("[OllamaRouter] Schema mismatch, repair retry: \(reasons.joined(separator: "; "))")
             #endif
-            return try await routePlan(input, history: history,
-                                       pendingSlot: pendingSlot,
-                                       repairReasons: reasons,
-                                       repairRawSnippet: raw,
-                                       alarmContext: alarmContext,
-                                       promptContext: promptContext)
+            return try await routePlanWithTiming(
+                input,
+                history: history,
+                pendingSlot: pendingSlot,
+                repairReasons: reasons,
+                repairRawSnippet: raw,
+                alarmContext: alarmContext,
+                promptContext: promptContext,
+                skipRepairRetry: false,
+                wireDeadlineMs: wireDeadlineMs
+            )
         } catch OllamaError.jsonParseFailed(let raw) where repairReasons == nil {
             // First attempt returned unparseable text — retry once with repair context
             #if DEBUG
             print("[OllamaRouter] JSON parse failed, repair retry: \(raw.prefix(80))")
             #endif
-            return try await routePlan(input, history: history,
-                                       pendingSlot: pendingSlot,
-                                       repairReasons: ["Your response was not valid JSON. Output ONLY a JSON object."],
-                                       repairRawSnippet: raw,
-                                       alarmContext: alarmContext,
-                                       promptContext: promptContext)
+            return try await routePlanWithTiming(
+                input,
+                history: history,
+                pendingSlot: pendingSlot,
+                repairReasons: ["Your response was not valid JSON. Output ONLY a JSON object."],
+                repairRawSnippet: raw,
+                alarmContext: alarmContext,
+                promptContext: promptContext,
+                skipRepairRetry: false,
+                wireDeadlineMs: wireDeadlineMs
+            )
         }
+
+        let parseMs = Int((CFAbsoluteTimeGetCurrent() - parseStartedAt) * 1000)
+        let totalMs = Int((CFAbsoluteTimeGetCurrent() - totalStartedAt) * 1000)
+        let timing = OllamaPlanTiming(wireMs: max(0, wireMs), parseMs: max(0, parseMs), totalMs: max(0, totalMs), deadlineMs: wireDeadlineMs)
+        #if DEBUG
+        let turnID = TurnExecutionContext.turnID ?? "unknown"
+        print("[OLLAMA_PLAN_TIMING] turn_id=\(turnID) wire_ms=\(timing.wireMs) parse_ms=\(timing.parseMs) total_ms=\(timing.totalMs) deadline_ms=\(timing.deadlineMs.map(String.init) ?? "n/a")")
+        #endif
+        return (parsedPlan, timing)
     }
 
     // MARK: - Repair Block
@@ -404,9 +604,10 @@ final class OllamaRouter {
 
         // Schema reminder right before user message to reduce off-schema responses
         messages.append(["role": "system", "content": """
-        [REMINDER] Output ONLY a JSON object with a required "action" field. \
-        Valid actions: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP. \
-        No empty objects. No invented keys. No prose.
+        [REMINDER] Output ONLY a JSON object with "action" field. \
+        For conversation: {"action":"TALK","say":"your reply here"}. \
+        For tools: {"action":"PLAN","steps":[...]}. \
+        No empty objects. No prose outside JSON.
         """])
 
         if history.last?.role != .user || history.last?.text != input {
@@ -717,6 +918,14 @@ final class OllamaRouter {
 
     private func normalizeToken(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func claimWarmupToken() -> Bool {
+        warmupLock.lock()
+        defer { warmupLock.unlock() }
+        guard !didWarmup else { return false }
+        didWarmup = true
+        return true
     }
 
     // MARK: - JSON Parsing

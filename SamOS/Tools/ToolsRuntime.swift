@@ -5,6 +5,12 @@ import Foundation
 /// Abstraction over tool execution so tests can inject a mock.
 protocol ToolsRuntimeProtocol {
     func execute(_ toolAction: ToolAction) -> OutputItem?
+    func toolExists(_ name: String) -> Bool
+}
+
+extension ToolsRuntimeProtocol {
+    /// Default: all tools exist (mocks that don't override this will allow any tool name).
+    func toolExists(_ name: String) -> Bool { true }
 }
 
 // MARK: - Tools Runtime
@@ -16,6 +22,12 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
     private let registry = ToolRegistry.shared
 
     private init() {}
+
+    func toolExists(_ name: String) -> Bool {
+        if registry.get(name) != nil { return true }
+        if matchInstalledSkill(named: name) != nil { return true }
+        return false
+    }
 
     /// Execute a ToolAction and return the resulting OutputItem.
     /// Returns nil if the tool is not found.

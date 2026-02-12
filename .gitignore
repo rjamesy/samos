@@ -4,6 +4,9 @@
 # Vendored binaries (too large for git)
 Vendor/
 
+# Build and test data
+Build/
+
 # Archive
 SamOS.zip
 

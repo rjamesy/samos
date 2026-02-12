@@ -195,7 +195,7 @@ final class WakeWordService {
             if result == PV_STATUS_SUCCESS && keywordIndex >= 0 {
                 Task { @MainActor [weak self] in
                     // Barge-in: stop TTS at the earliest moment, before coordinator processes
-                    TTSService.shared.stopSpeaking()
+                    TTSService.shared.stopSpeaking(reason: .userInterrupt)
                     self?.onWakeWordDetected?()
                 }
             }

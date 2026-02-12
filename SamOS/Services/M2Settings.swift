@@ -24,7 +24,10 @@ enum M2Settings {
         static let personalizedGreetingsEnabled = "m3_personalizedGreetingsEnabled"
         static let useOllama = "m3_useOllama"
         static let preferLocalPlans = "m3_preferLocalPlans"
+        static let preferOpenAIPlans = "m3_preferOpenAIPlans"
+        static let disableAutoClosePrompts = "m3_disableAutoClosePrompts"
         static let localIntentTimeoutSeconds = "m3_localIntentTimeoutSeconds"
+        static let maxSpeakChars = "m3_maxSpeakChars"
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
     }
@@ -212,15 +215,35 @@ enum M2Settings {
     }
 
     static var useOllama: Bool {
-        get { defaults.bool(forKey: Key.useOllama) }
+        get {
+            if defaults.object(forKey: Key.useOllama) == nil { return true }
+            return defaults.bool(forKey: Key.useOllama)
+        }
         set { defaults.set(newValue, forKey: Key.useOllama) }
     }
 
-    /// Dev override: when true and OpenAI is configured, plan routing uses local-first order.
-    /// Default is false, which keeps plan routing OpenAI-first when a key is ready.
+    /// Legacy setting retained for backwards compatibility with older tests/config paths.
+    /// Plan routing no longer reads this value for default behavior.
     static var preferLocalPlans: Bool {
         get { defaults.bool(forKey: Key.preferLocalPlans) }
         set { defaults.set(newValue, forKey: Key.preferLocalPlans) }
+    }
+
+    /// Dev override: when true and OpenAI is configured, plan routing uses OpenAI-first order.
+    /// Default is false so plans stay Ollama-first unless explicitly overridden.
+    static var preferOpenAIPlans: Bool {
+        get { defaults.bool(forKey: Key.preferOpenAIPlans) }
+        set { defaults.set(newValue, forKey: Key.preferOpenAIPlans) }
+    }
+
+    /// When true, suppresses generic conversational soft closes (e.g. "Anything else?").
+    /// Defaults to true for transactional replies.
+    static var disableAutoClosePrompts: Bool {
+        get {
+            if defaults.object(forKey: Key.disableAutoClosePrompts) == nil { return true }
+            return defaults.bool(forKey: Key.disableAutoClosePrompts)
+        }
+        set { defaults.set(newValue, forKey: Key.disableAutoClosePrompts) }
     }
 
     /// Timeout budget for local intent classification, in seconds.
@@ -234,13 +257,24 @@ enum M2Settings {
         set { defaults.set(max(0.1, newValue), forKey: Key.localIntentTimeoutSeconds) }
     }
 
+    /// Maximum characters spoken per turn when speech policy condenses tool-heavy responses.
+    /// Defaults to 320 and is clamped to a safe 120...600 range.
+    static var maxSpeakChars: Int {
+        get {
+            guard defaults.object(forKey: Key.maxSpeakChars) != nil else { return 320 }
+            let value = defaults.integer(forKey: Key.maxSpeakChars)
+            return min(600, max(120, value))
+        }
+        set { defaults.set(min(600, max(120, newValue)), forKey: Key.maxSpeakChars) }
+    }
+
     static var ollamaEndpoint: String {
         get { defaults.string(forKey: Key.ollamaEndpoint) ?? "http://127.0.0.1:11434" }
         set { defaults.set(newValue, forKey: Key.ollamaEndpoint) }
     }
 
     static var ollamaModel: String {
-        get { defaults.string(forKey: Key.ollamaModel) ?? "qwen2.5:7b-instruct" }
+        get { defaults.string(forKey: Key.ollamaModel) ?? "qwen2.5:3b-instruct" }
         set { defaults.set(newValue, forKey: Key.ollamaModel) }
     }
 

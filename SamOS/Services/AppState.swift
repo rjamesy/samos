@@ -51,18 +51,33 @@ enum InputClassifier {
 /// Central observable state for the app.
 @MainActor
 final class AppState: ObservableObject {
+    private enum TurnSpeechPhase: String {
+        case idle
+        case routing
+        case speechReady
+        case speaking
+    }
+
     typealias ThinkingFillerSpeaker = (String) -> Void
     private struct TurnLatencyTrace {
         let id: Int
+        let turnID: String
         let inputMode: String
         let userChars: Int
         var routerMs: Int?
+        var intentLocalMs: Int?
+        var intentOpenAIMs: Int?
+        var planLocalWireMs: Int?
+        var planLocalTotalMs: Int?
+        var planOpenAIMs: Int?
+        var toolMsTotal: Int?
         var captureStartedAt: Date?
         var transcribeStartedAt: Date?
         var transcriptReadyAt: Date?
         var routeStartedAt: Date
         var routeFinishedAt: Date?
         var applyFinishedAt: Date?
+        var speechEnqueuedAt: Date?
         var ttsStartedAt: Date?
         var ttsFinishedAt: Date?
         var expectsTTS: Bool
@@ -126,6 +141,18 @@ final class AppState: ObservableObject {
     private var turnLatencyTrace: TurnLatencyTrace?
     private var turnLatencyTraceSequence: Int = 0
     private var turnLatencyFinalizeTask: Task<Void, Never>?
+    private var speechStartMonitorTask: Task<Void, Never>?
+    private var activeSpeechCorrelationID: String?
+    private var activeSpeechRetryAttempt: Int = 0
+    private var activeSpeechStartedAt: Date?
+    private var lastSpeechDropReason: String?
+    private var lastSpeechSlowStartCorrelationID: String?
+    private var activeTurnID: String?
+    private var turnSpeechPhase: TurnSpeechPhase = .idle
+    private var turnSequence: Int = 0
+    private let ttsStartDeadlineSeconds: Double
+    private let ttsTotalDeadlineSeconds: Double
+    private let enforceStrictTurnSpeechPhases: Bool
 
     /// Tracks whether listening was active before Settings was opened, to auto-resume on close.
     private(set) var wasListeningBeforeSettings = false
@@ -159,6 +186,9 @@ final class AppState: ObservableObject {
         self.questionAutoListenNoSpeechTimeoutMs = 3500
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.ttsStartDeadlineSeconds = 1.6
+        self.ttsTotalDeadlineSeconds = 45.0
+        self.enforceStrictTurnSpeechPhases = true
         self.thinkingFillerSpeaker = { phrase in
             TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
         }
@@ -174,6 +204,9 @@ final class AppState: ObservableObject {
          memoryAutoSaveService: MemoryAutoSaveService? = nil,
          thinkingFillerDelay: TimeInterval = 2.0,
          questionAutoListenNoSpeechTimeoutMs: Int = 3500,
+         ttsStartDeadlineSeconds: Double = 1.6,
+         ttsTotalDeadlineSeconds: Double = 45.0,
+         enforceStrictTurnSpeechPhases: Bool? = nil,
          thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
              Task { @MainActor in
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
@@ -188,6 +221,9 @@ final class AppState: ObservableObject {
         self.questionAutoListenNoSpeechTimeoutMs = max(100, questionAutoListenNoSpeechTimeoutMs)
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
+        self.ttsTotalDeadlineSeconds = max(self.ttsStartDeadlineSeconds, ttsTotalDeadlineSeconds)
+        self.enforceStrictTurnSpeechPhases = enforceStrictTurnSpeechPhases ?? enableRuntimeServices
         self.thinkingFillerSpeaker = thinkingFillerSpeaker
         configureRuntimeServicesIfNeeded(enableRuntimeServices)
         refreshWebsiteLearningDebug()
@@ -200,6 +236,9 @@ final class AppState: ObservableObject {
          memoryAutoSaveService: MemoryAutoSaveService? = nil,
          thinkingFillerDelay: TimeInterval = 2.0,
          questionAutoListenNoSpeechTimeoutMs: Int = 3500,
+         ttsStartDeadlineSeconds: Double = 1.6,
+         ttsTotalDeadlineSeconds: Double = 45.0,
+         enforceStrictTurnSpeechPhases: Bool? = nil,
          thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
              Task { @MainActor in
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
@@ -214,12 +253,63 @@ final class AppState: ObservableObject {
         self.questionAutoListenNoSpeechTimeoutMs = max(100, questionAutoListenNoSpeechTimeoutMs)
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
+        self.ttsTotalDeadlineSeconds = max(self.ttsStartDeadlineSeconds, ttsTotalDeadlineSeconds)
+        self.enforceStrictTurnSpeechPhases = enforceStrictTurnSpeechPhases ?? enableRuntimeServices
         self.thinkingFillerSpeaker = thinkingFillerSpeaker
         configureRuntimeServicesIfNeeded(enableRuntimeServices)
         refreshWebsiteLearningDebug()
         refreshAutonomousLearningDebug()
         refreshCameraDebug()
         maybeRunLiveVisionScriptIfRequested()
+    }
+
+    convenience init(orchestrator: TurnOrchestrating,
+                     voicePipeline: VoicePipelineCoordinating,
+                     memoryAutoSaveService: MemoryAutoSaveService? = nil,
+                     thinkingFillerDelay: TimeInterval = 2.0,
+                     questionAutoListenNoSpeechTimeoutMs: Int = 3500,
+                     thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
+                         Task { @MainActor in
+                             TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
+                         }
+                     },
+                     enableRuntimeServices: Bool = true) {
+        self.init(
+            orchestrator: orchestrator,
+            voicePipeline: voicePipeline,
+            memoryAutoSaveService: memoryAutoSaveService,
+            thinkingFillerDelay: thinkingFillerDelay,
+            questionAutoListenNoSpeechTimeoutMs: questionAutoListenNoSpeechTimeoutMs,
+            ttsStartDeadlineSeconds: 1.6,
+            ttsTotalDeadlineSeconds: 45.0,
+            enforceStrictTurnSpeechPhases: nil,
+            thinkingFillerSpeaker: thinkingFillerSpeaker,
+            enableRuntimeServices: enableRuntimeServices
+        )
+    }
+
+    convenience init(orchestrator: TurnOrchestrating,
+                     memoryAutoSaveService: MemoryAutoSaveService? = nil,
+                     thinkingFillerDelay: TimeInterval = 2.0,
+                     questionAutoListenNoSpeechTimeoutMs: Int = 3500,
+                     thinkingFillerSpeaker: @escaping ThinkingFillerSpeaker = { phrase in
+                         Task { @MainActor in
+                             TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
+                         }
+                     },
+                     enableRuntimeServices: Bool = true) {
+        self.init(
+            orchestrator: orchestrator,
+            memoryAutoSaveService: memoryAutoSaveService,
+            thinkingFillerDelay: thinkingFillerDelay,
+            questionAutoListenNoSpeechTimeoutMs: questionAutoListenNoSpeechTimeoutMs,
+            ttsStartDeadlineSeconds: 1.6,
+            ttsTotalDeadlineSeconds: 45.0,
+            enforceStrictTurnSpeechPhases: nil,
+            thinkingFillerSpeaker: thinkingFillerSpeaker,
+            enableRuntimeServices: enableRuntimeServices
+        )
     }
 
     private func configureRuntimeServicesIfNeeded(_ enabled: Bool) {
@@ -242,6 +332,7 @@ final class AppState: ObservableObject {
         setupForgeQueueObservation()
         setupAutonomousLearningObservation()
         setupCameraVision()
+        scheduleOllamaWarmupIfNeeded()
 
         // Auto-start listening if user previously enabled it and mic is authorized
         if Self.userWantsListeningEnabled
@@ -252,6 +343,16 @@ final class AppState: ObservableObject {
 
         if Self.userWantsCameraEnabled && CameraPermission.currentStatus == .granted {
             startCamera(requestPermission: false)
+        }
+    }
+
+    private func scheduleOllamaWarmupIfNeeded() {
+        guard M2Settings.useOllama else { return }
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return
+        }
+        Task.detached(priority: .utility) {
+            await OllamaRouter().warmupIfNeeded()
         }
     }
 
@@ -311,8 +412,39 @@ final class AppState: ObservableObject {
             for await isSpeaking in TTSService.shared.$isSpeaking.values {
                 guard let self else { return }
                 if isSpeaking {
+                    self.voicePipeline.suspendForTTS()
+                    self.activeSpeechStartedAt = Date()
+                    if self.enforceStrictTurnSpeechPhases,
+                       let turnID = self.activeTurnID,
+                       self.activeSpeechCorrelationID == turnID,
+                       self.turnSpeechPhase == .routing {
+                        #if DEBUG
+                        print("[TURN_PHASE_VIOLATION] turn_id=\(turnID) detail=no_tts_before_route_plan_resolved")
+                        #endif
+                    }
+                    if self.activeSpeechCorrelationID == self.activeTurnID {
+                        self.turnSpeechPhase = .speaking
+                    }
+                    #if DEBUG
+                    let correlationID = self.activeSpeechCorrelationID ?? "unknown"
+                    print("[TTS_START] correlation_id=\(correlationID) retry_attempt=\(self.activeSpeechRetryAttempt)")
+                    #endif
                     self.markTurnTTSStartedIfNeeded()
                 } else {
+                    self.voicePipeline.resumeAfterTTSIfNeeded()
+                    #if DEBUG
+                    let correlationID = self.activeSpeechCorrelationID ?? "unknown"
+                    if let startedAt = self.activeSpeechStartedAt {
+                        let ms = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+                        print("[TTS_END] correlation_id=\(correlationID) tts_ms=\(ms)")
+                    } else {
+                        print("[TTS_END] correlation_id=\(correlationID) tts_ms=unknown")
+                    }
+                    #endif
+                    self.activeSpeechStartedAt = nil
+                    if self.activeSpeechCorrelationID == self.activeTurnID {
+                        self.turnSpeechPhase = .idle
+                    }
                     self.markTurnTTSFinishedIfNeeded()
                 }
                 if isSpeaking {
@@ -397,6 +529,16 @@ final class AppState: ObservableObject {
 
     func stopListening() {
         voicePipeline.stopListening()
+        speechStartMonitorTask?.cancel()
+        speechStartMonitorTask = nil
+        activeSpeechCorrelationID = nil
+        activeSpeechRetryAttempt = 0
+        activeSpeechStartedAt = nil
+        activeTurnID = nil
+        turnSpeechPhase = .idle
+        Task {
+            await AudioCoordinator.shared.clearTTSPending(owner: nil)
+        }
         isListeningEnabled = false
         Self.userWantsListeningEnabled = false
         awaitingUserReply = false
@@ -524,12 +666,19 @@ final class AppState: ObservableObject {
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let turnID = nextTurnID()
+        activeTurnID = turnID
+        turnSpeechPhase = .routing
+        #if DEBUG
+        print("[TURN_PHASE] turn_id=\(turnID) phase=routing")
+        #endif
         let existingTurnStart = activeTurnLatencyStartAt
         let turnStart = existingTurnStart ?? Date()
         activeTurnLatencyStartAt = turnStart
         let userLatencyMs = Self.elapsedMs(since: turnStart)
         let preserveThinkingIndicator = existingTurnStart != nil && isThinkingIndicatorVisible
         beginTurnLatencyTrace(
+            turnID: turnID,
             userText: trimmed,
             inputMode: existingTurnStart != nil ? "voice" : "text"
         )
@@ -541,6 +690,7 @@ final class AppState: ObservableObject {
 
         awaitingUserReply = false
         awaitingQuestionAutoListen = false
+        speechStartMonitorTask?.cancel()
         thinkingFillerSpokenThisTurn = false
         cancelThinkingFiller()
         if !preserveThinkingIndicator {
@@ -573,7 +723,10 @@ final class AppState: ObservableObject {
             sttMs: intentAudioTimings.sttMs
         )
         Task(priority: .userInitiated) {
-            let result = await orchestrator.processTurn(trimmed, history: chatMessages, inputMode: turnInputMode)
+            let result = await TurnExecutionContext.$turnID.withValue(turnID) {
+                await orchestrator.processTurn(trimmed, history: chatMessages, inputMode: turnInputMode)
+            }
+            self.markTurnSpeechReady(turnID: turnID)
             markTurnRouteFinished(
                 provider: result.llmProvider,
                 toolSteps: result.executedToolSteps.count,
@@ -581,7 +734,7 @@ final class AppState: ObservableObject {
             )
             cancelThinkingFiller()
             clearThinkingFeedback()
-            applyResult(result)
+            applyResult(result, turnID: turnID)
             let assistantMessage = result.appendedChat.last(where: { $0.role == .assistant })?.text
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -604,7 +757,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Apply Orchestrator Result
 
-    private func applyResult(_ result: TurnResult) {
+    private func applyResult(_ result: TurnResult, turnID: String) {
         var appendedChat = result.appendedChat
         let assistantLatencyMs = activeTurnLatencyStartAt.map { Self.elapsedMs(since: $0) }
         #if DEBUG
@@ -642,8 +795,31 @@ final class AppState: ObservableObject {
             )
         }
         pendingSlot = orchestrator.pendingSlot
+        if var trace = turnLatencyTrace {
+            trace.intentLocalMs = result.intentRouterMsLocal
+            trace.intentOpenAIMs = result.intentRouterMsOpenAI
+            trace.planLocalWireMs = result.planLocalWireMs
+            trace.planLocalTotalMs = result.planLocalTotalMs
+            trace.planOpenAIMs = result.planOpenAIMs
+            trace.toolMsTotal = result.toolMsTotal
+            turnLatencyTrace = trace
+        }
 
-        TTSService.shared.enqueue(result.spokenLines)
+        #if DEBUG
+        print("[INTENT_PROVIDER] provider=\(result.intentProviderSelected.rawValue)")
+        print("[PLAN_PROVIDER] provider=\(result.planProviderSelected.rawValue)")
+        #endif
+        enqueueSpeech(result.spokenLines, correlationID: turnID)
+        #if DEBUG
+        let openAICalls = OpenAICallTracker.shared.summary(for: turnID)
+        let reasons = openAICalls.reasons.joined(separator: ",")
+        print("[OPENAI_CALLS] turn_id=\(turnID) count=\(openAICalls.count) reasons=[\(reasons)]")
+        if result.planProviderSelected == .ollama, openAICalls.count > 0 {
+            let callers = openAICalls.callers.joined(separator: ",")
+            print("[OPENAI_CALLS_ERROR] turn_id=\(turnID) plan_provider=ollama count=\(openAICalls.count) callers=[\(callers)]")
+        }
+        OpenAICallTracker.shared.clear(turnID: turnID)
+        #endif
 
         let finalAssistantText = appendedChat.last(where: { $0.role == .assistant })?.text
         finalizeTurnLatencyTraceIfReady(
@@ -664,7 +840,79 @@ final class AppState: ObservableObject {
         activeTurnLatencyStartAt = nil
     }
 
-    private func beginTurnLatencyTrace(userText: String, inputMode: String) {
+    private func enqueueSpeech(_ lines: [String], correlationID: String) {
+        let speakable = lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !speakable.isEmpty else {
+            if correlationID == activeTurnID {
+                turnSpeechPhase = .idle
+            }
+            return
+        }
+
+        if enforceStrictTurnSpeechPhases,
+           correlationID == activeTurnID,
+           turnSpeechPhase == .routing {
+            #if DEBUG
+            print("[TURN_PHASE_VIOLATION] turn_id=\(correlationID) detail=speech_enqueued_before_route_plan_resolved")
+            #endif
+            return
+        }
+
+        speechStartMonitorTask?.cancel()
+        activeSpeechCorrelationID = correlationID
+        activeSpeechRetryAttempt = 0
+        if var trace = turnLatencyTrace, trace.turnID == correlationID {
+            trace.speechEnqueuedAt = Date()
+            turnLatencyTrace = trace
+        }
+        TTSService.shared.clearLastDropReason()
+        lastSpeechDropReason = nil
+        lastSpeechSlowStartCorrelationID = nil
+        logSpeechEnqueue(lines: speakable, correlationID: correlationID, retryAttempt: 0)
+        Task {
+            await AudioCoordinator.shared.setTTSPending(owner: correlationID)
+        }
+        TTSService.shared.enqueue(speakable, correlationID: correlationID)
+
+        speechStartMonitorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let started = await self.waitForSpeechStart(timeoutSeconds: self.ttsStartDeadlineSeconds)
+            guard !started else { return }
+            self.lastSpeechSlowStartCorrelationID = correlationID
+            #if DEBUG
+            let deadlineMs = Int(self.ttsStartDeadlineSeconds * 1000)
+            print("[TTS_SLOW_START] correlation_id=\(correlationID) tts_start_deadline_ms=\(deadlineMs)")
+            #endif
+        }
+    }
+
+    private func waitForSpeechStart(timeoutSeconds: Double) async -> Bool {
+        if TTSService.shared.isSpeaking || activeSpeechStartedAt != nil {
+            return true
+        }
+        let deadline = Date().addingTimeInterval(max(0.2, timeoutSeconds))
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            if Task.isCancelled { return false }
+            if TTSService.shared.isSpeaking || activeSpeechStartedAt != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func logSpeechEnqueue(lines: [String], correlationID: String, retryAttempt: Int) {
+        #if DEBUG
+        for line in lines {
+            let preview = String(line.prefix(80)).replacingOccurrences(of: "\n", with: " ")
+            print("[SPEECH_ENQUEUE] correlation_id=\(correlationID) retry_attempt=\(retryAttempt) chars=\(line.count) preview=\"\(preview)\"")
+        }
+        #endif
+    }
+
+    private func beginTurnLatencyTrace(turnID: String, userText: String, inputMode: String) {
         if turnLatencyTrace != nil {
             finalizeTurnLatencyTrace(reason: "replaced_by_new_turn")
         }
@@ -672,15 +920,23 @@ final class AppState: ObservableObject {
         turnLatencyTraceSequence += 1
         turnLatencyTrace = TurnLatencyTrace(
             id: turnLatencyTraceSequence,
+            turnID: turnID,
             inputMode: inputMode,
             userChars: userText.count,
             routerMs: nil,
+            intentLocalMs: nil,
+            intentOpenAIMs: nil,
+            planLocalWireMs: nil,
+            planLocalTotalMs: nil,
+            planOpenAIMs: nil,
+            toolMsTotal: nil,
             captureStartedAt: pendingCaptureStartedAt,
             transcribeStartedAt: pendingTranscribeStartedAt,
             transcriptReadyAt: pendingTranscriptReadyAt,
             routeStartedAt: Date(),
             routeFinishedAt: nil,
             applyFinishedAt: nil,
+            speechEnqueuedAt: nil,
             ttsStartedAt: nil,
             ttsFinishedAt: nil,
             expectsTTS: false,
@@ -954,10 +1210,16 @@ final class AppState: ObservableObject {
         if expectsTTS {
             turnLatencyFinalizeTask?.cancel()
             turnLatencyFinalizeTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                let seconds = self?.ttsTotalDeadlineSeconds ?? 45.0
+                let timeoutNs = UInt64(max(1.0, seconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: timeoutNs)
                 guard let self else { return }
                 guard let pending = self.turnLatencyTrace, pending.id == trace.id, pending.expectsTTS else { return }
-                self.finalizeTurnLatencyTrace(reason: "tts_timeout")
+                #if DEBUG
+                let correlationID = self.activeSpeechCorrelationID ?? "unknown"
+                print("[TTS_SLOW_FINISH] correlation_id=\(correlationID) tts_total_deadline_ms=\(Int(self.ttsTotalDeadlineSeconds * 1000))")
+                #endif
+                self.finalizeTurnLatencyTrace(reason: "tts_total_deadline_exceeded")
             }
             return
         }
@@ -1000,14 +1262,26 @@ final class AppState: ObservableObject {
         let sttMs = ms(trace.transcribeStartedAt, trace.transcriptReadyAt)
         let orchestratorMs = ms(trace.routeStartedAt, trace.routeFinishedAt)
         let applyMs = ms(trace.routeFinishedAt, trace.applyFinishedAt)
-        let ttsQueueWaitMs = ms(trace.applyFinishedAt, trace.ttsStartedAt)
+        let snapshot = TTSService.shared.timingSnapshot(for: trace.turnID)
+        let ttsQueueWaitMs = snapshot?.queueWaitMs ?? ms(trace.speechEnqueuedAt, trace.ttsStartedAt)
+        let ttsSynthesisMs = snapshot?.synthesisMs
+        let ttsPlaybackStartMs = snapshot?.playbackStartMs ?? ms(trace.speechEnqueuedAt, trace.ttsStartedAt)
         let ttsMs = ms(trace.ttsStartedAt, trace.ttsFinishedAt)
         let end = trace.ttsFinishedAt ?? trace.applyFinishedAt ?? trace.routeFinishedAt
-        let start = trace.transcribeStartedAt ?? trace.routeStartedAt
+        let start = trace.transcriptReadyAt ?? trace.routeStartedAt
         let totalMs = ms(start, end)
+        let playbackStartedAt: Date? = {
+            if let enqueueAt = trace.speechEnqueuedAt,
+               let playbackStartMs = ttsPlaybackStartMs {
+                return enqueueAt.addingTimeInterval(Double(playbackStartMs) / 1000.0)
+            }
+            return trace.ttsStartedAt
+        }()
+        let firstAudioMs = ms(start, playbackStartedAt)
 
         let routerMs = trace.routerMs.map(String.init) ?? "n/a"
         print("[LatencyBreakdown] turn=\(trace.id) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) router_ms=\(routerMs) orchestrator_ms=\(str(orchestratorMs)) apply_ms=\(str(applyMs)) tts_wait_ms=\(str(ttsQueueWaitMs)) tts_ms=\(str(ttsMs)) total_ms=\(str(totalMs)) provider=\(trace.provider.rawValue) tool_steps=\(trace.toolSteps) user_chars=\(trace.userChars) assistant_chars=\(trace.assistantChars) reason=\(reason)")
+        print("[PERF_TURN] turn_id=\(trace.turnID) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) intent_local_ms=\(str(trace.intentLocalMs)) intent_openai_ms=\(str(trace.intentOpenAIMs)) plan_local_wire_ms=\(str(trace.planLocalWireMs)) plan_local_total_ms=\(str(trace.planLocalTotalMs)) plan_openai_ms=\(str(trace.planOpenAIMs)) tool_ms_total=\(str(trace.toolMsTotal)) tts_queue_wait_ms=\(str(ttsQueueWaitMs)) tts_synthesis_ms=\(str(ttsSynthesisMs)) tts_playback_start_ms=\(str(ttsPlaybackStartMs)) first_audio_ms=\(str(firstAudioMs)) total_ms=\(str(totalMs))")
         #endif
     }
 
@@ -1044,6 +1318,19 @@ final class AppState: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    private func nextTurnID() -> String {
+        turnSequence += 1
+        return "turn_\(turnSequence)"
+    }
+
+    private func markTurnSpeechReady(turnID: String) {
+        guard activeTurnID == turnID else { return }
+        turnSpeechPhase = .speechReady
+        #if DEBUG
+        print("[TURN_PHASE] turn_id=\(turnID) phase=speech_ready route_plan_execute_done=true speech_policy_selected=true")
+        #endif
+    }
+
     // MARK: - Thinking Filler
 
     private func startThinkingFillerTimer(baseChatCount: Int, baseOutputCount: Int) {
@@ -1075,6 +1362,14 @@ final class AppState: ObservableObject {
         guard !thinkingFillerSpokenThisTurn else { return }
         guard !TTSService.shared.isSpeaking else { return }
         guard status != .capturing else { return }
+        if enforceStrictTurnSpeechPhases && turnSpeechPhase == .routing {
+            #if DEBUG
+            if let turnID = activeTurnID {
+                print("[TURN_PHASE] turn_id=\(turnID) filler_suppressed_until_route_plan_resolved=true")
+            }
+            #endif
+            return
+        }
 
         thinkingFillerSpokenThisTurn = true
         thinkingFillerSpeaker(nextThinkingFillerUtterance())
@@ -1094,7 +1389,7 @@ final class AppState: ObservableObject {
         isMuted.toggle()
         ElevenLabsSettings.isMuted = isMuted
         if isMuted {
-            TTSService.shared.stopSpeaking()
+            TTSService.shared.stopSpeaking(reason: .explicitCancel)
         }
     }
 
@@ -1160,7 +1455,7 @@ final class AppState: ObservableObject {
         alarmSession.dismiss()
         followUpExpiryTask?.cancel()
         followUpExpiryTask = nil
-        TTSService.shared.stopSpeaking()
+        TTSService.shared.stopSpeaking(reason: .explicitCancel)
     }
 
     // MARK: - SkillForge Queue Observation
@@ -1419,6 +1714,22 @@ final class AppState: ObservableObject {
 
     func debugSanitizedVoiceTranscript(_ text: String) -> String? {
         sanitizedVoiceTranscript(text)
+    }
+
+    func debugLastSpeechDropReason() -> String? {
+        lastSpeechDropReason ?? TTSService.shared.lastDropReasonRawValue
+    }
+
+    func debugLastSpeechSlowStartCorrelationID() -> String? {
+        lastSpeechSlowStartCorrelationID
+    }
+
+    func debugActiveTurnID() -> String? {
+        activeTurnID
+    }
+
+    func debugTurnSpeechPhase() -> String {
+        turnSpeechPhase.rawValue
     }
     #endif
 

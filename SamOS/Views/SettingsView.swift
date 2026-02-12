@@ -39,6 +39,8 @@ struct SettingsView: View {
     @State private var useOllama: Bool = M2Settings.useOllama
     @State private var ollamaEndpoint: String = M2Settings.ollamaEndpoint
     @State private var ollamaModel: String = M2Settings.ollamaModel
+    @State private var preferOpenAIPlans: Bool = M2Settings.preferOpenAIPlans
+    @State private var disableAutoClosePrompts: Bool = M2Settings.disableAutoClosePrompts
 
     // Tone learning
     @State private var toneProfile: TonePreferenceProfile = TonePreferenceStore.shared.loadProfile()
@@ -343,6 +345,16 @@ struct SettingsView: View {
                 .disabled(!useOllama)
                 .onChange(of: ollamaModel) { _, newValue in
                     M2Settings.ollamaModel = newValue
+                }
+
+            Toggle("Prefer OpenAI plans (dev override)", isOn: $preferOpenAIPlans)
+                .onChange(of: preferOpenAIPlans) { _, newValue in
+                    M2Settings.preferOpenAIPlans = newValue
+                }
+
+            Toggle("Disable auto-close prompts", isOn: $disableAutoClosePrompts)
+                .onChange(of: disableAutoClosePrompts) { _, newValue in
+                    M2Settings.disableAutoClosePrompts = newValue
                 }
 
             LabeledContent("Status") {

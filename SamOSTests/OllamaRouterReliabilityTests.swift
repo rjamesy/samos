@@ -242,14 +242,14 @@ final class ActionValidatorTimeQueryTests: XCTestCase {
 final class OllamaModelConfigTests: XCTestCase {
 
     func testDefaultModelIsQwen() {
-        // If user hasn't overridden via UserDefaults, the default should be qwen2.5:7b-instruct
+        // If user hasn't overridden via UserDefaults, the default should be qwen2.5:3b-instruct
         let defaults = UserDefaults.standard
         let key = "m3_ollamaModel"
         let saved = defaults.string(forKey: key)
         defaults.removeObject(forKey: key)
         defer { if let saved { defaults.set(saved, forKey: key) } }
 
-        XCTAssertEqual(M2Settings.ollamaModel, "qwen2.5:7b-instruct")
+        XCTAssertEqual(M2Settings.ollamaModel, "qwen2.5:3b-instruct")
     }
 
     func testInferenceOptionsPresent() {

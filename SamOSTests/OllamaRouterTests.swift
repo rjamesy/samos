@@ -612,7 +612,8 @@ final class FakeTransport: OllamaTransport {
         self.responses = responses
     }
 
-    func chat(messages: [[String: String]], maxOutputTokens: Int?) async throws -> String {
+    func chat(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> String {
+        _ = model
         chatCallLog.append(messages)
         guard callCount < responses.count else {
             throw OllamaRouter.OllamaError.unreachable("FakeTransport: no more responses")
@@ -899,6 +900,20 @@ final class MockToolsRuntime: ToolsRuntimeProtocol {
     }
 }
 
+final class DeterministicTimeToolsRuntime: ToolsRuntimeProtocol {
+    private(set) var executedActions: [ToolAction] = []
+
+    func toolExists(_ name: String) -> Bool {
+        name == "get_time"
+    }
+
+    func execute(_ toolAction: ToolAction) -> OutputItem? {
+        executedActions.append(toolAction)
+        guard toolAction.name == "get_time" else { return nil }
+        return OutputItem(kind: .markdown, payload: "London: 10:15 AM")
+    }
+}
+
 // MARK: - PlanExecutor Forge Tool Execution Tests
 
 @MainActor
@@ -1047,6 +1062,64 @@ final class PlanExecutorForgeExecutionTests: XCTestCase {
     }
 }
 
+// MARK: - PlanExecutor Unknown Tool Gate Tests
+
+final class UnknownToolGateRuntime: ToolsRuntimeProtocol {
+    private let knownTools: Set<String>
+    private(set) var executedActions: [ToolAction] = []
+
+    init(knownTools: Set<String>) {
+        self.knownTools = knownTools
+    }
+
+    func toolExists(_ name: String) -> Bool {
+        knownTools.contains(name)
+    }
+
+    func execute(_ toolAction: ToolAction) -> OutputItem? {
+        executedActions.append(toolAction)
+        return OutputItem(kind: .markdown, payload: "{\"spoken\":\"result\",\"formatted\":\"result\"}")
+    }
+}
+
+@MainActor
+final class PlanExecutorUnknownToolGateTests: XCTestCase {
+
+    func testUnknownToolNeverExecutes() async {
+        let runtime = UnknownToolGateRuntime(knownTools: ["get_time", "show_text"])
+        let executor = PlanExecutor(toolsRuntime: runtime)
+        let plan = Plan(steps: [
+            .tool(name: "time_in_london", args: [:], say: "Checking...")
+        ])
+        let result = await executor.execute(plan, originalInput: "time in london")
+
+        // Unknown tool should NOT be in executedActions (the runtime execute should never be called)
+        let executedToolNames = runtime.executedActions.map(\.name)
+        XCTAssertFalse(executedToolNames.contains("time_in_london"),
+                       "Unknown tool 'time_in_london' must never execute")
+        // Should route to capability gap
+        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "capability_gap" }),
+                      "Unknown tool should route to capability gap")
+        XCTAssertTrue(result.chatMessages.contains(where: { $0.text.contains("don't have") }),
+                      "Should inform user about missing tool")
+    }
+
+    func testKnownToolExecutesNormally() async {
+        let runtime = UnknownToolGateRuntime(knownTools: ["get_time", "show_text"])
+        let executor = PlanExecutor(toolsRuntime: runtime)
+        let plan = Plan(steps: [
+            .tool(name: "get_time", args: ["place": .string("London")], say: "Checking...")
+        ])
+        let result = await executor.execute(plan, originalInput: "time in london")
+
+        let executedToolNames = runtime.executedActions.map(\.name)
+        XCTAssertTrue(executedToolNames.contains("get_time"),
+                      "Known tool should execute normally")
+        XCTAssertFalse(result.executedToolSteps.contains(where: { $0.name == "capability_gap" }),
+                       "Known tool should not route to capability gap")
+    }
+}
+
 // MARK: - PlanExecutor Structured Payload Speech Priority Tests
 
 @MainActor
@@ -1083,8 +1156,8 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
         )
         let result = await executor.execute(plan, originalInput: "time in sydney")
 
-        XCTAssertEqual(result.spokenLines, ["I'll check that."])
-        XCTAssertEqual(result.chatMessages.map(\.text), ["I'll check that."])
+        XCTAssertEqual(result.spokenLines, ["mock result"], "Speak-one-thing should prioritize tool output")
+        XCTAssertEqual(result.chatMessages.map(\.text), ["I'll check that.", "mock result"])
         XCTAssertEqual(result.outputItems.count, 1, "Tool output should still be shown on canvas")
     }
 
@@ -1101,5 +1174,60 @@ final class PlanExecutorSpeechPriorityTests: XCTestCase {
                        "Without step say, structured spoken should be used")
         XCTAssertEqual(result.chatMessages.first?.text, "mock result")
         XCTAssertEqual(result.outputItems.first?.kind, .markdown)
+    }
+
+    func testTimeInLondonToolIsSpoken_NoFiller() async {
+        let runtime = DeterministicTimeToolsRuntime()
+        let executor = PlanExecutor(toolsRuntime: runtime)
+        let plan = Plan(steps: [
+            .tool(name: "get_time", args: ["location": .string("London")], say: nil)
+        ])
+
+        let result = await executor.execute(plan, originalInput: "What's the time in London?")
+
+        XCTAssertEqual(runtime.executedActions.count, 1, "Expected get_time tool to run once")
+        XCTAssertEqual(runtime.executedActions.first?.name, "get_time")
+        XCTAssertEqual(runtime.executedActions.first?.args["location"], "London")
+
+        let chatJoined = result.chatMessages.map(\.text).joined(separator: " ").lowercased()
+        XCTAssertTrue(chatJoined.contains("london"))
+        XCTAssertTrue(chatJoined.contains("10:15"))
+
+        let spokenJoined = result.spokenLines.joined(separator: " ").lowercased()
+        XCTAssertTrue(spokenJoined.contains("london"))
+        XCTAssertTrue(spokenJoined.contains("10:15"))
+        XCTAssertFalse(spokenJoined.contains("anything else"))
+        XCTAssertFalse(spokenJoined.contains("let me know if"))
+        XCTAssertFalse(spokenJoined.contains("how else can i help"))
+    }
+
+    func testSpeakOneThing_ToolAndTalk() async {
+        let (executor, _) = makeExecutor()
+        let plan = Plan(steps: [
+            .talk(say: "Let me check London time."),
+            .tool(name: "get_time", args: ["place": .string("London")], say: nil)
+        ])
+
+        let result = await executor.execute(plan, originalInput: "What's the time in London?")
+
+        XCTAssertEqual(result.spokenLines.count, 1, "Tool+talk should enqueue only one utterance")
+        XCTAssertEqual(result.spokenLines.first, "mock result")
+    }
+
+    func testToolResultIsSpoken_NoAutoClose() async {
+        let runtime = DeterministicTimeToolsRuntime()
+        let executor = PlanExecutor(toolsRuntime: runtime)
+        let plan = Plan(steps: [
+            .tool(name: "get_time", args: ["location": .string("London")], say: nil)
+        ])
+
+        let result = await executor.execute(plan, originalInput: "What's the time in London?")
+        let spoken = result.spokenLines.joined(separator: " ").lowercased()
+
+        XCTAssertTrue(spoken.contains("london"))
+        XCTAssertTrue(spoken.contains("10:15"))
+        XCTAssertFalse(spoken.contains("anything else"))
+        XCTAssertFalse(spoken.contains("let me know if"))
+        XCTAssertFalse(spoken.contains("how else can i help"))
     }
 }

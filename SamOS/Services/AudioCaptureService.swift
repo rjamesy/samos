@@ -65,7 +65,7 @@ final class AudioCaptureService {
         guard !isCapturing else { throw CaptureError.alreadyCapturing }
 
         // Safety net: ensure TTS is stopped before capture starts (dispatches to MainActor)
-        Task { @MainActor in TTSService.shared.stopSpeaking() }
+        Task { @MainActor in TTSService.shared.stopSpeaking(reason: .userInterrupt) }
 
         speechDetected = false
         consecutiveSpeechFrames = 0

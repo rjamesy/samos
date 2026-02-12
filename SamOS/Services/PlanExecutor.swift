@@ -9,6 +9,7 @@ struct PlanExecutionResult {
     var triggerFollowUpCapture: Bool = false
     var pendingSlotRequest: (slot: String, prompt: String)?
     var executedToolSteps: [(name: String, args: [String: String])] = []
+    var toolMsTotal: Int = 0
     var stoppedAtAsk: Bool = false
 }
 
@@ -114,6 +115,15 @@ enum ImageProber {
 final class PlanExecutor {
     static let shared = PlanExecutor()
     private let toolsRuntime: ToolsRuntimeProtocol
+    private enum SpeechSource {
+        case talk
+        case tool
+        case prompt
+    }
+    private struct SpeechEntry {
+        let text: String
+        let source: SpeechSource
+    }
 
     private init() {
         self.toolsRuntime = ToolsRuntime.shared
@@ -128,21 +138,60 @@ final class PlanExecutor {
         var result = PlanExecutionResult()
         let _ = pendingSlotName // Retained for API compatibility with existing call sites/tests.
         let topLevelToolSay = singleToolPlanSay(in: plan)
+        let turnCorrelationID = String(UUID().uuidString.prefix(8))
+        var speechEntries: [SpeechEntry] = []
+        var toolProducedUserFacingOutput = false
+
+        func appendSpeech(_ text: String, source: SpeechSource) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            speechEntries.append(SpeechEntry(text: trimmed, source: source))
+            result.spokenLines.append(trimmed)
+        }
+
+        func finalizedResult() -> PlanExecutionResult {
+            let selectedSpeech = speechLinesForTurn(
+                entries: speechEntries,
+                toolProducedUserFacingOutput: toolProducedUserFacingOutput,
+                maxSpeakChars: M2Settings.maxSpeakChars
+            )
+            #if DEBUG
+            print("[SPEECH_POLICY] entries=\(speechEntries.count) tool_user_facing=\(toolProducedUserFacingOutput) selected_count=\(selectedSpeech.count)")
+            #endif
+            result.spokenLines = selectedSpeech
+            return result
+        }
 
         if let topLevelToolSay {
             result.chatMessages.append(ChatMessage(role: .assistant, text: topLevelToolSay))
-            result.spokenLines.append(topLevelToolSay)
+            appendSpeech(topLevelToolSay, source: .talk)
         }
 
         for step in plan.steps {
             switch step {
             case .talk(let say):
                 result.chatMessages.append(ChatMessage(role: .assistant, text: say))
-                result.spokenLines.append(say)
+                appendSpeech(say, source: .talk)
 
             case .tool(let name, _, let say):
+                // Hard gate: unknown tools must never execute
+                if !toolsRuntime.toolExists(name) {
+                    #if DEBUG
+                    print("[PlanExecutor] Unknown tool '\(name)' — routing to capability gap")
+                    #endif
+                    let gapMessage = "I don't have a \"\(name)\" tool yet. Can you share the source URL or rephrase what you need?"
+                    result.chatMessages.append(ChatMessage(role: .assistant, text: gapMessage))
+                    appendSpeech(gapMessage, source: .tool)
+                    toolProducedUserFacingOutput = true
+                    result.executedToolSteps.append((name: "capability_gap", args: ["unknown_tool": name]))
+                    return finalizedResult()
+                }
+
                 let toolAction = ToolAction(name: name, args: step.toolArgsAsStrings, say: say)
+                let toolStartedAt = CFAbsoluteTimeGetCurrent()
                 let output = toolsRuntime.execute(toolAction)
+                let toolElapsedMs = Int((CFAbsoluteTimeGetCurrent() - toolStartedAt) * 1000)
+                result.toolMsTotal += max(0, toolElapsedMs)
 
                 result.executedToolSteps.append((name: name, args: step.toolArgsAsStrings))
 
@@ -151,13 +200,21 @@ final class PlanExecutor {
                 #endif
 
                 if let output = output {
+                    #if DEBUG
+                    print("[TOOL_OUTPUT_RAW] turn=\(turnCorrelationID) tool=\(name) kind=\(output.kind.rawValue) payload=\(output.payload)")
+                    #endif
                     // Check for structured prompt payload (tool requesting info)
                     if let promptPayload = parsePromptPayload(output.payload) {
-                        result.chatMessages.append(ChatMessage(role: .assistant, text: promptPayload.spoken))
-                        result.spokenLines.append(promptPayload.spoken)
+                        let promptText = normalizedToolSpeech(promptPayload.spoken, fallback: promptPayload.formatted)
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: promptText))
+                        appendSpeech(promptText, source: .tool)
+                        toolProducedUserFacingOutput = true
+                        #if DEBUG
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(promptText)")
+                        #endif
                         result.pendingSlotRequest = (slot: promptPayload.slot, prompt: promptPayload.spoken)
                         result.triggerFollowUpCapture = true
-                        return result // Stop further steps
+                        return finalizedResult() // Stop further steps
                     }
 
                     // Image probe: verify URLs are live before displaying
@@ -166,10 +223,11 @@ final class PlanExecutor {
                         if let probeResult = probeResult {
                             // Probe failed — return as prompt payload for auto-repair
                             result.chatMessages.append(ChatMessage(role: .assistant, text: probeResult.spoken))
-                            result.spokenLines.append(probeResult.spoken)
+                            appendSpeech(probeResult.spoken, source: .tool)
+                            toolProducedUserFacingOutput = true
                             result.pendingSlotRequest = (slot: probeResult.slot, prompt: probeResult.spoken)
                             result.triggerFollowUpCapture = false // auto-repair, not user
-                            return result
+                            return finalizedResult()
                         }
                         // Probe passed — output is good, fall through to normal handling
                     }
@@ -177,23 +235,38 @@ final class PlanExecutor {
                     let isPrompt = output.payload.hasPrefix("I need") || output.payload.hasPrefix("I couldn't")
                     if isPrompt {
                         // Tool is asking for info (legacy string format)
-                        result.chatMessages.append(ChatMessage(role: .assistant, text: output.payload))
-                        result.spokenLines.append(output.payload)
+                        let promptText = normalizedToolSpeech(output.payload, fallback: output.payload)
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: promptText))
+                        appendSpeech(promptText, source: .tool)
+                        toolProducedUserFacingOutput = true
+                        #if DEBUG
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(promptText)")
+                        #endif
 
                         if output.payload.hasPrefix("I need") {
                             result.pendingSlotRequest = (slot: name, prompt: output.payload)
                             result.triggerFollowUpCapture = true
                         }
-                        return result // Stop further steps
+                        return finalizedResult() // Stop further steps
                     } else if let structured = parseStructuredPayload(output.payload) {
-                        // For top-level TOOL actions with say, speak the provided say only once.
-                        if topLevelToolSay == nil {
-                            result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
-                            result.spokenLines.append(structured.spoken)
-                        }
+                        let spoken = normalizedToolSpeech(structured.spoken, fallback: structured.formatted)
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: spoken))
+                        appendSpeech(spoken, source: .tool)
+                        toolProducedUserFacingOutput = true
+                        #if DEBUG
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(spoken)")
+                        #endif
                         // Tool window must display raw markdown exactly as provided.
                         result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
                     } else {
+                        if let spoken = fallbackSpokenText(for: output) {
+                            result.chatMessages.append(ChatMessage(role: .assistant, text: spoken))
+                            appendSpeech(spoken, source: .tool)
+                            toolProducedUserFacingOutput = true
+                            #if DEBUG
+                            print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(spoken)")
+                            #endif
+                        }
                         result.outputItems.append(output)
                     }
                 } else {
@@ -203,15 +276,15 @@ final class PlanExecutor {
             case .ask(let slot, let prompt):
                 result.pendingSlotRequest = (slot: slot, prompt: prompt)
                 result.chatMessages.append(ChatMessage(role: .assistant, text: prompt))
-                result.spokenLines.append(prompt)
+                appendSpeech(prompt, source: .prompt)
                 result.triggerFollowUpCapture = true
                 result.stoppedAtAsk = true
-                return result // Stop further steps
+                return finalizedResult() // Stop further steps
 
             case .delegate(let task, _, let say):
                 if let say = say {
                     result.chatMessages.append(ChatMessage(role: .assistant, text: say))
-                    result.spokenLines.append(say)
+                    appendSpeech(say, source: .talk)
                 }
                 result.chatMessages.append(ChatMessage(
                     role: .system,
@@ -225,13 +298,17 @@ final class PlanExecutor {
                     }
 
                     let forgeAction = ToolAction(name: "start_skillforge", args: args, say: nil)
+                    let toolStartedAt = CFAbsoluteTimeGetCurrent()
                     let forgeOutput = toolsRuntime.execute(forgeAction)
+                    let toolElapsedMs = Int((CFAbsoluteTimeGetCurrent() - toolStartedAt) * 1000)
+                    result.toolMsTotal += max(0, toolElapsedMs)
                     result.executedToolSteps.append((name: forgeAction.name, args: forgeAction.args))
 
                     if let forgeOutput {
                         if let structured = parseStructuredPayload(forgeOutput.payload) {
                             result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
-                            result.spokenLines.append(structured.spoken)
+                            appendSpeech(structured.spoken, source: .tool)
+                            toolProducedUserFacingOutput = true
                             result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
                         } else {
                             result.outputItems.append(forgeOutput)
@@ -241,7 +318,7 @@ final class PlanExecutor {
             }
         }
 
-        return result
+        return finalizedResult()
     }
 
     // MARK: - Image Probe
@@ -297,6 +374,109 @@ final class PlanExecutor {
               let formatted = dict["formatted"] as? String
         else { return nil }
         return (slot, spoken, formatted)
+    }
+
+    private func fallbackSpokenText(for output: OutputItem) -> String? {
+        if let data = output.payload.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let jsonSpoken = dict["spoken"] as? String
+            let jsonFormatted = dict["formatted"] as? String
+            if let jsonSpoken, !jsonSpoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return normalizedToolSpeech(jsonSpoken, fallback: jsonFormatted ?? output.payload)
+            }
+            if let jsonFormatted, !jsonFormatted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return normalizedToolSpeech(jsonFormatted, fallback: output.payload)
+            }
+        }
+
+        switch output.kind {
+        case .markdown, .card:
+            let spoken = normalizedToolSpeech(output.payload, fallback: output.payload)
+            return spoken.isEmpty ? nil : spoken
+        case .image:
+            return "I found image results."
+        }
+    }
+
+    private func normalizedToolSpeech(_ text: String, fallback: String) -> String {
+        let stripped = stripMarkdownForSpeech(text)
+        var cleaned = stripPlaceholderTokens(stripped)
+        if cleaned.isEmpty {
+            cleaned = stripPlaceholderTokens(stripMarkdownForSpeech(fallback))
+        }
+        if cleaned.count > 320 {
+            cleaned = String(cleaned.prefix(320)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
+    }
+
+    private func stripPlaceholderTokens(_ text: String) -> String {
+        let removedTokens = text.replacingOccurrences(
+            of: #"\{[A-Za-z0-9_]+\}"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return removedTokens
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripMarkdownForSpeech(_ text: String) -> String {
+        var value = text
+        value = value.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"`([^`]*)`"#, with: "$1", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]+\)"#, with: "$1", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^\s{0,3}#{1,6}\s*"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^\s*[-*+]\s+"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^\s*\d+[\.)]\s+"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"[*_>#]+"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func speechLinesForTurn(entries: [SpeechEntry], toolProducedUserFacingOutput: Bool, maxSpeakChars: Int) -> [String] {
+        guard !entries.isEmpty else { return [] }
+        let cappedChars = max(120, maxSpeakChars)
+
+        func pickToolEntry() -> String? {
+            if let explicitTool = entries.last(where: { $0.source == .tool || $0.source == .prompt }) {
+                return explicitTool.text
+            }
+            return nil
+        }
+
+        func pickTalkEntry() -> String? {
+            if let talk = entries.last(where: { $0.source == .talk && !containsUnresolvedTemplateToken($0.text) }) {
+                return talk.text
+            }
+            return nil
+        }
+
+        let selected: String
+        if toolProducedUserFacingOutput, let toolText = pickToolEntry() {
+            selected = toolText
+        } else if let talkText = pickTalkEntry() {
+            selected = talkText
+        } else {
+            selected = entries.last?.text ?? ""
+        }
+
+        let condensed = condensedSpeechLine(selected, maxChars: cappedChars)
+        guard !condensed.isEmpty else { return [] }
+        return [condensed]
+    }
+
+    private func condensedSpeechLine(_ text: String, maxChars: Int) -> String {
+        let cleaned = stripMarkdownForSpeech(stripPlaceholderTokens(text))
+        guard !cleaned.isEmpty else { return "" }
+        guard cleaned.count > maxChars else { return cleaned }
+        let prefix = String(cleaned.prefix(maxChars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prefix.isEmpty else { return "I've shown the full details on screen." }
+        return "\(prefix) ... I've shown the full details on screen."
+    }
+
+    private func containsUnresolvedTemplateToken(_ text: String) -> Bool {
+        text.range(of: #"\{[A-Za-z0-9_]+\}"#, options: .regularExpression) != nil
     }
 
     /// Returns plan-level say when this is a single-tool plan (legacy TOOL action shape).

@@ -588,6 +588,83 @@ final class AppStateThinkingFillerTests: XCTestCase {
         XCTAssertEqual(spokenFillers.count, 1)
     }
 
+    func testTtsTimeoutDoesNotDropSpeech() async {
+        let fake = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        result.spokenLines = ["Done."]
+        fake.queuedResults = [result]
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            ttsStartDeadlineSeconds: 0.1,
+            enableRuntimeServices: false
+        )
+
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        XCTAssertNil(appState.debugLastSpeechDropReason(), "Slow TTS start should not be treated as a dropped utterance")
+        XCTAssertNotNil(appState.debugLastSpeechSlowStartCorrelationID(), "Slow starts should be explicitly tracked")
+        XCTAssertEqual(appState.chatMessages.last(where: { $0.role == .assistant })?.text, "Done.")
+    }
+
+    func testNoTtsBeforePlanResolved() async {
+        let fake = FakeTurnOrchestrator()
+        fake.delayNanoseconds = 800_000_000
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        result.spokenLines = ["Done."]
+        fake.queuedResults = [result]
+
+        var spokenFillers: [String] = []
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            enforceStrictTurnSpeechPhases: true,
+            thinkingFillerSpeaker: { spokenFillers.append($0) },
+            enableRuntimeServices: false
+        )
+
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 220_000_000)
+
+        XCTAssertTrue(appState.isThinkingIndicatorVisible)
+        XCTAssertEqual(spokenFillers.count, 0, "Filler speech must not run before route+plan+execution complete")
+        XCTAssertEqual(appState.debugTurnSpeechPhase(), "routing")
+    }
+
+    func testTurnIdStable_NoExplicitCancel() async {
+        let fake = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        result.spokenLines = ["Done."]
+        fake.queuedResults = [result]
+
+        await MainActor.run {
+            TTSService.shared.stopSpeaking(reason: .userInterrupt)
+            TTSService.shared.clearLastDropReason()
+        }
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            enforceStrictTurnSpeechPhases: true,
+            enableRuntimeServices: false
+        )
+
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(appState.debugActiveTurnID(), TTSService.shared.currentCorrelationID)
+        XCTAssertNotEqual(
+            appState.debugLastSpeechDropReason(),
+            TTSService.SpeechDropReason.explicitCancel.rawValue,
+            "Single-turn speech should not self-cancel with explicit_cancel"
+        )
+    }
+
     func testBubbleLatencyPopulatedForUserAndAssistant() async {
         let fake = FakeTurnOrchestrator()
         fake.delayNanoseconds = 120_000_000
@@ -879,6 +956,8 @@ final class FakeVoicePipeline: VoicePipelineCoordinating {
     private(set) var cancelFollowUpCaptureCalls = 0
     private(set) var lastNoSpeechTimeoutMs: Int?
     var autoCancelOnTimeout = false
+    private(set) var suspendForTTSCalls = 0
+    private(set) var resumeAfterTTSCalls = 0
 
     func startListening() throws {}
     func stopListening() {}
@@ -896,6 +975,14 @@ final class FakeVoicePipeline: VoicePipelineCoordinating {
 
     func cancelFollowUpCapture() {
         cancelFollowUpCaptureCalls += 1
+    }
+
+    func suspendForTTS() {
+        suspendForTTSCalls += 1
+    }
+
+    func resumeAfterTTSIfNeeded() {
+        resumeAfterTTSCalls += 1
     }
 }
 
@@ -975,6 +1062,8 @@ final class RouterPipelineTests: XCTestCase {
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
     private var savedPreferLocalPlans: Bool = false
+    private var savedPreferOpenAIPlans: Bool = false
+    private var savedDisableAutoClosePrompts: Bool = true
     private var savedAffectMirroringEnabled: Bool = false
     private var savedUseEmotionalTone: Bool = true
     private var savedToneProfile: TonePreferenceProfile = .neutralDefaults
@@ -986,11 +1075,15 @@ final class RouterPipelineTests: XCTestCase {
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
         savedPreferLocalPlans = M2Settings.preferLocalPlans
+        savedPreferOpenAIPlans = M2Settings.preferOpenAIPlans
+        savedDisableAutoClosePrompts = M2Settings.disableAutoClosePrompts
         savedAffectMirroringEnabled = M2Settings.affectMirroringEnabled
         savedUseEmotionalTone = M2Settings.useEmotionalTone
         savedToneProfile = TonePreferenceStore.shared.loadProfile()
         TonePreferenceStore.shared.replaceProfileForTesting(.neutralDefaults)
         M2Settings.preferLocalPlans = false
+        M2Settings.preferOpenAIPlans = false
+        M2Settings.disableAutoClosePrompts = true
         savedGeneralModel = OpenAISettings.generalModel
         savedEscalationModel = OpenAISettings.escalationModel
     }
@@ -1000,6 +1093,8 @@ final class RouterPipelineTests: XCTestCase {
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
         M2Settings.preferLocalPlans = savedPreferLocalPlans
+        M2Settings.preferOpenAIPlans = savedPreferOpenAIPlans
+        M2Settings.disableAutoClosePrompts = savedDisableAutoClosePrompts
         M2Settings.affectMirroringEnabled = savedAffectMirroringEnabled
         M2Settings.useEmotionalTone = savedUseEmotionalTone
         TonePreferenceStore.shared.replaceProfileForTesting(savedToneProfile)
@@ -1038,6 +1133,22 @@ final class RouterPipelineTests: XCTestCase {
     private let websiteLearningActionJSON = """
     {"action":"TOOL","name":"learn_website","args":{"url":"https://swift.org","focus":"packages"},"say":"I'll learn from that page."}
     """
+
+    func testDisableAutoClosePrompts_DefaultTrue() {
+        let defaults = UserDefaults.standard
+        let key = "m3_disableAutoClosePrompts"
+        let prior = defaults.object(forKey: key)
+        defer {
+            if let prior {
+                defaults.set(prior, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        defaults.removeObject(forKey: key)
+        XCTAssertTrue(M2Settings.disableAutoClosePrompts)
+    }
 
     @MainActor
     private func captureAffectPrompt(for input: String,
@@ -3311,6 +3422,10 @@ final class RouterPipelineTests: XCTestCase {
 
     @MainActor
     func testFollowUpNotAddedWhenAlreadyQuestion() async {
+        let savedDisableAutoClosePrompts = M2Settings.disableAutoClosePrompts
+        defer { M2Settings.disableAutoClosePrompts = savedDisableAutoClosePrompts }
+        M2Settings.disableAutoClosePrompts = false
+
         let alreadyQuestion = #"{"action":"TALK","say":"Want me to continue?"}"#
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [.success(alreadyQuestion)]
@@ -3333,10 +3448,22 @@ final class RouterPipelineTests: XCTestCase {
 
     @MainActor
     func testFollowUpCooldownEnforced() async {
+        let savedDisableAutoClosePrompts = M2Settings.disableAutoClosePrompts
+        defer { M2Settings.disableAutoClosePrompts = savedDisableAutoClosePrompts }
+        M2Settings.disableAutoClosePrompts = false
+
         let firstTalk = #"{"action":"TALK","say":"I finished that for you and included the key details."}"#
         let secondTalk = #"{"action":"TALK","say":"I wrapped this up and summarized the important parts."}"#
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [.success(firstTalk), .success(secondTalk)]
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"greeting","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """),
+            .success("""
+            {"intent":"greeting","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
 
         OpenAISettings.apiKey = "test-key-123"
@@ -3352,12 +3479,12 @@ final class RouterPipelineTests: XCTestCase {
             followUpCooldownTurns: 5
         )
 
-        let first = await orchestrator.processTurn("turn one", history: [])
+        let first = await orchestrator.processTurn("hi", history: [])
         let firstText = first.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
         XCTAssertEqual(firstText.filter { $0 == "?" }.count, 1)
         XCTAssertTrue(first.triggerQuestionAutoListen)
 
-        let second = await orchestrator.processTurn("turn two", history: [])
+        let second = await orchestrator.processTurn("hello", history: [])
         let secondText = second.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
         XCTAssertEqual(secondText.filter { $0 == "?" }.count, 0, "Follow-up should be blocked during cooldown")
         XCTAssertFalse(second.triggerQuestionAutoListen)
@@ -3365,9 +3492,18 @@ final class RouterPipelineTests: XCTestCase {
 
     @MainActor
     func testFollowUpMaxOneSentence() async {
+        let savedDisableAutoClosePrompts = M2Settings.disableAutoClosePrompts
+        defer { M2Settings.disableAutoClosePrompts = savedDisableAutoClosePrompts }
+        M2Settings.disableAutoClosePrompts = false
+
         let talk = #"{"action":"TALK","say":"I prepared the result and highlighted the important points for you."}"#
         let fakeOpenAI = FakeOpenAITransport()
         fakeOpenAI.queuedResponses = [.success(talk)]
+        fakeOpenAI.queuedIntentResponses = [
+            .success("""
+            {"intent":"greeting","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)
+        ]
         let fakeOllama = FakeOllamaTransportForPipeline()
 
         OpenAISettings.apiKey = "test-key-123"
@@ -3378,7 +3514,7 @@ final class RouterPipelineTests: XCTestCase {
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
         let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
-        let result = await orchestrator.processTurn("wrap up", history: [])
+        let result = await orchestrator.processTurn("hello", history: [])
 
         let text = result.appendedChat.first(where: { $0.role == .assistant })?.text ?? ""
         XCTAssertEqual(text.filter { $0 == "?" }.count, 1, "Follow-up should be a single question sentence")
@@ -4688,12 +4824,16 @@ final class StabilityRegressionTests: XCTestCase {
     private var savedApiKey: String = ""
     private var savedUseOllama: Bool = false
     private var savedPreferLocalPlans: Bool = false
+    private var savedPreferOpenAIPlans: Bool = false
+    private var savedDisableAutoClosePrompts: Bool = true
 
     override func setUp() {
         super.setUp()
         savedApiKey = OpenAISettings.apiKey
         savedUseOllama = M2Settings.useOllama
         savedPreferLocalPlans = M2Settings.preferLocalPlans
+        savedPreferOpenAIPlans = M2Settings.preferOpenAIPlans
+        savedDisableAutoClosePrompts = M2Settings.disableAutoClosePrompts
         M2Settings.preferLocalPlans = false
     }
 
@@ -4701,6 +4841,8 @@ final class StabilityRegressionTests: XCTestCase {
         OpenAISettings.apiKey = savedApiKey
         M2Settings.useOllama = savedUseOllama
         M2Settings.preferLocalPlans = savedPreferLocalPlans
+        M2Settings.preferOpenAIPlans = savedPreferOpenAIPlans
+        M2Settings.disableAutoClosePrompts = savedDisableAutoClosePrompts
         OpenAISettings._resetCacheForTesting()
         super.tearDown()
     }
@@ -5847,7 +5989,7 @@ final class StabilityRegressionTests: XCTestCase {
         OpenAISettings._resetCacheForTesting()
         OpenAISettings.apiKey = "test-key-123"
         M2Settings.useOllama = true
-        M2Settings.preferLocalPlans = false
+        M2Settings.preferOpenAIPlans = true
 
         let ollamaRouter = OllamaRouter(transport: fakeOllama)
         let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
@@ -5858,6 +6000,66 @@ final class StabilityRegressionTests: XCTestCase {
         XCTAssertEqual(fakeOllama.chatCallCount, 0, "Ollama plan route should be skipped when OpenAI key is ready")
         XCTAssertEqual(fakeOpenAI.chatCallCount, 1, "OpenAI should handle plan route first")
         XCTAssertEqual(result.llmProvider, .openai)
+    }
+
+    @MainActor
+    func testIntentAndPlanProviderAttributionAreIndependent() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success(localFirstTalkJSON)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [.success("""
+            {"intent":"general_qna","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("Hi Sam", history: [])
+
+        XCTAssertEqual(result.intentProviderSelected, .ollama)
+        XCTAssertEqual(result.planProviderSelected, .openai)
+    }
+
+    @MainActor
+    func testNoAutoCloseFiller() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.success("""
+            {"action":"TALK","say":"Canberra is the capital of Australia. Anything else you'd like to know?"}
+            """)]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [.success("""
+            {"intent":"general_qna","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}
+            """)]
+
+        OpenAISettings.apiKey = "test-key-123"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-123"
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = true
+        M2Settings.disableAutoClosePrompts = true
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("What is the capital of Australia?", history: [])
+        let chat = result.appendedChat.last(where: { $0.role == .assistant })?.text.lowercased() ?? ""
+        let spoken = result.spokenLines.joined(separator: " ").lowercased()
+
+        XCTAssertTrue(chat.contains("canberra"))
+        XCTAssertFalse(chat.contains("anything else"))
+        XCTAssertFalse(spoken.contains("anything else"))
+        XCTAssertFalse(spoken.contains("let me know if"))
+        XCTAssertFalse(spoken.contains("how else can i help"))
     }
 
     @MainActor
@@ -6288,5 +6490,324 @@ final class StabilityRegressionTests: XCTestCase {
     private func appendTurn(_ history: inout [ChatMessage], user: String, result: TurnResult) {
         history.append(ChatMessage(role: .user, text: user))
         history.append(contentsOf: result.appendedChat)
+    }
+}
+
+final class FakeWireTimedOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
+    var responseText: String
+    var wireMs: Int
+
+    init(responseText: String, wireMs: Int) {
+        self.responseText = responseText
+        self.wireMs = wireMs
+    }
+
+    func chat(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> String {
+        _ = messages
+        _ = model
+        _ = maxOutputTokens
+        return responseText
+    }
+
+    func chatWithWireTiming(messages: [[String: String]], model: String?, maxOutputTokens: Int?) async throws -> (responseText: String, wireMs: Int) {
+        _ = messages
+        _ = model
+        _ = maxOutputTokens
+        return (responseText, wireMs)
+    }
+}
+
+@MainActor
+final class SamOSFastRegressionTests: XCTestCase {
+    private var savedUseOllama = true
+    private var savedPreferOpenAIPlans = false
+    private var savedLocalIntentTimeoutSeconds = 2.0
+    private var savedOpenAIKey = ""
+
+    override func setUp() {
+        super.setUp()
+        savedUseOllama = M2Settings.useOllama
+        savedPreferOpenAIPlans = M2Settings.preferOpenAIPlans
+        savedLocalIntentTimeoutSeconds = M2Settings.localIntentTimeoutSeconds
+        savedOpenAIKey = OpenAISettings.apiKey
+        OpenAICallTracker.shared.clear(turnID: "fast_no_openai")
+        TTSService.shared.stopSpeaking(reason: .userInterrupt)
+        TTSService.shared.clearLastDropReason()
+    }
+
+    override func tearDown() {
+        M2Settings.useOllama = savedUseOllama
+        M2Settings.preferOpenAIPlans = savedPreferOpenAIPlans
+        M2Settings.localIntentTimeoutSeconds = savedLocalIntentTimeoutSeconds
+        OpenAISettings.apiKey = savedOpenAIKey
+        OpenAISettings._resetCacheForTesting()
+        OpenAICallTracker.shared.clear(turnID: "fast_no_openai")
+        super.tearDown()
+    }
+
+    func testIntentParser_AllowsMissingOptionalKeys() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success(#"{"intent":"general_qna","confidence":0.95}"#)
+        ]
+        fakeOllama.queuedResponses = [
+            .success(#"{"action":"TALK","say":"Fallback."}"#)
+        ]
+
+        OpenAISettings.apiKey = ""
+        OpenAISettings._resetCacheForTesting()
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI),
+            cameraVision: makeFastCamera()
+        )
+
+        _ = await orchestrator.processTurn("blorp", history: [])
+        let intent = orchestrator.debugLastIntentClassification()
+
+        XCTAssertEqual(fakeOllama.intentCallCount, 1)
+        XCTAssertEqual(intent?.provider, .ollama)
+        XCTAssertEqual(intent?.attemptedLocal, true)
+        XCTAssertEqual(intent?.attemptedOpenAI, false)
+        XCTAssertEqual(intent?.localConfidence ?? -1, 0.95, accuracy: 0.0001)
+    }
+
+    func testNoOpenAICallsWhenPlanProviderIsOllama() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = [
+            .success(#"{"intent":"greeting","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#)
+        ]
+        fakeOllama.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I'm doing well."}"#)
+        ]
+
+        OpenAISettings.apiKey = "fast-no-openai-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "fast-no-openai-key"
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI),
+            cameraVision: makeFastCamera()
+        )
+
+        let turnID = "fast_no_openai"
+        let result = await TurnExecutionContext.$turnID.withValue(turnID) {
+            await orchestrator.processTurn("How are you?", history: [])
+        }
+        let summary = OpenAICallTracker.shared.summary(for: turnID)
+
+        XCTAssertEqual(result.planProviderSelected, .ollama)
+        XCTAssertEqual(summary.count, 0)
+        XCTAssertEqual(fakeOpenAI.intentCallCount, 0)
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 0)
+    }
+
+    func testOllamaPlanDeadline_UsesWireTimeOnly() async throws {
+        let fakeTransport = FakeWireTimedOllamaTransport(
+            responseText: #"{"action":"TALK","say":"Wire-time success."}"#,
+            wireMs: 2800
+        )
+        let router = OllamaRouter(transport: fakeTransport)
+        #if DEBUG
+        let savedDelay = OllamaRouter.debugParseDelayNanoseconds
+        OllamaRouter.debugParseDelayNanoseconds = 400_000_000
+        defer { OllamaRouter.debugParseDelayNanoseconds = savedDelay }
+        #endif
+
+        let routed = try await router.routePlanWithTiming(
+            "hello",
+            history: [],
+            skipRepairRetry: true,
+            wireDeadlineMs: 3000
+        )
+
+        XCTAssertEqual(routed.timing.wireMs, 2800)
+        XCTAssertGreaterThanOrEqual(routed.timing.parseMs, 300)
+
+        let timeoutTransport = FakeWireTimedOllamaTransport(
+            responseText: #"{"action":"TALK","say":"Should timeout."}"#,
+            wireMs: 3200
+        )
+        let timeoutRouter = OllamaRouter(transport: timeoutTransport)
+        do {
+            _ = try await timeoutRouter.routePlanWithTiming(
+                "hello",
+                history: [],
+                skipRepairRetry: true,
+                wireDeadlineMs: 3000
+            )
+            XCTFail("Expected wire deadline timeout")
+        } catch let error as OllamaRouter.OllamaError {
+            guard case .wireDeadlineExceeded = error else {
+                return XCTFail("Expected wireDeadlineExceeded, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected OllamaRouter.OllamaError, got \(error)")
+        }
+    }
+
+    func testSpeechNotDroppedWithoutExplicitCancel() async {
+        TTSService.shared.stopSpeaking(reason: .userInterrupt)
+        TTSService.shared.clearLastDropReason()
+
+        let fake = FakeTurnOrchestrator()
+        var result = TurnResult()
+        result.appendedChat = [ChatMessage(role: .assistant, text: "Done.")]
+        result.spokenLines = ["Done."]
+        fake.queuedResults = [result]
+
+        let appState = AppState(
+            orchestrator: fake,
+            thinkingFillerDelay: 0.05,
+            ttsStartDeadlineSeconds: 0.1,
+            enableRuntimeServices: false
+        )
+
+        appState.send("hello")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertNotEqual(
+            appState.debugLastSpeechDropReason(),
+            TTSService.SpeechDropReason.explicitCancel.rawValue
+        )
+    }
+
+    func testPerfHarness_CannedTurns_PrintsPerfTurnLines() async {
+        let startedAt = Date()
+        let prompts = [
+            "How are you?",
+            "Capital of Australia?",
+            "What's the time in London?",
+            "Set a timer for ten minutes.",
+            "Show me a short summary of Wi-Fi troubleshooting."
+        ]
+
+        let fakeOpenAI = FakeOpenAITransport()
+        let fakeOllama = FakeOllamaTransportForPipeline()
+        fakeOllama.queuedIntentResponses = prompts.map { prompt in
+            if prompt.lowercased().contains("time") {
+                return .success(#"{"intent":"automation_request","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#)
+            }
+            return .success(#"{"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#)
+        }
+        fakeOllama.queuedResponses = [
+            .success(#"{"action":"TALK","say":"I am doing well."}"#),
+            .success(#"{"action":"TALK","say":"Canberra is the capital of Australia."}"#),
+            .success(#"{"action":"TOOL","name":"get_time","args":{"location":"London"},"say":"Checking London time."}"#),
+            .success(#"{"action":"TALK","say":"Timer setup guidance ready."}"#),
+            .success(#"{"action":"TALK","say":"Restart router, check signal, and test another device."}"#)
+        ]
+
+        OpenAISettings.apiKey = "fast-harness-key"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "fast-harness-key"
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI),
+            cameraVision: makeFastCamera()
+        )
+
+        for (index, prompt) in prompts.enumerated() {
+            let turnID = "fast_harness_\(index + 1)"
+            let turnStart = Date()
+            let result = await TurnExecutionContext.$turnID.withValue(turnID) {
+                await orchestrator.processTurn(prompt, history: [])
+            }
+            let totalMs = max(0, Int(Date().timeIntervalSince(turnStart) * 1000))
+            func str(_ value: Int?) -> String { value.map(String.init) ?? "n/a" }
+            print("[PERF_TURN] turn_id=\(turnID) mode=text capture_ms=n/a stt_ms=n/a intent_local_ms=\(str(result.intentRouterMsLocal)) intent_openai_ms=\(str(result.intentRouterMsOpenAI)) plan_local_wire_ms=\(str(result.planLocalWireMs)) plan_local_total_ms=\(str(result.planLocalTotalMs)) plan_openai_ms=\(str(result.planOpenAIMs)) tool_ms_total=\(str(result.toolMsTotal)) tts_queue_wait_ms=n/a tts_synthesis_ms=n/a tts_playback_start_ms=n/a first_audio_ms=n/a total_ms=\(totalMs)")
+        }
+
+        let elapsedMs = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+        XCTAssertLessThan(elapsedMs, 10_000, "Perf harness should complete in under 10 seconds")
+    }
+
+    private func makeFastCamera() -> IdentityTestCamera {
+        let camera = IdentityTestCamera()
+        camera.isRunning = true
+        camera.latestFrameAt = Date()
+        camera.analysis = CameraFrameAnalysis(
+            labels: [],
+            recognizedText: [],
+            faces: CameraFacePresence(count: 1),
+            capturedAt: Date()
+        )
+        camera.recognitionResult = CameraFaceRecognitionResult(
+            capturedAt: Date(),
+            detectedFaces: 1,
+            matches: [],
+            unknownFaces: 1,
+            enrolledNames: []
+        )
+        return camera
+    }
+}
+
+@MainActor
+final class SamOSRealPerfSmokeTests: XCTestCase {
+    func testPerfHarness_RealTurns() async {
+        let prompts = [
+            "How are you?",
+            "Capital of Australia?",
+            "What's the time in London?"
+        ]
+
+        OpenAISettings._resetCacheForTesting()
+        M2Settings.useOllama = true
+        M2Settings.preferOpenAIPlans = false
+
+        let camera = IdentityTestCamera()
+        camera.isRunning = true
+        camera.latestFrameAt = Date()
+        camera.analysis = CameraFrameAnalysis(
+            labels: [],
+            recognizedText: [],
+            faces: CameraFacePresence(count: 1),
+            capturedAt: Date()
+        )
+        camera.recognitionResult = CameraFaceRecognitionResult(
+            capturedAt: Date(),
+            detectedFaces: 1,
+            matches: [],
+            unknownFaces: 1,
+            enrolledNames: []
+        )
+
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter)
+        let orchestrator = TurnOrchestrator(
+            ollamaRouter: ollamaRouter,
+            openAIRouter: openAIRouter,
+            cameraVision: camera
+        )
+        var history: [ChatMessage] = []
+
+        for (index, prompt) in prompts.enumerated() {
+            let turnID = "real_perf_\(index + 1)"
+            let turnStart = Date()
+            let result = await TurnExecutionContext.$turnID.withValue(turnID) {
+                await orchestrator.processTurn(prompt, history: history)
+            }
+            history.append(ChatMessage(role: .user, text: prompt))
+            history.append(contentsOf: result.appendedChat)
+
+            let totalMs = max(0, Int(Date().timeIntervalSince(turnStart) * 1000))
+            func str(_ value: Int?) -> String { value.map(String.init) ?? "n/a" }
+            print("[PERF_TURN] turn_id=\(turnID) mode=text capture_ms=n/a stt_ms=n/a intent_local_ms=\(str(result.intentRouterMsLocal)) intent_openai_ms=\(str(result.intentRouterMsOpenAI)) plan_local_wire_ms=\(str(result.planLocalWireMs)) plan_local_total_ms=\(str(result.planLocalTotalMs)) plan_openai_ms=\(str(result.planOpenAIMs)) tool_ms_total=\(str(result.toolMsTotal)) tts_queue_wait_ms=n/a tts_synthesis_ms=n/a tts_playback_start_ms=n/a first_audio_ms=n/a total_ms=\(totalMs)")
+        }
     }
 }

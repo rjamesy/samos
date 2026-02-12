@@ -274,7 +274,7 @@ final class AlarmSession: ObservableObject {
     // MARK: - Handle User Reply
 
     func handleUserReply(_ text: String) async {
-        TTSService.shared.stopSpeaking()
+        TTSService.shared.stopSpeaking(reason: .explicitCancel)
 
         // Track user reply in alarm history
         appendToHistory(role: .user, text: text)

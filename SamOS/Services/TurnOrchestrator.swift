@@ -9,10 +9,22 @@ struct TurnResult {
     var triggerQuestionAutoListen: Bool = false
     var usedMemoryHints: Bool = false
     var llmProvider: LLMProvider = .none
+    var intentProviderSelected: IntentClassificationProvider = .rule
+    var planProviderSelected: LLMProvider = .none
     var knowledgeAttribution: KnowledgeAttribution?
     var aiModelUsed: String?
     var executedToolSteps: [(name: String, args: [String: String])] = []
-    var routerMs: Int?
+    var intentRouterMsLocal: Int?
+    var intentRouterMsOpenAI: Int?
+    var planLocalWireMs: Int?
+    var planLocalTotalMs: Int?
+    var planOpenAIMs: Int?
+    var toolMsTotal: Int?
+    var planRouterMs: Int?
+    var routerMs: Int? {
+        get { planRouterMs }
+        set { planRouterMs = newValue }
+    }
     var originProvider: MessageOriginProvider = .local
     var executionProvider: MessageOriginProvider = .local
     var originReason: String?
@@ -1736,30 +1748,32 @@ struct IntentClassifier {
               let dictionary = jsonObject as? [String: Any] else {
             return .failure("not_single_json_object")
         }
-        let expectedKeys: Set<String> = [
-            "intent",
-            "confidence",
-            "autoCaptureHint",
-            "needsWeb",
-            "notes"
-        ]
+        let allowedKeys: Set<String> = ["intent", "confidence", "autoCaptureHint", "needsWeb", "notes"]
         let actualKeys = Set(dictionary.keys)
-        guard actualKeys == expectedKeys else {
-            let missing = expectedKeys.subtracting(actualKeys).sorted().joined(separator: ",")
-            let extra = actualKeys.subtracting(expectedKeys).sorted().joined(separator: ",")
-            return .failure("key_mismatch missing=[\(missing)] extra=[\(extra)]")
+        let extra = actualKeys.subtracting(allowedKeys).sorted().joined(separator: ",")
+        guard extra.isEmpty else {
+            return .failure("key_mismatch missing=[] extra=[\(extra)]")
         }
-        guard var payload = try? JSONDecoder().decode(IntentClassification.self, from: data) else {
-            return .failure("decode_failed_type_mismatch")
+
+        guard let intentRaw = dictionary["intent"] as? String,
+              let intent = RoutedIntent(rawValue: intentRaw) else {
+            return .failure("decode_failed_missing_or_invalid_intent")
         }
-        let trimmedNotes = payload.notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clamped = min(1.0, max(0.0, payload.confidence))
-        payload = IntentClassification(
-            intent: payload.intent,
+        guard let confidenceValue = dictionary["confidence"] as? NSNumber else {
+            return .failure("decode_failed_missing_or_invalid_confidence")
+        }
+
+        let notes = (dictionary["notes"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let autoCaptureHint = dictionary["autoCaptureHint"] as? Bool ?? false
+        let clamped = min(1.0, max(0.0, confidenceValue.doubleValue))
+
+        let payload = IntentClassification(
+            intent: intent,
             confidence: clamped,
-            notes: trimmedNotes,
-            autoCaptureHint: payload.autoCaptureHint,
-            needsWeb: payload.needsWeb
+            notes: notes,
+            autoCaptureHint: autoCaptureHint,
+            needsWeb: intent == .webRequest
         )
         return .success(payload)
     }
@@ -1778,7 +1792,7 @@ private struct IntentRoutePolicy {
 
 private struct PlanRoutePolicy {
     let useOllama: Bool
-    let preferLocalPlans: Bool
+    let preferOpenAIPlans: Bool
     let openAIStatus: OpenAISettings.APIKeyStatus
 
     var localFirst: Bool { routeOrder.first == .ollama }
@@ -1787,11 +1801,10 @@ private struct PlanRoutePolicy {
     var routeOrder: [LLMProvider] {
         switch openAIStatus {
         case .ready:
-            // Default policy: OpenAI first when configured.
-            // Dev override: allow local-first plans when explicitly enabled.
-            return (useOllama && preferLocalPlans) ? [.ollama, .openai] : [.openai]
+            guard useOllama else { return [.openai] }
+            return preferOpenAIPlans ? [.openai, .ollama] : [.ollama, .openai]
         case .invalid:
-            return [.none]
+            return useOllama ? [.ollama] : [.none]
         case .missing:
             return useOllama ? [.ollama] : [.none]
         }
@@ -1865,11 +1878,7 @@ final class TurnOrchestrator {
         "Here's a clear breakdown for you.",
         "I've laid this out on screen."
     ]
-    private let followUpQuestions = [
-        "Need anything else on this?",
-        "Want me to continue on this?",
-        "Should I add anything else?"
-    ]
+    private let greetingFollowUpQuestion = "How can I help?"
     private static let numberedListRegex = try! NSRegularExpression(pattern: #"^\d+[\.)]\s"#, options: [])
     private static let coverageEntityRegex = try! NSRegularExpression(pattern: #"\b[A-Z][a-zA-Z]{2,}\b"#, options: [])
     private static let coverageStopwords: Set<String> = [
@@ -1883,7 +1892,6 @@ final class TurnOrchestrator {
     private var turnCounter = 0
     private var lastMemoryAckTurn: Int?
     private var lastFollowUpTurn: Int?
-    private var followUpQuestionIndex = 0
     private static let sharedIntentInferenceExecutor = IntentInferenceExecutor()
     private let openAIRouteTimeoutSeconds: Double = 5.0
     private let openAIRouteRetryTimeoutSeconds: Double = 2.6
@@ -1975,7 +1983,7 @@ final class TurnOrchestrator {
                 try await ollamaRouter.classifyIntentWithTrace(input)
             },
             openAIClassifier: { input in
-                try await openAIRouter.classifyIntentWithTrace(input)
+                try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
             },
             localInferenceExecutor: sharedIntentInferenceExecutor,
             localTimeoutSeconds: localTimeoutSeconds,
@@ -2020,11 +2028,18 @@ final class TurnOrchestrator {
         #endif
     }
 
+    private func logIntentProviderSelection(_ provider: IntentClassificationProvider) {
+        #if DEBUG
+        print("[INTENT_PROVIDER] provider=\(provider.rawValue)")
+        #endif
+    }
+
     private func logPlanProviderSelection(provider: LLMProvider,
                                           routeReason: String,
                                           routerMs: Int,
                                           aiModelUsed: String?) {
         #if DEBUG
+        print("[PLAN_PROVIDER] provider=\(provider.rawValue)")
         print("[PLAN] provider=\(provider.rawValue) route_reason=\(routeReason) router_ms=\(routerMs) model=\(aiModelUsed ?? "n/a")")
         #endif
     }
@@ -2093,6 +2108,7 @@ final class TurnOrchestrator {
         lastIntentClassification = intentClassification
         currentTurnCaptureAfterReplyHint = intentClassification.classification.autoCaptureHint
         logIntentClassification(intentClassification)
+        logIntentProviderSelection(intentClassification.provider)
 
         if case .enroll(let name, let confirmation, let providerNoneReason) = identityDecision.action {
             var immediate = immediateTalkTurnResult(message: confirmation)
@@ -2113,6 +2129,7 @@ final class TurnOrchestrator {
                             provider: immediate.llmProvider,
                             routeReason: providerNoneReason,
                             routerMs: immediate.routerMs)
+            applyRoutingAttribution(&immediate, planProvider: immediate.llmProvider, planRouterMs: immediate.routerMs)
             return immediate
         }
 
@@ -2147,6 +2164,7 @@ final class TurnOrchestrator {
                     routeReason: "vision_camera_off",
                     routerMs: immediate.routerMs
                 )
+                applyRoutingAttribution(&immediate, planProvider: immediate.llmProvider, planRouterMs: immediate.routerMs)
                 return immediate
             }
 
@@ -2174,6 +2192,7 @@ final class TurnOrchestrator {
                     routeReason: "vision_camera_unhealthy",
                     routerMs: immediate.routerMs
                 )
+                applyRoutingAttribution(&immediate, planProvider: immediate.llmProvider, planRouterMs: immediate.routerMs)
                 return immediate
             }
 
@@ -2332,10 +2351,11 @@ final class TurnOrchestrator {
                                 provider: .none,
                                 routeReason: "pending_slot_retry_exhausted",
                                 routerMs: nil)
+                applyRoutingAttribution(&result, planProvider: LLMProvider.none, planRouterMs: nil)
                 return result
             } else {
                 // Route with pending slot context — LLM decides reply vs new topic
-                let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
+                let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason, planLocalWireMs, planLocalTotalMs, planOpenAIMs) = await routePlan(
                     userText,
                     history: history,
                     pendingSlot: slot,
@@ -2382,6 +2402,9 @@ final class TurnOrchestrator {
                                                provider: provider,
                                                aiModelUsed: aiModelUsed,
                                                routerMs: routerMs,
+                                               planLocalWireMs: planLocalWireMs,
+                                               planLocalTotalMs: planLocalTotalMs,
+                                               planOpenAIMs: planOpenAIMs,
                                                localKnowledgeContext: localKnowledgeContext,
                                                hasMemoryHints: hasMemoryHints,
                                                turnIndex: currentTurn,
@@ -2402,7 +2425,7 @@ final class TurnOrchestrator {
         }
 
         // Normal LLM routing (no pending slot)
-        let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
+        let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason, planLocalWireMs, planLocalTotalMs, planOpenAIMs) = await routePlan(
             userText,
             history: history,
             reason: .userChat,
@@ -2427,6 +2450,9 @@ final class TurnOrchestrator {
                                        provider: provider,
                                        aiModelUsed: aiModelUsed,
                                        routerMs: routerMs,
+                                       planLocalWireMs: planLocalWireMs,
+                                       planLocalTotalMs: planLocalTotalMs,
+                                       planOpenAIMs: planOpenAIMs,
                                        localKnowledgeContext: localKnowledgeContext,
                                        hasMemoryHints: hasMemoryHints,
                                        turnIndex: currentTurn,
@@ -2448,38 +2474,45 @@ final class TurnOrchestrator {
     // MARK: - Brain Router Pipeline
 
     /// Routes plans through PlanRoutePolicy.
-    /// Default policy: OpenAI first when key is ready.
-    /// Local plan routing is only used when OpenAI is unavailable, or when the explicit local-plan dev override is enabled.
+    /// Default policy: Ollama first, then OpenAI fallback when available.
+    /// Dev override `preferOpenAIPlans` can flip to OpenAI-first when a key is ready.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
                            reason: LLMCallReason = .userChat,
-                           promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?, String) {
+                           promptContext: PromptRuntimeContext? = nil) async -> (Plan, LLMProvider, Int, String?, String, Int?, Int?, Int?) {
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
         let planRoutePolicy = PlanRoutePolicy(
             useOllama: M2Settings.useOllama,
-            preferLocalPlans: M2Settings.preferLocalPlans,
+            preferOpenAIPlans: M2Settings.preferOpenAIPlans,
             openAIStatus: OpenAISettings.apiKeyStatus
         )
         #if DEBUG
-        print("[PLAN_ROUTE_POLICY] local_first=\(planRoutePolicy.localFirst) openai_fallback=\(planRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) prefer_local_plans=\(M2Settings.preferLocalPlans) openai_status=\(planRoutePolicy.openAIStatus)")
+        print("[PLAN_ROUTE_POLICY] local_first=\(planRoutePolicy.localFirst) openai_fallback=\(planRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) prefer_openai_plans=\(M2Settings.preferOpenAIPlans) openai_status=\(planRoutePolicy.openAIStatus)")
         #endif
 
         var ollamaLocalFirstFailKind: String?
+        var localWireMs: Int?
+        var localTotalMs: Int?
+        var openAIMs: Int?
 
         // Local-first: attempt Ollama before OpenAI when both are available
         if planRoutePolicy.routeOrder.first == .ollama && planRoutePolicy.routeOrder.contains(.openai) {
             let start = CFAbsoluteTimeGetCurrent()
             do {
-                let plan = try await withTimeout(3.0) {
-                    try await self.ollamaRouter.routePlan(
-                        text, history: history, pendingSlot: pendingSlot, promptContext: promptContext,
-                        skipRepairRetry: true
-                    )
-                }
+                let routed = try await self.ollamaRouter.routePlanWithTiming(
+                    text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    promptContext: promptContext,
+                    skipRepairRetry: true,
+                    wireDeadlineMs: 3000
+                )
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                localWireMs = routed.timing.wireMs
+                localTotalMs = routed.timing.totalMs
                 routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-                return (plan, .ollama, ms, nil, "ollama_local_first_success")
+                return (routed.plan, .ollama, ms, nil, "ollama_local_first_success", localWireMs, localTotalMs, nil)
             } catch {
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 let failInfo = classifyOllamaFailure(error)
@@ -2503,15 +2536,17 @@ final class TurnOrchestrator {
                         history: history,
                         pendingSlot: pendingSlot,
                         promptContext: promptContext,
-                        modelOverride: selectedModel
+                        modelOverride: selectedModel,
+                        reason: .plan
                     )
                 }
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                openAIMs = ms
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: true)
                 if let failKind = ollamaLocalFirstFailKind {
-                    return (plan, .openai, ms, selectedModel, "ollama_\(failKind)_fallback")
+                    return (plan, .openai, ms, selectedModel, "ollama_\(failKind)_fallback", localWireMs, localTotalMs, openAIMs)
                 }
-                return (plan, .openai, ms, selectedModel, "openai_success")
+                return (plan, .openai, ms, selectedModel, "openai_success", localWireMs, localTotalMs, openAIMs)
             } catch {
                 if let validationFailure = routerValidationFailure(from: error) {
                     let (plan, routeReason) = planForRouterValidationFailure(
@@ -2521,7 +2556,8 @@ final class TurnOrchestrator {
                     )
                     let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                     routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                    return (plan, .openai, ms, selectedModel, routeReason)
+                    openAIMs = ms
+                    return (plan, .openai, ms, selectedModel, routeReason, localWireMs, localTotalMs, openAIMs)
                 }
 
                 if error is RouterTimeout {
@@ -2534,13 +2570,15 @@ final class TurnOrchestrator {
                                 history: history,
                                 pendingSlot: pendingSlot,
                                 promptContext: self.timeoutRetryPromptContext(from: promptContext),
-                                modelOverride: selectedModel
+                                modelOverride: selectedModel,
+                                reason: .plan
                             )
                         }
                         let retryMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                         logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: retryMs, error: nil)
                         routerLog(provider: "openai", reason: reason.rawValue, ms: retryMs, ok: true)
-                        return (plan, .openai, retryMs, selectedModel, "openai_success_timeout_retry")
+                        openAIMs = retryMs
+                        return (plan, .openai, retryMs, selectedModel, "openai_success_timeout_retry", localWireMs, localTotalMs, openAIMs)
                     } catch {
                         if let validationFailure = routerValidationFailure(from: error) {
                             let (plan, routeReason) = planForRouterValidationFailure(
@@ -2551,47 +2589,55 @@ final class TurnOrchestrator {
                             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                             logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: ms, error: error)
                             routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                            return (plan, .openai, ms, selectedModel, routeReason)
+                            openAIMs = ms
+                            return (plan, .openai, ms, selectedModel, routeReason, localWireMs, localTotalMs, openAIMs)
                         }
 
                         let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                         logTimeoutRetryAttempt(provider: "openai", attempt: 2, ms: ms, error: error)
                         routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                        return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_timeout_retry_failed")
+                        openAIMs = ms
+                        return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_timeout_retry_failed", localWireMs, localTotalMs, openAIMs)
                     }
                 }
 
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "openai", reason: reason.rawValue, ms: ms, ok: false)
-                return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_error_fallback")
+                openAIMs = ms
+                return (friendlyFallbackPlan(error), .openai, ms, selectedModel, "openai_error_fallback", localWireMs, localTotalMs, openAIMs)
             }
         }
 
         if planRoutePolicy.routeOrder.first == LLMProvider.none,
            planRoutePolicy.openAIStatus == .invalid || OpenAISettings.authFailureStatusCode == 401 || OpenAISettings.authFailureStatusCode == 403 {
-            return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil, "openai_invalid_key")
+            return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.invalidAPIKey), .none, 0, nil, "openai_invalid_key", localWireMs, localTotalMs, openAIMs)
         }
 
         if planRoutePolicy.routeOrder.first == .ollama {
             return await ollamaFallback(text, history: history, pendingSlot: pendingSlot, reason: reason, promptContext: promptContext)
         }
 
-        return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil, "no_provider_configured")
+        return (friendlyFallbackPlan(OpenAIRouter.OpenAIError.notConfigured), .none, 0, nil, "no_provider_configured", localWireMs, localTotalMs, openAIMs)
     }
 
     /// Ollama attempt — single call, no validation repair.
     private func ollamaFallback(_ text: String, history: [ChatMessage],
                                 pendingSlot: PendingSlot?,
                                 reason: LLMCallReason,
-                                promptContext: PromptRuntimeContext?) async -> (Plan, LLMProvider, Int, String?, String) {
+                                promptContext: PromptRuntimeContext?) async -> (Plan, LLMProvider, Int, String?, String, Int?, Int?, Int?) {
         let start = CFAbsoluteTimeGetCurrent()
         do {
-            let plan = try await withTimeout(4.0) {
-                try await self.ollamaRouter.routePlan(text, history: history, pendingSlot: pendingSlot, promptContext: promptContext)
-            }
+            let routed = try await self.ollamaRouter.routePlanWithTiming(
+                text,
+                history: history,
+                pendingSlot: pendingSlot,
+                promptContext: promptContext,
+                skipRepairRetry: false,
+                wireDeadlineMs: 3000
+            )
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-            return (plan, .ollama, ms, nil, "ollama_success")
+            return (routed.plan, .ollama, ms, nil, "ollama_success", routed.timing.wireMs, routed.timing.totalMs, nil)
         } catch {
             if let validationFailure = routerValidationFailure(from: error) {
                 let (plan, routeReason) = planForRouterValidationFailure(
@@ -2601,11 +2647,11 @@ final class TurnOrchestrator {
                 )
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-                return (plan, .none, ms, nil, routeReason)
+                return (plan, .none, ms, nil, routeReason, nil, nil, nil)
             }
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: false)
-            return (friendlyFallbackPlan(error), .ollama, ms, nil, "ollama_error_fallback")
+            return (friendlyFallbackPlan(error), .ollama, ms, nil, "ollama_error_fallback", nil, nil, nil)
         }
     }
 
@@ -2617,6 +2663,9 @@ final class TurnOrchestrator {
                              provider: LLMProvider,
                              aiModelUsed: String?,
                              routerMs: Int,
+                             planLocalWireMs: Int? = nil,
+                             planLocalTotalMs: Int? = nil,
+                             planOpenAIMs: Int? = nil,
                              localKnowledgeContext: LocalKnowledgeContext,
                              hasMemoryHints: Bool,
                              turnIndex: Int,
@@ -2632,7 +2681,11 @@ final class TurnOrchestrator {
         result.llmProvider = provider
         result.aiModelUsed = aiModelUsed
         result.executedToolSteps = exec.executedToolSteps
+        result.toolMsTotal = exec.toolMsTotal
         result.routerMs = routerMs
+        result.planLocalWireMs = planLocalWireMs
+        result.planLocalTotalMs = planLocalTotalMs
+        result.planOpenAIMs = planOpenAIMs
         result.originProvider = originProvider(for: provider)
         result.executionProvider = executionProvider(for: provider, hasToolExecution: !exec.executedToolSteps.isEmpty)
         result.originReason = originReason
@@ -2713,6 +2766,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        applyRoutingAttribution(&result, planProvider: provider, planRouterMs: nil)
         applyOriginMetadata(&result)
         updateAssistantState(after: result, mode: mode)
         rememberAssistantLines(result.appendedChat)
@@ -2748,7 +2802,8 @@ final class TurnOrchestrator {
                         originalInput,
                         history: [],
                         repairReasons: repairReasons,
-                        modelOverride: aiModelUsed
+                        modelOverride: aiModelUsed,
+                        reason: .rewrite
                     )
                 }
                 return await executeImageRepair(plan,
@@ -2889,6 +2944,7 @@ final class TurnOrchestrator {
                                   provider: provider,
                                   aiModelUsed: aiModelUsed,
                                   localKnowledgeContext: localKnowledgeContext)
+        applyRoutingAttribution(&result, planProvider: provider, planRouterMs: nil)
         applyOriginMetadata(&result)
         updateAssistantState(after: result, mode: ConversationModeClassifier.classify(originalInput))
         rememberAssistantLines(result.appendedChat)
@@ -2913,6 +2969,7 @@ final class TurnOrchestrator {
         var result = TurnResult()
         result.appendedChat = [ChatMessage(role: .assistant, text: message)]
         result.spokenLines = [message]
+        applyRoutingAttribution(&result, planProvider: result.llmProvider, planRouterMs: result.routerMs)
         return result
     }
 
@@ -3162,7 +3219,7 @@ final class TurnOrchestrator {
         )
 
         if recipeToolOutputLooksFailed(result), OpenAISettings.apiKeyStatus == .ready {
-            let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason) = await routePlan(
+            let (rawPlan, provider, routerMs, aiModelUsed, routeProviderReason, planLocalWireMs, planLocalTotalMs, planOpenAIMs) = await routePlan(
                 text,
                 history: history,
                 reason: .userChat,
@@ -3186,6 +3243,9 @@ final class TurnOrchestrator {
                 provider: provider,
                 aiModelUsed: aiModelUsed,
                 routerMs: routerMs,
+                planLocalWireMs: planLocalWireMs,
+                planLocalTotalMs: planLocalTotalMs,
+                planOpenAIMs: planOpenAIMs,
                 localKnowledgeContext: localKnowledgeContext,
                 hasMemoryHints: hasMemoryHints,
                 turnIndex: turnIndex,
@@ -4467,7 +4527,8 @@ final class TurnOrchestrator {
                 try await self.openAIRouter.routePlan(
                     synthesisPrompt,
                     history: history,
-                    modelOverride: aiModelUsed
+                    modelOverride: aiModelUsed,
+                    reason: .polish
                 )
             }
             if let openAIPlan {
@@ -4541,6 +4602,7 @@ final class TurnOrchestrator {
         result.spokenLines.append(contentsOf: exec.spokenLines)
         result.appendedOutputs.append(contentsOf: exec.outputItems)
         result.executedToolSteps.append(contentsOf: exec.executedToolSteps)
+        result.toolMsTotal = (result.toolMsTotal ?? 0) + exec.toolMsTotal
         result.triggerFollowUpCapture = result.triggerFollowUpCapture || exec.triggerFollowUpCapture
 
         if let req = exec.pendingSlotRequest {
@@ -4666,6 +4728,11 @@ final class TurnOrchestrator {
 
             if shouldModulateConfidence {
                 updatedText = ResponsePolish.applyConfidenceModulation(to: updatedText)
+            }
+
+            if M2Settings.disableAutoClosePrompts,
+               currentIntentClassification?.classification.intent != .greeting {
+                updatedText = ResponsePolish.stripAutoClosePrompt(from: updatedText)
             }
 
             if ResponsePolish.containsMemoryAcknowledgement(updatedText) {
@@ -4828,8 +4895,10 @@ final class TurnOrchestrator {
     }
 
     private func applyFollowUpQuestionPolicy(_ result: inout TurnResult, turnIndex: Int) {
+        guard !M2Settings.disableAutoClosePrompts else { return }
         guard !result.triggerFollowUpCapture else { return } // pending slots/asks are separate flows
         guard !isFollowUpQuestionOnCooldown(turnIndex) else { return }
+        guard currentIntentClassification?.classification.intent == .greeting else { return }
 
         guard let idx = result.appendedChat.lastIndex(where: { $0.role == .assistant }) else { return }
         let original = result.appendedChat[idx]
@@ -4872,10 +4941,7 @@ final class TurnOrchestrator {
     }
 
     private func nextFollowUpQuestion() -> String {
-        guard !followUpQuestions.isEmpty else { return "Want more detail?" }
-        let value = followUpQuestions[followUpQuestionIndex % followUpQuestions.count]
-        followUpQuestionIndex = (followUpQuestionIndex + 1) % followUpQuestions.count
-        return value
+        greetingFollowUpQuestion
     }
 
     private func isFollowUpQuestionOnCooldown(_ turnIndex: Int) -> Bool {
@@ -5059,7 +5125,23 @@ final class TurnOrchestrator {
         return originProvider(for: provider)
     }
 
+    private func applyRoutingAttribution(_ result: inout TurnResult,
+                                         planProvider: LLMProvider? = nil,
+                                         planRouterMs: Int? = nil) {
+        let resolvedIntent = currentIntentClassification ?? lastIntentClassification
+        result.intentProviderSelected = resolvedIntent?.provider ?? .rule
+        result.intentRouterMsLocal = resolvedIntent?.intentRouterMsLocal
+        result.intentRouterMsOpenAI = resolvedIntent?.intentRouterMsOpenAI
+        result.planProviderSelected = planProvider ?? result.llmProvider
+        if let planRouterMs {
+            result.planRouterMs = planRouterMs
+        } else if result.planRouterMs == nil {
+            result.planRouterMs = result.routerMs
+        }
+    }
+
     private func applyOriginMetadata(_ result: inout TurnResult) {
+        applyRoutingAttribution(&result)
         for idx in result.appendedChat.indices where result.appendedChat[idx].role == .assistant {
             result.appendedChat[idx].llmProvider = result.llmProvider
             result.appendedChat[idx].originProvider = result.originProvider
@@ -5092,6 +5174,8 @@ final class TurnOrchestrator {
                 return ("transport", 0, String(msg.prefix(120)))
             case .invalidResponse:
                 return ("transport", 0, "invalid HTTP response")
+            case .wireDeadlineExceeded(let wireMs, let deadlineMs):
+                return ("timeout", 0, "wire deadline exceeded \(wireMs)ms > \(deadlineMs)ms")
             }
         }
         return ("unknown", 0, String(describing: error).prefix(120).description)
@@ -5364,6 +5448,39 @@ enum ResponsePolish {
             }
         }
         return trimmed
+    }
+
+    static func stripAutoClosePrompt(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return text }
+
+        let patterns = [
+            #"\s*(anything\s+else\s+i\s+can\s+help\s+with\??)\s*$"#,
+            #"\s*(anything\s+else\s+you(?:'d|\s+would)?\s+like\s+to\s+know\??)\s*$"#,
+            #"\s*(let\s+me\s+know\s+if\s+you\s+need\s+anything\s+else\.?)\s*$"#,
+            #"\s*(let\s+me\s+know\s+if\s+you(?:'d|\s+would)?\s+like\s+to\s+know\s+more\.?)\s*$"#,
+            #"\s*(how\s+else\s+can\s+i\s+help\??)\s*$"#,
+            #"\s*(need\s+anything\s+else\s+on\s+this\??)\s*$"#,
+            #"\s*(want\s+me\s+to\s+continue\s+on\s+this\??)\s*$"#,
+            #"\s*(should\s+i\s+add\s+anything\s+else\??)\s*$"#,
+            #"\s*(what\s+else\s+can\s+i\s+help\s+with\??)\s*$"#,
+            #"\s*((?:want|would\s+you\s+like)\s+to\s+know\s+more\??)\s*$"#
+        ]
+
+        var output = trimmed
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if output.isEmpty {
+            return "Done."
+        }
+        return output
     }
 
     private static func isUncertain(_ text: String) -> Bool {

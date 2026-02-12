@@ -1,5 +1,57 @@
 import Foundation
 
+enum OpenAICallReason: String, CaseIterable {
+    case intent
+    case plan
+    case polish
+    case rewrite
+    case other
+}
+
+enum TurnExecutionContext {
+    @TaskLocal static var turnID: String?
+}
+
+final class OpenAICallTracker {
+    static let shared = OpenAICallTracker()
+
+    private struct TurnCalls {
+        var reasons: [OpenAICallReason] = []
+        var callers: [String] = []
+    }
+
+    private let lock = NSLock()
+    private var callsByTurnID: [String: TurnCalls] = [:]
+
+    private init() {}
+
+    func record(reason: OpenAICallReason, caller: String) {
+        guard let turnID = TurnExecutionContext.turnID else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var entry = callsByTurnID[turnID] ?? TurnCalls()
+        entry.reasons.append(reason)
+        entry.callers.append(caller)
+        callsByTurnID[turnID] = entry
+    }
+
+    func summary(for turnID: String) -> (count: Int, reasons: [String], callers: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = callsByTurnID[turnID] else {
+            return (0, [], [])
+        }
+        let reasonLabels = entry.reasons.map(\.rawValue)
+        return (entry.reasons.count, reasonLabels, entry.callers)
+    }
+
+    func clear(turnID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        callsByTurnID.removeValue(forKey: turnID)
+    }
+}
+
 // MARK: - OpenAI Transport Protocol
 
 final class OpenAIAPILogStore {
@@ -491,7 +543,11 @@ enum PromptBuilder {
         - Keep spoken "say" short. If content is >240 chars or structured, return PLAN with:
           1) talk step (short summary)
           2) tool step show_text with markdown details.
-        - Ask one follow-up question by default, except problem reports where 2-4 clarifying questions in one turn are allowed.
+        - Transactional by default: do NOT add generic follow-up questions or soft-close prompts.
+        - Never include boilerplate closers like:
+          "Anything else ...", "Let me know if ...", "Want to know more ...", "How else can I help ...".
+        - Greeting intent is the only exception where one short "How can I help?" is allowed.
+        - For problem reports only: 2-4 clarifying questions in one turn are allowed when needed.
         \(budgetDirective)
         - If prior assistant turn asked a question and the user replies briefly, treat that as the answer unless topic clearly changes.
         """
@@ -849,6 +905,23 @@ enum PromptBuilder {
 /// Abstraction over the OpenAI HTTP API so tests can inject a fake.
 protocol OpenAITransport {
     func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String
+    func chat(messages: [[String: String]],
+              model: String,
+              maxOutputTokens: Int?,
+              responseFormat: [String: Any]?,
+              temperature: Double?) async throws -> String
+}
+
+extension OpenAITransport {
+    func chat(messages: [[String: String]],
+              model: String,
+              maxOutputTokens: Int?,
+              responseFormat: [String: Any]?,
+              temperature: Double?) async throws -> String {
+        _ = responseFormat
+        _ = temperature
+        return try await chat(messages: messages, model: model, maxOutputTokens: maxOutputTokens)
+    }
 }
 
 /// Real transport that hits the OpenAI /v1/chat/completions endpoint.
@@ -901,6 +974,20 @@ struct RealOpenAITransport: OpenAITransport {
     }()
 
     func chat(messages: [[String: String]], model: String, maxOutputTokens: Int?) async throws -> String {
+        try await chat(
+            messages: messages,
+            model: model,
+            maxOutputTokens: maxOutputTokens,
+            responseFormat: nil,
+            temperature: nil
+        )
+    }
+
+    func chat(messages: [[String: String]],
+              model: String,
+              maxOutputTokens: Int?,
+              responseFormat: [String: Any]?,
+              temperature: Double?) async throws -> String {
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
         let apiKey: String
@@ -953,9 +1040,9 @@ struct RealOpenAITransport: OpenAITransport {
         let requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
-            "temperature": 0.4,
+            "temperature": temperature ?? 0.4,
             "max_tokens": cappedTokens,
-            "response_format": Self.responseFormat
+            "response_format": responseFormat ?? Self.responseFormat
         ]
 
         var request = URLRequest(url: url)
@@ -1195,10 +1282,122 @@ final class OpenAIRouter {
 
     private let transport: OpenAITransport
     private let parser: OllamaRouter
+    private static let intentResponseFormat: [String: Any] = {
+        [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "sam_intent_classification",
+                "strict": true,
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "intent": [
+                            "type": "string",
+                            "enum": RoutedIntent.allCases.map(\.rawValue)
+                        ],
+                        "confidence": ["type": "number"],
+                        "autoCaptureHint": ["type": "boolean"],
+                        "needsWeb": ["type": "boolean"],
+                        "notes": ["type": "string"]
+                    ],
+                    "required": [
+                        "intent",
+                        "confidence",
+                        "autoCaptureHint",
+                        "needsWeb",
+                        "notes"
+                    ],
+                    "additionalProperties": false
+                ] as [String: Any]
+            ] as [String: Any]
+        ]
+    }()
 
     init(parser: OllamaRouter, transport: OpenAITransport = RealOpenAITransport()) {
         self.parser = parser
         self.transport = transport
+    }
+
+    func classifyIntentWithTrace(_ input: IntentClassifierInput,
+                                 reason: OpenAICallReason) async throws -> IntentLLMCallOutput {
+        OpenAICallTracker.shared.record(reason: reason, caller: #function)
+        let routeModel = normalizedRouteModel(nil)
+        let state: [String: Any?] = [
+            "camera_running": input.cameraRunning,
+            "face_known": input.faceKnown,
+            "pending_slot": input.pendingSlot,
+            "last_assistant_line": input.lastAssistantLine
+        ]
+        let cleanedState = state.reduce(into: [String: Any]()) { partial, pair in
+            if let value = pair.value {
+                partial[pair.key] = value
+            }
+        }
+        let stateData = try JSONSerialization.data(withJSONObject: cleanedState)
+        let stateJSON = String(data: stateData, encoding: .utf8) ?? "{}"
+        let systemPrompt = """
+        You are an intent classification engine.
+
+        You MUST return ONLY valid JSON.
+        You MUST NOT output natural language.
+        You MUST NOT explain.
+        You MUST NOT include markdown.
+
+        Classify the user's intent using this schema:
+        {
+          "intent": "\(RoutedIntent.allCases.map(\.rawValue).joined(separator: " | "))",
+          "confidence": 0.0-1.0,
+          "autoCaptureHint": true|false,
+          "needsWeb": true|false,
+          "notes": ""
+        }
+
+        Intent guidance:
+        - general_qna = static facts/explanations that do NOT require live web data.
+          Example: "what is the capital of australia" => general_qna, needsWeb=false.
+        - web_request = ONLY when answer requires live/current information.
+          Examples: weather now/today, latest news, live scores, current prices.
+        - If user does not ask for live/current/latest information, do not use web_request.
+        - Set needsWeb=true iff intent is web_request. Otherwise needsWeb=false.
+
+        If uncertain, set intent="unknown" and confidence < 0.7.
+        """
+        let userPrompt = """
+        USER_TEXT: \(input.userText)
+        STATE_JSON: \(stateJSON)
+        """
+        let messages: [[String: String]] = [
+            ["role": "system", "content": systemPrompt],
+            ["role": "user", "content": userPrompt]
+        ]
+        let raw = try await transport.chat(
+            messages: messages,
+            model: routeModel,
+            maxOutputTokens: 128,
+            responseFormat: Self.intentResponseFormat,
+            temperature: 0.0
+        )
+        let prompt = """
+        [system]
+        \(systemPrompt)
+        [user]
+        \(userPrompt)
+        """
+        return IntentLLMCallOutput(
+            rawText: raw,
+            model: routeModel,
+            endpoint: "https://api.openai.com/v1/chat/completions",
+            prompt: prompt
+        )
+    }
+
+    func classifyIntent(_ input: IntentClassifierInput,
+                        reason: OpenAICallReason) async throws -> String {
+        try await classifyIntentWithTrace(input, reason: reason).rawText
+    }
+
+    func classifyIntent(_ input: IntentClassifierInput) async throws -> String {
+        try await classifyIntent(input, reason: .intent)
     }
 
     // MARK: - Route Plan
@@ -1209,7 +1408,9 @@ final class OpenAIRouter {
                    repairRawSnippet: String? = nil,
                    alarmContext: AlarmContext? = nil,
                    promptContext: PromptRuntimeContext? = nil,
-                   modelOverride: String? = nil) async throws -> Plan {
+                   modelOverride: String? = nil,
+                   reason: OpenAICallReason) async throws -> Plan {
+        OpenAICallTracker.shared.record(reason: reason, caller: #function)
         let routeModel = normalizedRouteModel(modelOverride)
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
@@ -1284,7 +1485,8 @@ final class OpenAIRouter {
                         repairRawSnippet: responseText,
                         alarmContext: alarmContext,
                         promptContext: promptContext,
-                        modelOverride: routeModel
+                        modelOverride: routeModel,
+                        reason: reason
                     )
                 }
                 return fallbackPlanForUnexpectedCapabilityEscalation(userInput: input)
@@ -1409,6 +1611,26 @@ final class OpenAIRouter {
             let capped = String(trimmed.prefix(240))
             return Plan(steps: [.talk(say: capped)])
         }
+    }
+
+    func routePlan(_ input: String, history: [ChatMessage] = [],
+                   pendingSlot: PendingSlot? = nil,
+                   repairReasons: [String]? = nil,
+                   repairRawSnippet: String? = nil,
+                   alarmContext: AlarmContext? = nil,
+                   promptContext: PromptRuntimeContext? = nil,
+                   modelOverride: String? = nil) async throws -> Plan {
+        try await routePlan(
+            input,
+            history: history,
+            pendingSlot: pendingSlot,
+            repairReasons: repairReasons,
+            repairRawSnippet: repairRawSnippet,
+            alarmContext: alarmContext,
+            promptContext: promptContext,
+            modelOverride: modelOverride,
+            reason: .plan
+        )
     }
 
     private func normalizedRouteModel(_ override: String?) -> String {
@@ -1950,6 +2172,8 @@ final class OpenAIRouter {
                 return "unreachable: \(msg)"
             case .validationFailure(let failure):
                 return "validation_failure:\(failure.reason)"
+            case .wireDeadlineExceeded(let wireMs, let deadlineMs):
+                return "wire_deadline_exceeded:\(wireMs)ms>\(deadlineMs)ms"
             }
         }
         if let decodingError = error as? DecodingError {
