@@ -216,7 +216,16 @@ enum M2Settings {
 
     static var useOllama: Bool {
         get {
-            if defaults.object(forKey: Key.useOllama) == nil { return true }
+            if defaults.object(forKey: Key.useOllama) == nil {
+                let legacyKeys = ["m2_useOllama", "useOllama"]
+                for legacyKey in legacyKeys {
+                    if let legacyValue = defaults.object(forKey: legacyKey) as? Bool {
+                        defaults.set(legacyValue, forKey: Key.useOllama)
+                        return legacyValue
+                    }
+                }
+                return true
+            }
             return defaults.bool(forKey: Key.useOllama)
         }
         set { defaults.set(newValue, forKey: Key.useOllama) }

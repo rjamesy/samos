@@ -11,6 +11,8 @@ struct PlanExecutionResult {
     var executedToolSteps: [(name: String, args: [String: String])] = []
     var toolMsTotal: Int = 0
     var stoppedAtAsk: Bool = false
+    var executionMs: Int = 0
+    var speechSelectionMs: Int = 0
 }
 
 // MARK: - Image Prober
@@ -146,6 +148,7 @@ final class PlanExecutor {
     }
 
     func execute(_ plan: Plan, originalInput: String, pendingSlotName: String? = nil) async -> PlanExecutionResult {
+        let executionStartedAt = CFAbsoluteTimeGetCurrent()
         var result = PlanExecutionResult()
         let _ = pendingSlotName // Retained for API compatibility with existing call sites/tests.
         let topLevelToolSay = singleToolPlanSay(in: plan)
@@ -161,15 +164,18 @@ final class PlanExecutor {
         }
 
         func finalizedResult() -> PlanExecutionResult {
+            let speechSelectStartedAt = CFAbsoluteTimeGetCurrent()
             let selectedSpeech = speechCoordinator.selectSpokenLines(
                 entries: speechEntries,
                 toolProducedUserFacingOutput: toolProducedUserFacingOutput,
                 maxSpeakChars: M2Settings.maxSpeakChars
             )
+            result.speechSelectionMs = max(0, Int((CFAbsoluteTimeGetCurrent() - speechSelectStartedAt) * 1000))
             #if DEBUG
             print("[SPEECH_POLICY] entries=\(speechEntries.count) tool_user_facing=\(toolProducedUserFacingOutput) selected_count=\(selectedSpeech.count)")
             #endif
             result.spokenLines = selectedSpeech
+            result.executionMs = max(0, Int((CFAbsoluteTimeGetCurrent() - executionStartedAt) * 1000))
             return result
         }
 

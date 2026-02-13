@@ -30,6 +30,10 @@ final class TurnToolRunner: TurnToolRunning {
                 originalInput: originalInput,
                 pendingSlotName: pendingSlotName
             )
+            result = await maybeRetryWeatherPrompt(
+                originalResult: result,
+                originalInput: originalInput
+            )
             result.outputItems = result.outputItems.compactMap { normalizeToolOutput($0) }
             return result
         }
@@ -40,7 +44,11 @@ final class TurnToolRunner: TurnToolRunning {
             logToolReject(raw: action.name, normalized: nil, reason: "unknown_tool")
             return OutputItem(kind: .markdown, payload: Self.unknownToolPrompt)
         }
-        let canonicalAction = ToolAction(name: normalized, args: action.args, say: action.say)
+        let canonicalAction = ToolAction(
+            name: normalized,
+            args: canonicalizedToolArgs(name: normalized, args: action.args),
+            say: action.say
+        )
         return normalizeToolOutput(toolsRuntime.execute(canonicalAction))
     }
 
@@ -59,7 +67,13 @@ final class TurnToolRunner: TurnToolRunning {
                 guard let normalized = normalizedToolName(for: rawName) else {
                     return .rejected(rawToolName: rawName)
                 }
-                normalizedSteps.append(.tool(name: normalized, args: args, say: say))
+                normalizedSteps.append(
+                    .tool(
+                        name: normalized,
+                        args: canonicalizedStepArgs(name: normalized, args: args),
+                        say: say
+                    )
+                )
             default:
                 normalizedSteps.append(step)
             }
@@ -88,6 +102,105 @@ final class TurnToolRunner: TurnToolRunning {
         #if DEBUG
         print("[TOOL_REJECT] raw=\(raw) normalized=\(normalized ?? "nil") reason=\(reason)")
         #endif
+    }
+
+    private func canonicalizedStepArgs(name: String, args: [String: CodableValue]) -> [String: CodableValue] {
+        guard name == "get_weather" else { return args }
+        var normalized = args
+        if normalized["place"] == nil,
+           let location = normalized["location"] {
+            normalized["place"] = location
+        }
+        return normalized
+    }
+
+    private func canonicalizedToolArgs(name: String, args: [String: String]) -> [String: String] {
+        guard name == "get_weather" else { return args }
+        var normalized = args
+        let place = normalized["place"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if place.isEmpty {
+            let location = normalized["location"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !location.isEmpty {
+                normalized["place"] = location
+            }
+        }
+        return normalized
+    }
+
+    private func maybeRetryWeatherPrompt(originalResult: ToolRunResult,
+                                         originalInput: String) async -> ToolRunResult {
+        guard let pending = originalResult.pendingSlotRequest,
+              pending.slot.caseInsensitiveCompare("place") == .orderedSame else {
+            return originalResult
+        }
+        guard originalResult.executedToolSteps.contains(where: { $0.name == "get_weather" }) else {
+            return originalResult
+        }
+        guard let place = extractWeatherPlace(from: originalInput) else {
+            return originalResult
+        }
+
+        let retryPlan = Plan(steps: [
+            .tool(name: "get_weather", args: ["place": .string(place)], say: nil)
+        ])
+        var retryResult = await planExecutor.execute(
+            retryPlan,
+            originalInput: originalInput,
+            pendingSlotName: nil
+        )
+        if let retryPending = retryResult.pendingSlotRequest,
+           retryPending.slot.caseInsensitiveCompare("place") == .orderedSame {
+            return originalResult
+        }
+
+        retryResult.toolMsTotal += originalResult.toolMsTotal
+        retryResult.executedToolSteps = originalResult.executedToolSteps + retryResult.executedToolSteps
+        return retryResult
+    }
+
+    private func extractWeatherPlace(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        let blockers = ["what's the weather", "what is the weather", "weather today", "weather now"]
+        if blockers.contains(where: { lower == $0 }) { return nil }
+
+        let patterns = [
+            #"(?i)\b(?:weather|forecast|temperature|rain|raining)\s+(?:in\s+)?([A-Za-z][A-Za-z\s'\-]{1,40})"#,
+            #"(?i)\bin\s+([A-Za-z][A-Za-z\s'\-]{1,40})\s+(?:today|now|right now)\b"#,
+            #"(?i)\b([A-Za-z][A-Za-z\s'\-]{1,40})\s+weather\b"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            guard let match = regex.firstMatch(in: trimmed, range: nsRange),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: trimmed) else { continue }
+            var candidate = String(trimmed[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            candidate = candidate.replacingOccurrences(of: #"\b(?:today|tomorrow|now|right now|please)\b"#,
+                                                       with: "",
+                                                       options: .regularExpression)
+            candidate = candidate.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty else { continue }
+            let lowerCandidate = candidate.lowercased()
+            let disallowed = ["the", "it", "this", "that", "weather", "forecast"]
+            if disallowed.contains(lowerCandidate) { continue }
+            return candidate
+        }
+
+        let tokens = trimmed
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,!?")) }
+        if tokens.count == 2,
+           ["weather", "forecast", "rain", "raining"].contains(tokens[0].lowercased()) {
+            let city = tokens[1]
+            if city.range(of: #"^[A-Za-z][A-Za-z'\-]{1,31}$"#, options: .regularExpression) != nil {
+                return city
+            }
+        }
+        return nil
     }
 
     private func normalizeToolOutput(_ output: OutputItem?) -> OutputItem? {

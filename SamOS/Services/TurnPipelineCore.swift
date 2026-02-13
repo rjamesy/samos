@@ -9,6 +9,18 @@ struct TurnContext {
     let now: Date
 }
 
+struct TurnTraceEvent: Equatable, Sendable {
+    let name: String
+    let tMsFromStart: Int
+    let data: String?
+}
+
+struct TurnTrace: Equatable, Sendable {
+    let turnID: String
+    let totalMs: Int
+    let events: [TurnTraceEvent]
+}
+
 /// Result of a single turn processed by the orchestrator.
 struct TurnResult {
     var appendedChat: [ChatMessage] = []
@@ -28,7 +40,10 @@ struct TurnResult {
     var planLocalWireMs: Int?
     var planLocalTotalMs: Int?
     var planOpenAIMs: Int?
+    var routeLocalOutcome: String?
     var toolMsTotal: Int?
+    var planExecutionMs: Int?
+    var speechSelectionMs: Int?
     var planRouterMs: Int?
     var routerMs: Int? {
         get { planRouterMs }
@@ -62,6 +77,31 @@ struct TurnPlanRouteRequest {
     }
 }
 
+struct TurnRouterState: Equatable, Sendable {
+    let cameraRunning: Bool
+    let faceKnown: Bool
+    let pendingSlot: String?
+    let lastAssistantLine: String?
+}
+
+struct TurnCombinedRouteRequest {
+    let text: String
+    let history: [ChatMessage]
+    let pendingSlot: PendingSlot?
+    let reason: LLMCallReason
+    let promptContext: PromptRuntimeContext?
+    let state: TurnRouterState
+}
+
+struct CombinedRouteDecision {
+    let classification: IntentClassificationResult
+    let route: RouteDecision
+    let localAttempted: Bool
+    let localOutcome: String?
+    let localMs: Int?
+    let openAIMs: Int?
+}
+
 struct TurnPlanRouteResponse {
     let plan: Plan
     let provider: LLMProvider
@@ -71,6 +111,11 @@ struct TurnPlanRouteResponse {
     let planLocalWireMs: Int?
     let planLocalTotalMs: Int?
     let planOpenAIMs: Int?
+}
+
+enum RouterTimeouts {
+    static let localCombinedDeadlineMs = 3500
+    static let localCombinedDeadlineSeconds = 3.5
 }
 
 struct RouteDecision {
@@ -147,6 +192,7 @@ protocol TurnRouting: AnyObject {
     func classifyIntent(_ input: IntentClassifierInput,
                         policy: IntentRoutePolicy) async -> IntentClassificationResult
     func routePlan(_ request: TurnPlanRouteRequest) async -> RouteDecision
+    func routeCombined(_ request: TurnCombinedRouteRequest) async -> CombinedRouteDecision
 
     func evaluatePendingSlot(_ pendingSlot: PendingSlot?,
                              pendingCapabilityRequest: PendingCapabilityRequest?,

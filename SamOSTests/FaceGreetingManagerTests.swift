@@ -233,6 +233,9 @@ final class FaceGreetingManagerTests: XCTestCase {
 
     func testUnknownFacePromptsOnFirstVoiceTurnAfterDetection() async {
         let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedIntentResponses = [
+            .success(#"{"intent":"general_qna","confidence":0.93,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#)
+        ]
         fakeOpenAI.queuedResponses = [.success(#"{"action":"TALK","say":"I can help with that."}"#)]
 
         let fakeOllama = FakeOllamaTransportForPipeline()

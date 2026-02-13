@@ -153,6 +153,10 @@ struct SettingsView: View {
             appState.refreshCameraDebug()
             installedSkills = SkillStore.shared.loadInstalled()
             toneProfile = TonePreferenceStore.shared.loadProfile()
+            useOllama = M2Settings.useOllama
+            preferOpenAIPlans = M2Settings.preferOpenAIPlans
+            ollamaEndpoint = M2Settings.ollamaEndpoint
+            ollamaModel = M2Settings.ollamaModel
         }
         .onDisappear {
             appState.resumeListeningAfterSettings()

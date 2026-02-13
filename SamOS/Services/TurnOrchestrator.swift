@@ -1983,6 +1983,56 @@ final class TurnOrchestrator {
                     planOpenAIMs: routed.7
                 )
             },
+            routeCombined: { [weak self] request in
+                guard let self else {
+                    let classification = IntentClassificationResult(
+                        classification: IntentClassification(
+                            intent: .unknown,
+                            confidence: 0.2,
+                            notes: "",
+                            autoCaptureHint: false,
+                            needsWeb: false
+                        ),
+                        provider: .rule,
+                        attemptedLocal: false,
+                        attemptedOpenAI: false,
+                        localSkipReason: "router_deallocated",
+                        intentRouterMsLocal: nil,
+                        intentRouterMsOpenAI: nil,
+                        localConfidence: nil,
+                        openAIConfidence: nil,
+                        confidenceThreshold: 0.7,
+                        localTimeoutSeconds: nil,
+                        escalationReason: "router_deallocated"
+                    )
+                    let route = RouteDecision(
+                        plan: Plan(steps: [.talk(say: "Sorry — I had trouble generating a response. Please try again.")]),
+                        provider: .none,
+                        routerMs: 0,
+                        aiModelUsed: nil,
+                        routeReason: "router_deallocated",
+                        planLocalWireMs: nil,
+                        planLocalTotalMs: nil,
+                        planOpenAIMs: nil
+                    )
+                    return CombinedRouteDecision(
+                        classification: classification,
+                        route: route,
+                        localAttempted: false,
+                        localOutcome: "router_deallocated",
+                        localMs: nil,
+                        openAIMs: nil
+                    )
+                }
+                return await self.routeCombined(
+                    request.text,
+                    history: request.history,
+                    pendingSlot: request.pendingSlot,
+                    reason: request.reason,
+                    promptContext: request.promptContext,
+                    state: request.state
+                )
+            },
             nativeToolExists: { category in
                 TurnOrchestrator.hasNativeTool(for: category)
             },
@@ -2119,14 +2169,39 @@ final class TurnOrchestrator {
         OpenAISettings.preloadAPIKey()
         OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
         let intentRoutePolicy = IntentRoutePolicy(useOllama: M2Settings.useOllama)
+        let useCombinedRouting = (inputMode == .voice)
+        var combinedRouteDecision: CombinedRouteDecision?
+        let combinedPendingSlotSnapshot = pendingSlot
         #if DEBUG
         print("[INTENT_ROUTE_POLICY] local_first=\(intentRoutePolicy.localFirst) openai_fallback=\(intentRoutePolicy.openAIFallback) m2_useOllama=\(M2Settings.useOllama) openai_status=\(OpenAISettings.apiKeyStatus)")
         #endif
         logIntentAudioCorrelation(inputMode: inputMode)
-        let intentClassification = await router.classifyIntent(
-            intentInput,
-            policy: intentRoutePolicy
-        )
+        let intentClassification: IntentClassificationResult
+        if useCombinedRouting {
+            let combinedReason: LLMCallReason = pendingSlot == nil ? .userChat : .pendingSlotReply
+            let combined = await router.routeCombined(
+                TurnCombinedRouteRequest(
+                    text: userText,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    reason: combinedReason,
+                    promptContext: nil,
+                    state: TurnRouterState(
+                        cameraRunning: intentInput.cameraRunning,
+                        faceKnown: intentInput.faceKnown,
+                        pendingSlot: intentInput.pendingSlot,
+                        lastAssistantLine: intentInput.lastAssistantLine
+                    )
+                )
+            )
+            combinedRouteDecision = combined
+            intentClassification = combined.classification
+        } else {
+            intentClassification = await router.classifyIntent(
+                intentInput,
+                policy: intentRoutePolicy
+            )
+        }
         currentIntentClassification = intentClassification
         lastIntentClassification = intentClassification
         currentTurnCaptureAfterReplyHint = intentClassification.classification.autoCaptureHint
@@ -2379,14 +2454,29 @@ final class TurnOrchestrator {
             applyRoutingAttribution(&result, planProvider: LLMProvider.none, planRouterMs: nil)
             return result
         case .continueWithSlot(let slot):
-            let routed = await router.routePlan(TurnPlanRouteRequest(
-                text: userText,
-                history: history,
-                pendingSlot: slot,
-                reason: .pendingSlotReply,
-                promptContext: promptContext,
-                intentClassification: currentIntentClassification?.classification
-            ))
+            let reusedCombinedForPendingSlot = shouldReuseCombinedRouteDecision(
+                combinedRouteDecision,
+                requestedPendingSlot: slot,
+                initialPendingSlot: combinedPendingSlotSnapshot,
+                expectedReason: .pendingSlotReply
+            )
+            let routed: RouteDecision
+            let combinedUsed: CombinedRouteDecision?
+            if reusedCombinedForPendingSlot, let combined = combinedRouteDecision {
+                routed = combined.route
+                combinedUsed = combined
+                combinedRouteDecision = nil
+            } else {
+                routed = await router.routePlan(TurnPlanRouteRequest(
+                    text: userText,
+                    history: history,
+                    pendingSlot: slot,
+                    reason: .pendingSlotReply,
+                    promptContext: promptContext,
+                    intentClassification: currentIntentClassification?.classification
+                ))
+                combinedUsed = nil
+            }
             logPlanProviderSelection(provider: routed.provider,
                                      routeReason: routed.routeReason,
                                      routerMs: routed.routerMs,
@@ -2427,6 +2517,7 @@ final class TurnOrchestrator {
                                            toneRepairCue: toneRepairCue,
                                            affect: effectiveAffect,
                                            originReason: routed.routeReason)
+            applyCombinedRouteMetadata(&result, combinedDecision: combinedUsed)
             appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
             logIdentityTurn(decision: identityDecision,
                             now: now,
@@ -2439,14 +2530,29 @@ final class TurnOrchestrator {
         }
 
         // Normal LLM routing (no pending slot)
-        let routed = await router.routePlan(TurnPlanRouteRequest(
-            text: userText,
-            history: history,
-            pendingSlot: nil,
-            reason: .userChat,
-            promptContext: promptContext,
-            intentClassification: currentIntentClassification?.classification
-        ))
+        let reusedCombinedForUserChat = shouldReuseCombinedRouteDecision(
+            combinedRouteDecision,
+            requestedPendingSlot: nil,
+            initialPendingSlot: combinedPendingSlotSnapshot,
+            expectedReason: .userChat
+        )
+        let routed: RouteDecision
+        let combinedUsed: CombinedRouteDecision?
+        if reusedCombinedForUserChat, let combined = combinedRouteDecision {
+            routed = combined.route
+            combinedUsed = combined
+            combinedRouteDecision = nil
+        } else {
+            routed = await router.routePlan(TurnPlanRouteRequest(
+                text: userText,
+                history: history,
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: promptContext,
+                intentClassification: currentIntentClassification?.classification
+            ))
+            combinedUsed = nil
+        }
         logPlanProviderSelection(provider: routed.provider,
                                  routeReason: routed.routeReason,
                                  routerMs: routed.routerMs,
@@ -2478,6 +2584,7 @@ final class TurnOrchestrator {
                                        toneRepairCue: toneRepairCue,
                                        affect: effectiveAffect,
                                        originReason: routed.routeReason)
+        applyCombinedRouteMetadata(&result, combinedDecision: combinedUsed)
         appendIdentityPromptIfNeeded(identityDecision.promptToAppend, to: &result)
         logIdentityTurn(decision: identityDecision,
                         now: now,
@@ -2488,6 +2595,377 @@ final class TurnOrchestrator {
     }
 
     // MARK: - Brain Router Pipeline
+
+    private enum CombinedLocalFailureKind: String {
+        case timeout
+        case schemaFail = "schema_fail"
+        case other
+    }
+
+    private func routeCombined(_ text: String,
+                               history: [ChatMessage],
+                               pendingSlot: PendingSlot?,
+                               reason: LLMCallReason,
+                               promptContext: PromptRuntimeContext?,
+                               state: TurnRouterState) async -> CombinedRouteDecision {
+        OpenAISettings.preloadAPIKey()
+        OpenAISettings.clearInvalidatedAPIKeyIfNeeded()
+
+        if !M2Settings.useOllama {
+            if OpenAISettings.apiKeyStatus == .ready {
+                return await routeCombinedViaOpenAI(
+                    text: text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    reason: reason,
+                    promptContext: promptContext,
+                    state: state,
+                    localMs: nil,
+                    localOutcome: "local_disabled",
+                    localAttempted: false,
+                    escalationReason: "local_disabled",
+                    routeReason: "combined_local_disabled_openai"
+                )
+            }
+
+            let classification = IntentClassificationResult(
+                classification: IntentClassification(
+                    intent: .unknown,
+                    confidence: 0.2,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: false
+                ),
+                provider: .rule,
+                attemptedLocal: false,
+                attemptedOpenAI: false,
+                localSkipReason: "local_disabled",
+                intentRouterMsLocal: nil,
+                intentRouterMsOpenAI: nil,
+                localConfidence: nil,
+                openAIConfidence: nil,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: nil,
+                escalationReason: "local_disabled"
+            )
+            let route = RouteDecision(
+                plan: friendlyFallbackPlan(OpenAIRouter.OpenAIError.requestFailed("combined_local_disabled_no_openai")),
+                provider: .none,
+                routerMs: 0,
+                aiModelUsed: nil,
+                routeReason: "combined_local_disabled_no_openai",
+                planLocalWireMs: nil,
+                planLocalTotalMs: nil,
+                planOpenAIMs: nil
+            )
+            return CombinedRouteDecision(
+                classification: classification,
+                route: route,
+                localAttempted: false,
+                localOutcome: "local_disabled",
+                localMs: nil,
+                openAIMs: nil
+            )
+        }
+
+        let localStartedAt = CFAbsoluteTimeGetCurrent()
+        do {
+            let local = try await withTimeout(RouterTimeouts.localCombinedDeadlineSeconds) {
+                try await self.ollamaRouter.routeCombinedWithTiming(
+                    text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    promptContext: promptContext,
+                    state: state,
+                    wireDeadlineMs: RouterTimeouts.localCombinedDeadlineMs
+                )
+            }
+            let localMs = max(0, Int((CFAbsoluteTimeGetCurrent() - localStartedAt) * 1000))
+            let classification = IntentClassificationResult(
+                classification: local.result.classification,
+                provider: .ollama,
+                attemptedLocal: true,
+                attemptedOpenAI: false,
+                localSkipReason: nil,
+                intentRouterMsLocal: localMs,
+                intentRouterMsOpenAI: nil,
+                localConfidence: local.result.classification.confidence,
+                openAIConfidence: nil,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: RouterTimeouts.localCombinedDeadlineSeconds,
+                escalationReason: nil
+            )
+            let route = RouteDecision(
+                plan: local.result.plan,
+                provider: .ollama,
+                routerMs: localMs,
+                aiModelUsed: nil,
+                routeReason: "combined_local_success",
+                planLocalWireMs: local.timing.wireMs,
+                planLocalTotalMs: local.timing.totalMs,
+                planOpenAIMs: nil
+            )
+            return CombinedRouteDecision(
+                classification: classification,
+                route: route,
+                localAttempted: true,
+                localOutcome: "ok",
+                localMs: localMs,
+                openAIMs: nil
+            )
+        } catch {
+            let localMs = max(0, Int((CFAbsoluteTimeGetCurrent() - localStartedAt) * 1000))
+            let failureKind = classifyCombinedLocalFailure(error)
+            if shouldFallbackToOpenAI(for: failureKind) {
+                let routeReason = failureKind == .timeout
+                    ? "combined_local_timeout_openai_fallback"
+                    : "combined_local_schema_fail_openai_fallback"
+                return await routeCombinedViaOpenAI(
+                    text: text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    reason: reason,
+                    promptContext: promptContext,
+                    state: state,
+                    localMs: localMs,
+                    localOutcome: failureKind.rawValue,
+                    localAttempted: true,
+                    escalationReason: failureKind.rawValue,
+                    routeReason: routeReason
+                )
+            }
+
+            let classification = IntentClassificationResult(
+                classification: IntentClassification(
+                    intent: .unknown,
+                    confidence: 0.2,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: false
+                ),
+                provider: .rule,
+                attemptedLocal: true,
+                attemptedOpenAI: false,
+                localSkipReason: nil,
+                intentRouterMsLocal: localMs,
+                intentRouterMsOpenAI: nil,
+                localConfidence: nil,
+                openAIConfidence: nil,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: RouterTimeouts.localCombinedDeadlineSeconds,
+                escalationReason: failureKind.rawValue
+            )
+            let route = RouteDecision(
+                plan: friendlyFallbackPlan(error),
+                provider: .ollama,
+                routerMs: localMs,
+                aiModelUsed: nil,
+                routeReason: "combined_local_error_no_openai_fallback",
+                planLocalWireMs: nil,
+                planLocalTotalMs: localMs,
+                planOpenAIMs: nil
+            )
+            return CombinedRouteDecision(
+                classification: classification,
+                route: route,
+                localAttempted: true,
+                localOutcome: failureKind.rawValue,
+                localMs: localMs,
+                openAIMs: nil
+            )
+        }
+    }
+
+    private func classifyCombinedLocalFailure(_ error: Error) -> CombinedLocalFailureKind {
+        if error is RouterTimeout { return .timeout }
+        if let ollamaError = error as? OllamaRouter.OllamaError {
+            switch ollamaError {
+            case .wireDeadlineExceeded:
+                return .timeout
+            case .schemaMismatch, .jsonParseFailed, .validationFailure:
+                return .schemaFail
+            default:
+                return .other
+            }
+        }
+        return .other
+    }
+
+    private func shouldFallbackToOpenAI(for failureKind: CombinedLocalFailureKind) -> Bool {
+        guard OpenAISettings.apiKeyStatus == .ready else { return false }
+        return failureKind == .timeout || failureKind == .schemaFail
+    }
+
+    private func routeCombinedViaOpenAI(text: String,
+                                        history: [ChatMessage],
+                                        pendingSlot: PendingSlot?,
+                                        reason: LLMCallReason,
+                                        promptContext: PromptRuntimeContext?,
+                                        state: TurnRouterState,
+                                        localMs: Int?,
+                                        localOutcome: String?,
+                                        localAttempted: Bool,
+                                        escalationReason: String,
+                                        routeReason: String) async -> CombinedRouteDecision {
+        let openAIStartedAt = CFAbsoluteTimeGetCurrent()
+        do {
+            let openAIIntent = try await openAIProvider.classifyIntentWithRetry(
+                IntentClassifierInput(
+                    userText: text,
+                    cameraRunning: state.cameraRunning,
+                    faceKnown: state.faceKnown,
+                    pendingSlot: state.pendingSlot,
+                    lastAssistantLine: state.lastAssistantLine
+                ),
+                timeoutSeconds: openAIRouteTimeoutSeconds
+            )
+            guard let parsedClassification = parseIntentClassificationPayload(openAIIntent.output.rawText) else {
+                throw OpenAIRouter.OpenAIError.requestFailed("combined intent parse failure")
+            }
+
+            let selectedModel = selectOpenAIModel(for: text, reason: reason)
+            let planDecision = try await openAIProvider.routePlanWithRetry(
+                OpenAIPlanRequest(
+                    input: text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    promptContext: promptContext,
+                    modelOverride: selectedModel,
+                    reason: .plan,
+                    timeoutSeconds: openAIRouteTimeoutSeconds,
+                    retryMaxOutputTokens: openAITimeoutRetryMaxTokens
+                )
+            )
+            let openAIMs = max(0, Int((CFAbsoluteTimeGetCurrent() - openAIStartedAt) * 1000))
+            let classification = IntentClassificationResult(
+                classification: parsedClassification,
+                provider: .openai,
+                attemptedLocal: localAttempted,
+                attemptedOpenAI: true,
+                localSkipReason: localAttempted ? nil : "local_disabled",
+                intentRouterMsLocal: localMs,
+                intentRouterMsOpenAI: openAIMs,
+                localConfidence: nil,
+                openAIConfidence: parsedClassification.confidence,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: localAttempted ? RouterTimeouts.localCombinedDeadlineSeconds : nil,
+                escalationReason: escalationReason
+            )
+            let route = RouteDecision(
+                plan: planDecision.plan,
+                provider: .openai,
+                routerMs: openAIMs,
+                aiModelUsed: selectedModel,
+                routeReason: routeReason,
+                planLocalWireMs: nil,
+                planLocalTotalMs: localMs,
+                planOpenAIMs: openAIMs
+            )
+            return CombinedRouteDecision(
+                classification: classification,
+                route: route,
+                localAttempted: localAttempted,
+                localOutcome: localOutcome,
+                localMs: localMs,
+                openAIMs: openAIMs
+            )
+        } catch {
+            let openAIMs = max(0, Int((CFAbsoluteTimeGetCurrent() - openAIStartedAt) * 1000))
+            let classification = IntentClassificationResult(
+                classification: IntentClassification(
+                    intent: .unknown,
+                    confidence: 0.2,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: false
+                ),
+                provider: .rule,
+                attemptedLocal: localAttempted,
+                attemptedOpenAI: true,
+                localSkipReason: localAttempted ? nil : "local_disabled",
+                intentRouterMsLocal: localMs,
+                intentRouterMsOpenAI: openAIMs,
+                localConfidence: nil,
+                openAIConfidence: nil,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: localAttempted ? RouterTimeouts.localCombinedDeadlineSeconds : nil,
+                escalationReason: "openai_fallback_failed"
+            )
+            let route = RouteDecision(
+                plan: friendlyFallbackPlan(error),
+                provider: .openai,
+                routerMs: openAIMs,
+                aiModelUsed: nil,
+                routeReason: "combined_openai_fallback_error",
+                planLocalWireMs: nil,
+                planLocalTotalMs: localMs,
+                planOpenAIMs: openAIMs
+            )
+            return CombinedRouteDecision(
+                classification: classification,
+                route: route,
+                localAttempted: localAttempted,
+                localOutcome: localOutcome,
+                localMs: localMs,
+                openAIMs: openAIMs
+            )
+        }
+    }
+
+    private func parseIntentClassificationPayload(_ raw: String) -> IntentClassification? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let intentRaw = dict["intent"] as? String,
+              let intent = RoutedIntent(rawValue: intentRaw),
+              let confidenceNumber = dict["confidence"] as? NSNumber else {
+            return nil
+        }
+        let notes = (dict["notes"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let autoCaptureHint = dict["autoCaptureHint"] as? Bool ?? false
+        let needsWeb = dict["needsWeb"] as? Bool ?? (intent == .webRequest)
+        return IntentClassification(
+            intent: intent,
+            confidence: min(1.0, max(0.0, confidenceNumber.doubleValue)),
+            notes: notes,
+            autoCaptureHint: autoCaptureHint,
+            needsWeb: needsWeb
+        )
+    }
+
+    private func shouldReuseCombinedRouteDecision(_ decision: CombinedRouteDecision?,
+                                                  requestedPendingSlot: PendingSlot?,
+                                                  initialPendingSlot: PendingSlot?,
+                                                  expectedReason: LLMCallReason) -> Bool {
+        guard decision != nil else { return false }
+        switch expectedReason {
+        case .userChat:
+            return requestedPendingSlot == nil && initialPendingSlot == nil
+        case .pendingSlotReply:
+            guard let requestedPendingSlot, let initialPendingSlot else { return false }
+            return requestedPendingSlot.slotName.caseInsensitiveCompare(initialPendingSlot.slotName) == .orderedSame
+        default:
+            return false
+        }
+    }
+
+    private func applyCombinedRouteMetadata(_ result: inout TurnResult,
+                                            combinedDecision: CombinedRouteDecision?) {
+        guard let combinedDecision else { return }
+        result.routeLocalOutcome = combinedDecision.localOutcome
+        if result.intentRouterMsLocal == nil {
+            result.intentRouterMsLocal = combinedDecision.classification.intentRouterMsLocal
+        }
+        if result.intentRouterMsOpenAI == nil {
+            result.intentRouterMsOpenAI = combinedDecision.classification.intentRouterMsOpenAI
+        }
+        if result.planLocalTotalMs == nil {
+            result.planLocalTotalMs = combinedDecision.localMs
+        }
+        if result.planOpenAIMs == nil {
+            result.planOpenAIMs = combinedDecision.openAIMs
+        }
+    }
 
     /// Routes plans through PlanRoutePolicy.
     /// Default policy: Ollama first, then OpenAI fallback when available.
@@ -2668,6 +3146,8 @@ final class TurnOrchestrator {
         result.aiModelUsed = aiModelUsed
         result.executedToolSteps = exec.executedToolSteps
         result.toolMsTotal = exec.toolMsTotal
+        result.planExecutionMs = exec.executionMs
+        result.speechSelectionMs = exec.speechSelectionMs
         result.routerMs = routerMs
         result.planLocalWireMs = planLocalWireMs
         result.planLocalTotalMs = planLocalTotalMs

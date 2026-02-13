@@ -298,6 +298,105 @@ final class OllamaRouter {
         try await classifyIntentWithTrace(input).rawText
     }
 
+    struct CombinedRouteLLMOutput: Sendable {
+        let classification: IntentClassification
+        let plan: Plan
+    }
+
+    func routeCombinedWithTiming(_ input: String,
+                                 history: [ChatMessage] = [],
+                                 pendingSlot: PendingSlot? = nil,
+                                 promptContext: PromptRuntimeContext? = nil,
+                                 state: TurnRouterState,
+                                 wireDeadlineMs: Int?) async throws -> (result: CombinedRouteLLMOutput, timing: OllamaPlanTiming) {
+        let totalStartedAt = CFAbsoluteTimeGetCurrent()
+        let systemPrompt = buildSystemPrompt(forInput: input, promptContext: promptContext)
+        var messages = buildMessages(
+            input: input,
+            history: history,
+            systemPrompt: systemPrompt,
+            pendingSlot: pendingSlot,
+            promptContext: promptContext
+        )
+
+        let statePayload: [String: Any?] = [
+            "camera_running": state.cameraRunning,
+            "face_known": state.faceKnown,
+            "pending_slot": state.pendingSlot,
+            "last_assistant_line": state.lastAssistantLine
+        ]
+        let cleanedState = statePayload.reduce(into: [String: Any]()) { partial, pair in
+            if let value = pair.value {
+                partial[pair.key] = value
+            }
+        }
+        let stateData = try JSONSerialization.data(withJSONObject: cleanedState)
+        let stateJSON = String(data: stateData, encoding: .utf8) ?? "{}"
+
+        let combinedSchemaBlock = """
+        [COMBINED_ROUTE]
+        Return ONLY one JSON object with this exact shape:
+        {
+          "intent":"\(RoutedIntent.allCases.map(\.rawValue).joined(separator: " | "))",
+          "confidence":0.0-1.0,
+          "autoCaptureHint":true|false,
+          "needsWeb":true|false,
+          "notes":"",
+          "plan":{"action":"PLAN|TALK|TOOL|DELEGATE_OPENAI|CAPABILITY_GAP","steps":[...],"...":"..."}
+        }
+        Rules:
+        - Output JSON only. No markdown or prose.
+        - `plan` must be a complete action object Sam can execute immediately.
+        - `needsWeb` MUST be true iff intent is web_request.
+        STATE_JSON: \(stateJSON)
+        """
+
+        if let userIdx = messages.lastIndex(where: { ($0["role"] ?? "").lowercased() == "user" }) {
+            messages.insert(["role": "system", "content": combinedSchemaBlock], at: userIdx)
+        } else {
+            messages.append(["role": "system", "content": combinedSchemaBlock])
+        }
+
+        let responseText: String
+        let wireMs: Int
+        if let timedTransport = transport as? OllamaWireTimedTransport {
+            let timed = try await timedTransport.chatWithWireTiming(
+                messages: messages,
+                model: nil,
+                maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
+            )
+            responseText = timed.responseText
+            wireMs = timed.wireMs
+        } else {
+            let wireStartedAt = CFAbsoluteTimeGetCurrent()
+            responseText = try await transport.chat(
+                messages: messages,
+                model: nil,
+                maxOutputTokens: promptContext?.responseBudget.maxOutputTokens
+            )
+            wireMs = Int((CFAbsoluteTimeGetCurrent() - wireStartedAt) * 1000)
+        }
+        if let wireDeadlineMs, wireMs > wireDeadlineMs {
+            throw OllamaError.wireDeadlineExceeded(wireMs: wireMs, deadlineMs: wireDeadlineMs)
+        }
+
+        #if DEBUG
+        print("[OllamaRouter] Raw combined response: \(responseText)")
+        #endif
+
+        let parseStartedAt = CFAbsoluteTimeGetCurrent()
+        let parsed = try parseCombinedRoute(from: responseText, userInput: input)
+        let parseMs = Int((CFAbsoluteTimeGetCurrent() - parseStartedAt) * 1000)
+        let totalMs = Int((CFAbsoluteTimeGetCurrent() - totalStartedAt) * 1000)
+        let timing = OllamaPlanTiming(
+            wireMs: max(0, wireMs),
+            parseMs: max(0, parseMs),
+            totalMs: max(0, totalMs),
+            deadlineMs: wireDeadlineMs
+        )
+        return (parsed, timing)
+    }
+
     // MARK: - Route
 
     /// Sends user text to Ollama and returns a decoded Action.
@@ -723,6 +822,70 @@ final class OllamaRouter {
 
         // Fallback: decode legacy Action, wrap in synthetic Plan
         return Plan.fromAction(try parseAction(from: text))
+    }
+
+    private func parseCombinedRoute(from text: String,
+                                    userInput: String) throws -> CombinedRouteLLMOutput {
+        let sanitized = sanitizeLLMText(text)
+        let jsonString = extractJSON(from: sanitized)
+        guard let jsonData = jsonString.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            throw OllamaError.jsonParseFailed(text)
+        }
+
+        var reasons: [String] = []
+        guard let intentRaw = dict["intent"] as? String,
+              let intent = RoutedIntent(rawValue: intentRaw) else {
+            reasons.append("missing/invalid intent")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+        guard let confidence = dict["confidence"] as? Double else {
+            reasons.append("missing confidence")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+        guard let autoCaptureHint = dict["autoCaptureHint"] as? Bool else {
+            reasons.append("missing autoCaptureHint")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+        guard let needsWeb = dict["needsWeb"] as? Bool else {
+            reasons.append("missing needsWeb")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+        guard let notes = dict["notes"] as? String else {
+            reasons.append("missing notes")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+        guard let planObject = dict["plan"] as? [String: Any] else {
+            reasons.append("missing plan object")
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
+        }
+
+        let planData: Data
+        do {
+            planData = try JSONSerialization.data(withJSONObject: planObject)
+        } catch {
+            throw OllamaError.schemaMismatch(raw: jsonString, reasons: ["invalid plan object"])
+        }
+        let planText = String(data: planData, encoding: .utf8) ?? "{}"
+
+        do {
+            let parsedPlan = try parsePlanOrAction(from: planText)
+            return CombinedRouteLLMOutput(
+                classification: IntentClassification(
+                    intent: intent,
+                    confidence: min(1.0, max(0.0, confidence)),
+                    notes: notes,
+                    autoCaptureHint: autoCaptureHint,
+                    needsWeb: needsWeb
+                ),
+                plan: parsedPlan
+            )
+        } catch OllamaError.schemaMismatch(let raw, let parseReasons) {
+            if let failure = unknownToolValidationFailure(from: parseReasons, userInput: userInput, raw: raw) {
+                throw OllamaError.validationFailure(failure)
+            }
+            throw OllamaError.schemaMismatch(raw: raw, reasons: parseReasons)
+        }
     }
 
     /// Produces explicit repair reasons for a valid-JSON-but-wrong-schema response.

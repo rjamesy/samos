@@ -4,12 +4,14 @@ import Foundation
 final class TurnRouter: TurnRouting {
     typealias IntentClassificationHandler = @Sendable (IntentClassifierInput, Bool, Bool) async -> IntentClassificationResult
     typealias PlanRouteHandler = @Sendable (TurnPlanRouteRequest) async -> RouteDecision
+    typealias CombinedRouteHandler = @Sendable (TurnCombinedRouteRequest) async -> CombinedRouteDecision
     typealias NativeToolExistsHandler = @Sendable (CapabilityRequestCategory) -> Bool
     typealias NormalizeToolNameHandler = @Sendable (String) -> String?
     typealias IsAllowedToolHandler = @Sendable (String) -> Bool
 
     private let classifyIntentHandler: IntentClassificationHandler
     private let routePlanHandler: PlanRouteHandler
+    private let routeCombinedHandler: CombinedRouteHandler
     private let nativeToolExistsHandler: NativeToolExistsHandler
     private let normalizeToolNameHandler: NormalizeToolNameHandler
     private let isAllowedToolHandler: IsAllowedToolHandler
@@ -21,11 +23,44 @@ final class TurnRouter: TurnRouting {
 
     init(classifyIntent: @escaping IntentClassificationHandler,
          routePlan: @escaping PlanRouteHandler,
+         routeCombined: CombinedRouteHandler? = nil,
          nativeToolExists: @escaping NativeToolExistsHandler = { _ in false },
          normalizeToolName: @escaping NormalizeToolNameHandler = { _ in nil },
          isAllowedTool: @escaping IsAllowedToolHandler = { _ in false }) {
         self.classifyIntentHandler = classifyIntent
         self.routePlanHandler = routePlan
+        if let routeCombined {
+            self.routeCombinedHandler = routeCombined
+        } else {
+            self.routeCombinedHandler = { request in
+                let input = IntentClassifierInput(
+                    userText: request.text,
+                    cameraRunning: request.state.cameraRunning,
+                    faceKnown: request.state.faceKnown,
+                    pendingSlot: request.state.pendingSlot,
+                    lastAssistantLine: request.state.lastAssistantLine
+                )
+                let classification = await classifyIntent(input, true, true)
+                let routed = await routePlan(
+                    TurnPlanRouteRequest(
+                        text: request.text,
+                        history: request.history,
+                        pendingSlot: request.pendingSlot,
+                        reason: request.reason,
+                        promptContext: request.promptContext,
+                        intentClassification: classification.classification
+                    )
+                )
+                return CombinedRouteDecision(
+                    classification: classification,
+                    route: routed,
+                    localAttempted: classification.attemptedLocal,
+                    localOutcome: classification.escalationReason,
+                    localMs: classification.intentRouterMsLocal,
+                    openAIMs: classification.intentRouterMsOpenAI
+                )
+            }
+        }
         self.nativeToolExistsHandler = nativeToolExists
         self.normalizeToolNameHandler = normalizeToolName
         self.isAllowedToolHandler = isAllowedTool
@@ -39,34 +74,28 @@ final class TurnRouter: TurnRouting {
     func routePlan(_ request: TurnPlanRouteRequest) async -> RouteDecision {
         let routed = await routePlanHandler(request)
         let normalized = normalizedRouteDecision(routed)
-        guard let classification = request.intentClassification, classification.needsWeb else {
-            return normalized
-        }
-        guard !hasAllowedToolPlan(normalized.plan) else { return normalized }
+        return applyNeedsWebContract(
+            normalized,
+            requestText: request.text,
+            classification: request.intentClassification
+        )
+    }
 
-        let category = categoryForCapabilityRequest(text: request.text, classification: classification)
-        if nativeToolExistsHandler(category) {
-            return RouteDecision(
-                plan: Plan(steps: [.ask(slot: "web_query_detail", prompt: needsWebClarifyingPrompt)]),
-                provider: normalized.provider,
-                routerMs: normalized.routerMs,
-                aiModelUsed: normalized.aiModelUsed,
-                routeReason: "needs_web_clarify_missing_tool_plan",
-                planLocalWireMs: normalized.planLocalWireMs,
-                planLocalTotalMs: normalized.planLocalTotalMs,
-                planOpenAIMs: normalized.planOpenAIMs
-            )
-        }
-
-        return RouteDecision(
-            plan: Plan(steps: [.ask(slot: "source_url_or_site", prompt: needsWebSourcePrompt)]),
-            provider: normalized.provider,
-            routerMs: normalized.routerMs,
-            aiModelUsed: normalized.aiModelUsed,
-            routeReason: "needs_web_missing_tool_requires_source",
-            planLocalWireMs: normalized.planLocalWireMs,
-            planLocalTotalMs: normalized.planLocalTotalMs,
-            planOpenAIMs: normalized.planOpenAIMs
+    func routeCombined(_ request: TurnCombinedRouteRequest) async -> CombinedRouteDecision {
+        let combined = await routeCombinedHandler(request)
+        let normalized = normalizedRouteDecision(combined.route)
+        let contracted = applyNeedsWebContract(
+            normalized,
+            requestText: request.text,
+            classification: combined.classification.classification
+        )
+        return CombinedRouteDecision(
+            classification: combined.classification,
+            route: contracted,
+            localAttempted: combined.localAttempted,
+            localOutcome: combined.localOutcome,
+            localMs: combined.localMs,
+            openAIMs: combined.openAIMs
         )
     }
 
@@ -326,5 +355,39 @@ final class TurnRouter: TurnRouting {
         }
         guard !toolNames.isEmpty else { return false }
         return toolNames.allSatisfy { isAllowedToolHandler($0) }
+    }
+
+    private func applyNeedsWebContract(_ route: RouteDecision,
+                                       requestText: String,
+                                       classification: IntentClassification?) -> RouteDecision {
+        guard let classification, classification.needsWeb else {
+            return route
+        }
+        guard !hasAllowedToolPlan(route.plan) else { return route }
+
+        let category = categoryForCapabilityRequest(text: requestText, classification: classification)
+        if nativeToolExistsHandler(category) {
+            return RouteDecision(
+                plan: Plan(steps: [.ask(slot: "web_query_detail", prompt: needsWebClarifyingPrompt)]),
+                provider: route.provider,
+                routerMs: route.routerMs,
+                aiModelUsed: route.aiModelUsed,
+                routeReason: "needs_web_clarify_missing_tool_plan",
+                planLocalWireMs: route.planLocalWireMs,
+                planLocalTotalMs: route.planLocalTotalMs,
+                planOpenAIMs: route.planOpenAIMs
+            )
+        }
+
+        return RouteDecision(
+            plan: Plan(steps: [.ask(slot: "source_url_or_site", prompt: needsWebSourcePrompt)]),
+            provider: route.provider,
+            routerMs: route.routerMs,
+            aiModelUsed: route.aiModelUsed,
+            routeReason: "needs_web_missing_tool_requires_source",
+            planLocalWireMs: route.planLocalWireMs,
+            planLocalTotalMs: route.planLocalTotalMs,
+            planOpenAIMs: route.planOpenAIMs
+        )
     }
 }

@@ -70,7 +70,10 @@ final class AppState: ObservableObject {
         var planLocalWireMs: Int?
         var planLocalTotalMs: Int?
         var planOpenAIMs: Int?
+        var routeLocalOutcome: String?
         var toolMsTotal: Int?
+        var planExecutionMs: Int?
+        var speechSelectionMs: Int?
         var captureStartedAt: Date?
         var transcribeStartedAt: Date?
         var transcriptReadyAt: Date?
@@ -140,6 +143,7 @@ final class AppState: ObservableObject {
     private var turnLatencyTrace: TurnLatencyTrace?
     private var turnLatencyTraceSequence: Int = 0
     private var turnLatencyFinalizeTask: Task<Void, Never>?
+    private var lastTurnTrace: TurnTrace?
     private var speechStartMonitorTask: Task<Void, Never>?
     private var activeSpeechCorrelationID: String?
     private var activeSpeechRetryAttempt: Int = 0
@@ -823,7 +827,10 @@ final class AppState: ObservableObject {
             trace.planLocalWireMs = result.planLocalWireMs
             trace.planLocalTotalMs = result.planLocalTotalMs
             trace.planOpenAIMs = result.planOpenAIMs
+            trace.routeLocalOutcome = result.routeLocalOutcome
             trace.toolMsTotal = result.toolMsTotal
+            trace.planExecutionMs = result.planExecutionMs
+            trace.speechSelectionMs = result.speechSelectionMs
             turnLatencyTrace = trace
         }
 
@@ -963,7 +970,10 @@ final class AppState: ObservableObject {
             planLocalWireMs: nil,
             planLocalTotalMs: nil,
             planOpenAIMs: nil,
+            routeLocalOutcome: nil,
             toolMsTotal: nil,
+            planExecutionMs: nil,
+            speechSelectionMs: nil,
             captureStartedAt: pendingCaptureStartedAt,
             transcribeStartedAt: pendingTranscribeStartedAt,
             transcriptReadyAt: pendingTranscriptReadyAt,
@@ -1313,11 +1323,111 @@ final class AppState: ObservableObject {
         }()
         let firstAudioMs = ms(start, playbackStartedAt)
 
+        let compactTrace = buildTurnTrace(trace: trace, ttsSnapshot: snapshot)
+        lastTurnTrace = compactTrace
+        logTurnTrace(compactTrace)
+
         let routerMs = trace.routerMs.map(String.init) ?? "n/a"
         print("[LatencyBreakdown] turn=\(trace.id) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) router_ms=\(routerMs) orchestrator_ms=\(str(orchestratorMs)) apply_ms=\(str(applyMs)) tts_wait_ms=\(str(ttsQueueWaitMs)) tts_ms=\(str(ttsMs)) total_ms=\(str(totalMs)) provider=\(trace.provider.rawValue) tool_steps=\(trace.toolSteps) user_chars=\(trace.userChars) assistant_chars=\(trace.assistantChars) reason=\(reason)")
         print("[PERF_TURN] turn_id=\(trace.turnID) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) intent_local_ms=\(str(trace.intentLocalMs)) intent_openai_ms=\(str(trace.intentOpenAIMs)) plan_local_wire_ms=\(str(trace.planLocalWireMs)) plan_local_total_ms=\(str(trace.planLocalTotalMs)) plan_openai_ms=\(str(trace.planOpenAIMs)) tool_ms_total=\(str(trace.toolMsTotal)) tts_queue_wait_ms=\(str(ttsQueueWaitMs)) tts_synthesis_ms=\(str(ttsSynthesisMs)) tts_playback_start_ms=\(str(ttsPlaybackStartMs)) first_audio_ms=\(str(firstAudioMs)) total_ms=\(str(totalMs))")
         #endif
     }
+
+    #if DEBUG
+    private func buildTurnTrace(trace: TurnLatencyTrace,
+                                ttsSnapshot: TTSService.TimingSnapshot?) -> TurnTrace {
+        func msFromStart(_ date: Date?, start: Date) -> Int? {
+            guard let date else { return nil }
+            return max(0, Int(date.timeIntervalSince(start) * 1000))
+        }
+
+        let traceStart = trace.captureStartedAt ?? trace.routeStartedAt
+        var events: [TurnTraceEvent] = [TurnTraceEvent(name: "TURN_START", tMsFromStart: 0, data: nil)]
+
+        if let captureStartMs = msFromStart(trace.captureStartedAt, start: traceStart) {
+            events.append(TurnTraceEvent(name: "CAPTURE_START", tMsFromStart: captureStartMs, data: nil))
+        }
+        if let captureEndMs = msFromStart(trace.transcribeStartedAt, start: traceStart) {
+            let captureMs = max(0, captureEndMs - (msFromStart(trace.captureStartedAt, start: traceStart) ?? captureEndMs))
+            events.append(TurnTraceEvent(name: "CAPTURE_END", tMsFromStart: captureEndMs, data: "capture_ms=\(captureMs)"))
+            events.append(TurnTraceEvent(name: "STT_START", tMsFromStart: captureEndMs, data: nil))
+        }
+        if let sttEndMs = msFromStart(trace.transcriptReadyAt, start: traceStart) {
+            let sttStartMs = msFromStart(trace.transcribeStartedAt, start: traceStart) ?? sttEndMs
+            let sttMs = max(0, sttEndMs - sttStartMs)
+            events.append(TurnTraceEvent(name: "STT_END", tMsFromStart: sttEndMs, data: "stt_ms=\(sttMs) text_chars=\(trace.userChars)"))
+        }
+
+        let routeLocalStartMs = msFromStart(trace.routeStartedAt, start: traceStart) ?? 0
+        events.append(TurnTraceEvent(name: "ROUTE_LOCAL_START", tMsFromStart: routeLocalStartMs, data: nil))
+        let localRouterMs = trace.planLocalTotalMs ?? trace.intentLocalMs ?? 0
+        let routeLocalEndMs = routeLocalStartMs + max(0, localRouterMs)
+        let localOutcome = trace.routeLocalOutcome ?? "ok"
+        events.append(TurnTraceEvent(name: "ROUTE_LOCAL_END", tMsFromStart: routeLocalEndMs, data: "ok=\(localOutcome == "ok") router_ms=\(max(0, localRouterMs)) outcome=\(localOutcome)"))
+
+        var routeEndMs = routeLocalEndMs
+        if let openAIMs = trace.planOpenAIMs ?? trace.intentOpenAIMs, openAIMs > 0 {
+            events.append(TurnTraceEvent(name: "ROUTE_OPENAI_START", tMsFromStart: routeLocalEndMs, data: nil))
+            let routeOpenAIEndMs = routeLocalEndMs + openAIMs
+            events.append(TurnTraceEvent(name: "ROUTE_OPENAI_END", tMsFromStart: routeOpenAIEndMs, data: "router_ms=\(openAIMs)"))
+            routeEndMs = routeOpenAIEndMs
+        }
+
+        let planExecMs = max(0, trace.planExecutionMs ?? 0)
+        let planExecEndMs = routeEndMs + planExecMs
+        events.append(TurnTraceEvent(name: "PLAN_EXEC_START", tMsFromStart: routeEndMs, data: "tools=\(trace.toolSteps)"))
+        events.append(TurnTraceEvent(name: "PLAN_EXEC_END", tMsFromStart: planExecEndMs, data: "tool_ms_total=\(trace.toolMsTotal ?? 0) tool_count=\(trace.toolSteps)"))
+
+        let speechSelectionMs = max(0, trace.speechSelectionMs ?? 0)
+        let speechSelectStartMs = max(routeEndMs, planExecEndMs - speechSelectionMs)
+        events.append(TurnTraceEvent(name: "SPEECH_SELECT_START", tMsFromStart: speechSelectStartMs, data: nil))
+        events.append(TurnTraceEvent(name: "SPEECH_SELECT_END", tMsFromStart: planExecEndMs, data: "speech_ms=\(speechSelectionMs)"))
+
+        if let enqueueMs = msFromStart(trace.speechEnqueuedAt, start: traceStart) {
+            events.append(TurnTraceEvent(name: "TTS_ENQUEUE", tMsFromStart: enqueueMs, data: nil))
+        }
+
+        if let ttsStartMs = msFromStart(trace.ttsStartedAt, start: traceStart) {
+            events.append(TurnTraceEvent(name: "TTS_START", tMsFromStart: ttsStartMs, data: nil))
+        }
+
+        if let playbackStartMs = ttsSnapshot?.playbackStartMs,
+           let enqueueMs = msFromStart(trace.speechEnqueuedAt, start: traceStart) {
+            events.append(TurnTraceEvent(name: "FIRST_AUDIO", tMsFromStart: enqueueMs + max(0, playbackStartMs), data: nil))
+        }
+
+        if let ttsEndMs = msFromStart(trace.ttsFinishedAt, start: traceStart) {
+            let ttsStartMs = msFromStart(trace.ttsStartedAt, start: traceStart) ?? ttsEndMs
+            events.append(TurnTraceEvent(name: "TTS_END", tMsFromStart: ttsEndMs, data: "tts_ms=\(max(0, ttsEndMs - ttsStartMs))"))
+        }
+
+        let terminalMs = max(
+            events.map(\.tMsFromStart).max() ?? 0,
+            msFromStart(trace.applyFinishedAt, start: traceStart) ?? 0
+        )
+        events.append(TurnTraceEvent(name: "TURN_END", tMsFromStart: terminalMs, data: "total_ms=\(terminalMs)"))
+
+        let sorted = events.enumerated().sorted { lhs, rhs in
+            if lhs.element.tMsFromStart == rhs.element.tMsFromStart {
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.tMsFromStart < rhs.element.tMsFromStart
+        }.map(\.element)
+
+        return TurnTrace(turnID: trace.turnID, totalMs: terminalMs, events: sorted)
+    }
+
+    private func logTurnTrace(_ trace: TurnTrace) {
+        print("[TURN_TRACE] turn_id=\(trace.turnID) total_ms=\(trace.totalMs)")
+        for event in trace.events {
+            if let data = event.data, !data.isEmpty {
+                print("  \(event.tMsFromStart)ms \(event.name) \(data)")
+            } else {
+                print("  \(event.tMsFromStart)ms \(event.name)")
+            }
+        }
+    }
+    #endif
 
     private func currentAssistantResponseMode() -> AssistantResponseMode {
         let useRealtimeSTT = OpenAISettings.realtimeModeEnabled && !OpenAISettings.realtimeUseClassicSTT
@@ -1760,6 +1870,10 @@ final class AppState: ObservableObject {
 
     func debugTurnSpeechPhase() -> String {
         turnSpeechPhase.rawValue
+    }
+
+    func debugLastTurnTrace() -> TurnTrace? {
+        lastTurnTrace
     }
     #endif
 
