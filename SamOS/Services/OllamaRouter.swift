@@ -342,12 +342,23 @@ final class OllamaRouter {
           "autoCaptureHint":true|false,
           "needsWeb":true|false,
           "notes":"",
-          "plan":{"action":"PLAN|TALK|TOOL|DELEGATE_OPENAI|CAPABILITY_GAP","steps":[...],"...":"..."}
+          "plan":{"action":"TALK|PLAN|TOOL","say":"...","steps":[...]}
         }
+        Plan step format — each step MUST have a "step" key:
+        - Talk: {"step":"talk","say":"your reply here"}
+        - Tool: {"step":"tool","name":"tool_name","args":{...},"say":"optional speech"}
+        - Ask:  {"step":"ask","slot":"slot_name","say":"question to ask"}
+        Examples:
+        Greeting: {"intent":"greeting","confidence":0.95,"autoCaptureHint":false,"needsWeb":false,"notes":"","plan":{"action":"TALK","say":"Hello! How can I help?"}}
+        Tool use: {"intent":"automation_request","confidence":0.9,"autoCaptureHint":false,"needsWeb":false,"notes":"","plan":{"action":"PLAN","steps":[{"step":"tool","name":"get_time","args":{},"say":"Let me check the time."}]}}
+        Allowed tool names (use ONLY these exact names in tool steps):
+        \(ToolRegistry.shared.allTools.map { $0.name }.joined(separator: ", "))
         Rules:
         - Output JSON only. No markdown or prose.
         - `plan` must be a complete action object Sam can execute immediately.
         - `needsWeb` MUST be true iff intent is web_request.
+        - For simple conversation, use: "plan":{"action":"TALK","say":"your reply"}
+        - tool.name MUST be one of the allowed tool names above (e.g. get_weather, NOT "weather").
         STATE_JSON: \(stateJSON)
         """
 
@@ -824,6 +835,78 @@ final class OllamaRouter {
         return Plan.fromAction(try parseAction(from: text))
     }
 
+    private func normalizeCombinedRoute(dict: [String: Any],
+                                       userInput: String) -> CombinedRouteLLMOutput? {
+        // Case A: Bare action response (has "action" but no "intent" envelope)
+        if dict["action"] != nil && dict["intent"] == nil {
+            let actionRaw = (dict["action"] as? String ?? "").uppercased()
+            // Re-serialize and parse via existing plan/action parser
+            guard let reserializedData = try? JSONSerialization.data(withJSONObject: dict),
+                  let reserializedText = String(data: reserializedData, encoding: .utf8),
+                  let parsedPlan = try? parsePlanOrAction(from: reserializedText) else {
+                return nil
+            }
+
+            // Detect greeting intent from bare TALK
+            let detectedIntent: RoutedIntent
+            if actionRaw == "TALK" {
+                let say = (dict["say"] as? String ?? "").lowercased()
+                let greetingWords = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+                if greetingWords.contains(where: { say.contains($0) }) {
+                    detectedIntent = .greeting
+                } else {
+                    detectedIntent = .generalQnA
+                }
+            } else {
+                detectedIntent = .generalQnA
+            }
+
+            return CombinedRouteLLMOutput(
+                classification: IntentClassification(
+                    intent: detectedIntent,
+                    confidence: 0.7,
+                    notes: "normalized_from_bare_action",
+                    autoCaptureHint: false,
+                    needsWeb: false
+                ),
+                plan: parsedPlan
+            )
+        }
+
+        // Case B: Valid envelope but plan steps fail to parse
+        if dict["intent"] != nil && dict["plan"] != nil {
+            guard let intentRaw = dict["intent"] as? String,
+                  let intent = RoutedIntent(rawValue: intentRaw) else {
+                return nil
+            }
+            let confidence = min(1.0, max(0.0, dict["confidence"] as? Double ?? 0.5))
+            let needsWeb = dict["needsWeb"] as? Bool ?? false
+
+            guard let planObject = dict["plan"] as? [String: Any] else { return nil }
+            guard let planData = try? JSONSerialization.data(withJSONObject: planObject),
+                  let planText = String(data: planData, encoding: .utf8) else { return nil }
+
+            // Only rescue if plan parsing actually fails
+            if (try? parsePlanOrAction(from: planText)) != nil {
+                return nil  // plan is valid, let strict path handle it
+            }
+
+            // Plan failed to parse — convert to safe TALK fallback
+            return CombinedRouteLLMOutput(
+                classification: IntentClassification(
+                    intent: intent,
+                    confidence: confidence,
+                    notes: "normalized_invalid_plan_to_talk_fallback",
+                    autoCaptureHint: false,
+                    needsWeb: needsWeb
+                ),
+                plan: Plan(steps: [.talk(say: "Sorry — can you rephrase that?")])
+            )
+        }
+
+        return nil
+    }
+
     private func parseCombinedRoute(from text: String,
                                     userInput: String) throws -> CombinedRouteLLMOutput {
         let sanitized = sanitizeLLMText(text)
@@ -831,6 +914,14 @@ final class OllamaRouter {
         guard let jsonData = jsonString.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
             throw OllamaError.jsonParseFailed(text)
+        }
+
+        // Try normalization rescue first (handles bare actions, invalid plan steps)
+        if let normalized = normalizeCombinedRoute(dict: dict, userInput: userInput) {
+            #if DEBUG
+            print("[OllamaRouter] normalizeCombinedRoute rescued response: \(normalized.classification.notes)")
+            #endif
+            return normalized
         }
 
         var reasons: [String] = []

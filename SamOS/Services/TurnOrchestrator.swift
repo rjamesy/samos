@@ -1860,6 +1860,7 @@ final class TurnOrchestrator {
     private var currentIntentClassification: IntentClassificationResult?
     private var lastIntentClassification: IntentClassificationResult?
     private var currentTurnCaptureAfterReplyHint: Bool = false
+    private var currentRoutingTask: Task<Void, Never>?
 
     var pendingSlot: PendingSlot? = nil
 
@@ -2138,6 +2139,9 @@ final class TurnOrchestrator {
     }
 
     func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult {
+        // Cancel any in-flight routing from a previous turn
+        currentRoutingTask?.cancel()
+        currentRoutingTask = nil
         turnCounter += 1
         defer {
             currentIntentClassification = nil
@@ -2705,6 +2709,9 @@ final class TurnOrchestrator {
                 planLocalTotalMs: local.timing.totalMs,
                 planOpenAIMs: nil
             )
+            #if DEBUG
+            print("[ROUTE_DECISION] turn=\(turnCounter) chosen=local reason=combined_local_success local_outcome=ok local_ms=\(localMs)")
+            #endif
             return CombinedRouteDecision(
                 classification: classification,
                 route: route,
@@ -2720,6 +2727,9 @@ final class TurnOrchestrator {
                 let routeReason = failureKind == .timeout
                     ? "combined_local_timeout_openai_fallback"
                     : "combined_local_schema_fail_openai_fallback"
+                #if DEBUG
+                print("[ROUTE_DECISION] turn=\(turnCounter) chosen=openai reason=\(routeReason) local_outcome=\(failureKind.rawValue) local_ms=\(localMs)")
+                #endif
                 return await routeCombinedViaOpenAI(
                     text: text,
                     history: history,
@@ -2808,7 +2818,11 @@ final class TurnOrchestrator {
                                         escalationReason: String,
                                         routeReason: String) async -> CombinedRouteDecision {
         let openAIStartedAt = CFAbsoluteTimeGetCurrent()
+        #if DEBUG
+        print("[OPENAI_TASK] started turn=\(turnCounter) reason=\(routeReason)")
+        #endif
         do {
+            try Task.checkCancellation()
             let openAIIntent = try await openAIProvider.classifyIntentWithRetry(
                 IntentClassifierInput(
                     userText: text,
@@ -2837,6 +2851,9 @@ final class TurnOrchestrator {
                 )
             )
             let openAIMs = max(0, Int((CFAbsoluteTimeGetCurrent() - openAIStartedAt) * 1000))
+            #if DEBUG
+            print("[OPENAI_TASK] completed turn=\(turnCounter) ms=\(openAIMs)")
+            #endif
             let classification = IntentClassificationResult(
                 classification: parsedClassification,
                 provider: .openai,
@@ -2871,6 +2888,9 @@ final class TurnOrchestrator {
             )
         } catch {
             let openAIMs = max(0, Int((CFAbsoluteTimeGetCurrent() - openAIStartedAt) * 1000))
+            #if DEBUG
+            print("[OPENAI_TASK] failed turn=\(turnCounter) ms=\(openAIMs) error=\(error.localizedDescription.prefix(80))")
+            #endif
             let classification = IntentClassificationResult(
                 classification: IntentClassification(
                     intent: .unknown,
@@ -3000,7 +3020,7 @@ final class TurnOrchestrator {
                     pendingSlot: pendingSlot,
                     promptContext: promptContext,
                     skipRepairRetry: true,
-                    wireDeadlineMs: 3000
+                    wireDeadlineMs: RouterTimeouts.localCombinedDeadlineMs
                 )
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 localWireMs = routed.timing.wireMs
@@ -3097,7 +3117,7 @@ final class TurnOrchestrator {
                 pendingSlot: pendingSlot,
                 promptContext: promptContext,
                 skipRepairRetry: false,
-                wireDeadlineMs: 3000
+                wireDeadlineMs: RouterTimeouts.localCombinedDeadlineMs
             )
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)

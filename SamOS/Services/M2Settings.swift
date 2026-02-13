@@ -30,6 +30,7 @@ enum M2Settings {
         static let maxSpeakChars = "m3_maxSpeakChars"
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
+        static let ollamaCombinedTimeoutMs = "m3_ollamaCombinedTimeoutMs"
     }
 
     private static let defaults = UserDefaults.standard
@@ -285,6 +286,17 @@ enum M2Settings {
     static var ollamaModel: String {
         get { defaults.string(forKey: Key.ollamaModel) ?? "qwen2.5:3b-instruct" }
         set { defaults.set(newValue, forKey: Key.ollamaModel) }
+    }
+
+    /// Timeout for the combined Ollama intent+plan route call, in milliseconds.
+    /// Defaults to 3500ms and is clamped to 500..10000.
+    static var ollamaCombinedTimeoutMs: Int {
+        get {
+            guard defaults.object(forKey: Key.ollamaCombinedTimeoutMs) != nil else { return 3500 }
+            let value = defaults.integer(forKey: Key.ollamaCombinedTimeoutMs)
+            return min(10000, max(500, value))
+        }
+        set { defaults.set(min(10000, max(500, newValue)), forKey: Key.ollamaCombinedTimeoutMs) }
     }
 
     // MARK: - Validation

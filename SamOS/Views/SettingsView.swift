@@ -41,6 +41,7 @@ struct SettingsView: View {
     @State private var ollamaModel: String = M2Settings.ollamaModel
     @State private var preferOpenAIPlans: Bool = M2Settings.preferOpenAIPlans
     @State private var disableAutoClosePrompts: Bool = M2Settings.disableAutoClosePrompts
+    @State private var ollamaCombinedTimeoutMs: Double = Double(M2Settings.ollamaCombinedTimeoutMs)
 
     // Tone learning
     @State private var toneProfile: TonePreferenceProfile = TonePreferenceStore.shared.loadProfile()
@@ -387,6 +388,20 @@ struct SettingsView: View {
                 .onChange(of: disableAutoClosePrompts) { _, newValue in
                     M2Settings.disableAutoClosePrompts = newValue
                 }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Ollama Timeout")
+                    Spacer()
+                    Text("\(Int(ollamaCombinedTimeoutMs)) ms")
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $ollamaCombinedTimeoutMs, in: 500...10000, step: 100)
+                    .disabled(!useOllama)
+                    .onChange(of: ollamaCombinedTimeoutMs) { _, newValue in
+                        M2Settings.ollamaCombinedTimeoutMs = Int(newValue)
+                    }
+            }
 
             LabeledContent("Status") {
                 if useOllama {

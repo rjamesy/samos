@@ -109,6 +109,11 @@
 			F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */; };
 			F3A4B5C6D7E80001AA000091 /* FaceGreetingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000090 /* FaceGreetingManager.swift */; };
 			F3A4B5C6D7E80001AA000093 /* FaceGreetingManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */; };
+		F3A4B5C6D7E80001AA000098 /* TurnRouterNormalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */; };
+		F3A4B5C6D7E80001AA00009A /* OpenAICallGatingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */; };
+		F3A4B5C6D7E80001AA00009C /* CombinedTimeoutBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */; };
+		F3A4B5C6D7E80001AA00009E /* OpenAILeakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */; };
+		F3A4B5C6D7E80001AA0000A0 /* WeatherArgCompletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -227,6 +232,11 @@
 			F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceProfileStoreTests.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000090 /* FaceGreetingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceGreetingManager.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceGreetingManagerTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnRouterNormalizationTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICallGatingTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CombinedTimeoutBudgetTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAILeakTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherArgCompletionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -432,6 +442,11 @@
 					F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */,
 					F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */,
 					F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */,
+				F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */,
+				F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */,
+				F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */,
+				F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */,
+				F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */,
 				);
 			path = SamOSTests;
 			sourceTree = "<group>";
@@ -621,6 +636,11 @@
 					F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000093 /* FaceGreetingManagerTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000098 /* TurnRouterNormalizationTests.swift in Sources */,
+				F3A4B5C6D7E80001AA00009A /* OpenAICallGatingTests.swift in Sources */,
+				F3A4B5C6D7E80001AA00009C /* CombinedTimeoutBudgetTests.swift in Sources */,
+				F3A4B5C6D7E80001AA00009E /* OpenAILeakTests.swift in Sources */,
+				F3A4B5C6D7E80001AA0000A0 /* WeatherArgCompletionTests.swift in Sources */,
 				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

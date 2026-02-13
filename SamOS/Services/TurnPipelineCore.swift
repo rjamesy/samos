@@ -114,8 +114,8 @@ struct TurnPlanRouteResponse {
 }
 
 enum RouterTimeouts {
-    static let localCombinedDeadlineMs = 3500
-    static let localCombinedDeadlineSeconds = 3.5
+    static var localCombinedDeadlineMs: Int { M2Settings.ollamaCombinedTimeoutMs }
+    static var localCombinedDeadlineSeconds: Double { Double(M2Settings.ollamaCombinedTimeoutMs) / 1000.0 }
 }
 
 struct RouteDecision {

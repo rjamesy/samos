@@ -84,18 +84,50 @@ final class RetryingOpenAIProvider: OpenAIProviderRouting {
 
     private func performIntentAttempt(_ input: IntentClassifierInput,
                                       timeoutSeconds: Double?) async throws -> IntentLLMCallOutput {
-        if let timeoutSeconds {
-            return try await withTimeout(timeoutSeconds) { [openAIRouter] in
-                try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
+        let turnID = TurnExecutionContext.turnID ?? "?"
+        logOpenAIHTTP(turnID: turnID, reason: "intent", event: "started")
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        do {
+            let result: IntentLLMCallOutput
+            if let timeoutSeconds {
+                result = try await withTimeout(timeoutSeconds) { [openAIRouter] in
+                    try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
+                }
+            } else {
+                result = try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
             }
+            let ms = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+            logOpenAIHTTP(turnID: turnID, reason: "intent", event: "completed", ms: ms)
+            return result
+        } catch is CancellationError {
+            logOpenAIHTTP(turnID: turnID, reason: "intent", event: "cancelled")
+            throw CancellationError()
+        } catch {
+            let ms = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+            logOpenAIHTTP(turnID: turnID, reason: "intent", event: "failed", ms: ms, error: error)
+            throw error
         }
-        return try await openAIRouter.classifyIntentWithTrace(input, reason: .intent)
     }
 
     private func performPlanAttempt(_ request: OpenAIPlanRequest) async throws -> Plan {
-        if let timeoutSeconds = request.timeoutSeconds {
-            return try await withTimeout(timeoutSeconds) { [openAIRouter] in
-                try await openAIRouter.routePlan(
+        let turnID = TurnExecutionContext.turnID ?? "?"
+        logOpenAIHTTP(turnID: turnID, reason: request.reason.rawValue, event: "started")
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        do {
+            let result: Plan
+            if let timeoutSeconds = request.timeoutSeconds {
+                result = try await withTimeout(timeoutSeconds) { [openAIRouter] in
+                    try await openAIRouter.routePlan(
+                        request.input,
+                        history: request.history,
+                        pendingSlot: request.pendingSlot,
+                        promptContext: request.promptContext,
+                        modelOverride: request.modelOverride,
+                        reason: request.reason
+                    )
+                }
+            } else {
+                result = try await openAIRouter.routePlan(
                     request.input,
                     history: request.history,
                     pendingSlot: request.pendingSlot,
@@ -104,15 +136,27 @@ final class RetryingOpenAIProvider: OpenAIProviderRouting {
                     reason: request.reason
                 )
             }
+            let ms = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+            logOpenAIHTTP(turnID: turnID, reason: request.reason.rawValue, event: "completed", ms: ms)
+            return result
+        } catch is CancellationError {
+            logOpenAIHTTP(turnID: turnID, reason: request.reason.rawValue, event: "cancelled")
+            throw CancellationError()
+        } catch {
+            let ms = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+            logOpenAIHTTP(turnID: turnID, reason: request.reason.rawValue, event: "failed", ms: ms, error: error)
+            throw error
         }
-        return try await openAIRouter.routePlan(
-            request.input,
-            history: request.history,
-            pendingSlot: request.pendingSlot,
-            promptContext: request.promptContext,
-            modelOverride: request.modelOverride,
-            reason: request.reason
-        )
+    }
+
+    private func logOpenAIHTTP(turnID: String, reason: String, event: String,
+                               ms: Int? = nil, error: Error? = nil) {
+        #if DEBUG
+        var parts = "[OPENAI_HTTP] turn=\(turnID) reason=\(reason) \(event)"
+        if let ms { parts += " ms=\(ms)" }
+        if let error { parts += " error=\(String(describing: error).prefix(80))" }
+        print(parts)
+        #endif
     }
 
     private func retryPromptContext(from context: PromptRuntimeContext?, maxOutputTokens: Int) -> PromptRuntimeContext? {

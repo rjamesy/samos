@@ -20,7 +20,7 @@ final class TurnToolRunner: TurnToolRunning {
     func executePlan(_ plan: Plan,
                      originalInput: String,
                      pendingSlotName: String?) async -> ToolRunResult {
-        switch normalizePlan(plan) {
+        switch normalizePlan(plan, originalInput: originalInput) {
         case .rejected(let raw):
             logToolReject(raw: raw, normalized: nil, reason: "unknown_tool")
             return rejectedToolResult(rawToolName: raw)
@@ -57,7 +57,7 @@ final class TurnToolRunner: TurnToolRunning {
         case rejected(rawToolName: String)
     }
 
-    private func normalizePlan(_ plan: Plan) -> PlanNormalizationResult {
+    private func normalizePlan(_ plan: Plan, originalInput: String) -> PlanNormalizationResult {
         var normalizedSteps: [PlanStep] = []
         normalizedSteps.reserveCapacity(plan.steps.count)
 
@@ -67,10 +67,12 @@ final class TurnToolRunner: TurnToolRunning {
                 guard let normalized = normalizedToolName(for: rawName) else {
                     return .rejected(rawToolName: rawName)
                 }
+                var finalArgs = canonicalizedStepArgs(name: normalized, args: args)
+                finalArgs = maybeInjectWeatherPlace(name: normalized, args: finalArgs, originalInput: originalInput)
                 normalizedSteps.append(
                     .tool(
                         name: normalized,
-                        args: canonicalizedStepArgs(name: normalized, args: args),
+                        args: finalArgs,
                         say: say
                     )
                 )
@@ -80,6 +82,25 @@ final class TurnToolRunner: TurnToolRunning {
         }
 
         return .normalized(Plan(steps: normalizedSteps, say: plan.say))
+    }
+
+    /// Pre-execution: if get_weather has no place arg, try deterministic extraction from user text.
+    private func maybeInjectWeatherPlace(name: String, args: [String: CodableValue], originalInput: String) -> [String: CodableValue] {
+        guard name == "get_weather" else { return args }
+        let existingPlace: String
+        if case .string(let p) = args["place"] {
+            existingPlace = p.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            existingPlace = ""
+        }
+        guard existingPlace.isEmpty else { return args }
+        guard let extracted = extractWeatherPlace(from: originalInput) else { return args }
+        #if DEBUG
+        print("[WEATHER_INJECT] place=\(extracted) from=\"\(originalInput)\"")
+        #endif
+        var patched = args
+        patched["place"] = .string(extracted)
+        return patched
     }
 
     private func normalizedToolName(for rawName: String) -> String? {
