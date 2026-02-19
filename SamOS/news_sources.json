@@ -1,0 +1,56 @@
+[
+  {
+    "id": "reuters_world",
+    "name": "Reuters",
+    "url": "https://www.reutersagency.com/feed/?best-topics=world&post_type=best",
+    "country": null
+  },
+  {
+    "id": "bbc_world",
+    "name": "BBC",
+    "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
+    "country": null
+  },
+  {
+    "id": "nyt_world",
+    "name": "NYTimes",
+    "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "country": null
+  },
+  {
+    "id": "guardian_world",
+    "name": "The Guardian",
+    "url": "https://www.theguardian.com/world/rss",
+    "country": null
+  },
+  {
+    "id": "wsj_world",
+    "name": "WSJ",
+    "url": "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
+    "country": null
+  },
+  {
+    "id": "cnbc_top",
+    "name": "CNBC",
+    "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "country": null
+  },
+  {
+    "id": "abc_au",
+    "name": "ABC News AU",
+    "url": "https://www.abc.net.au/news/feed/51120/rss.xml",
+    "country": "AU"
+  },
+  {
+    "id": "sbs_au",
+    "name": "SBS News",
+    "url": "https://www.sbs.com.au/news/topic/latest/rss.xml",
+    "country": "AU"
+  },
+  {
+    "id": "smh_au",
+    "name": "SMH",
+    "url": "https://www.smh.com.au/rss/feed.xml",
+    "country": "AU"
+  }
+]

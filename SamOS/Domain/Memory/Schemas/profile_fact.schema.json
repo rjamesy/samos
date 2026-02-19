@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SemanticProfileFact",
+  "type": "object",
+  "required": ["kind", "key", "value", "confidence", "should_store"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["preference", "identity", "routine", "constraint", "contact", "project"]
+    },
+    "key": { "type": "string", "minLength": 1 },
+    "value": { "type": "object" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "should_store": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

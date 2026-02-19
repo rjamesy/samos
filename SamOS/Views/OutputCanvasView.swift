@@ -164,6 +164,9 @@ struct OutputItemView: View {
             if parsedCardType == "alarm" {
                 AlarmCardView(payload: item.payload)
                     .environmentObject(appState)
+            } else if parsedCardType == "learn_skill_permission_review" {
+                LearnSkillPermissionCardView(payload: item.payload)
+                    .environmentObject(appState)
             } else {
                 MarkdownTextView(markdown: item.payload)
             }
@@ -249,6 +252,114 @@ struct AlarmCardView: View {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
         return dict["can_snooze"] as? Bool ?? false
+    }
+}
+
+// MARK: - Learn Skill Permission Card
+
+struct LearnSkillPermissionCardView: View {
+    @EnvironmentObject var appState: AppState
+    let payload: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Skill Permission Review")
+                        .font(.headline)
+                    Text(parseSkillName() ?? "New Skill")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+
+            if let goal = parseGoal(), !goal.isEmpty {
+                Text("Goal: \(goal)")
+                    .font(.subheadline)
+            }
+
+            if !parsePermissions().isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Requested permissions")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(parsePermissions(), id: \.self) { permission in
+                        Text("• \(permission)")
+                            .font(.caption)
+                    }
+                }
+            }
+
+            if !parseTools().isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tools")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(parseTools(), id: \.self) { tool in
+                        Text("• \(tool)")
+                            .font(.caption)
+                    }
+                }
+            }
+
+            if !parseTests().isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Validation tests")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(parseTests(), id: \.self) { test in
+                        Text("• \(test)")
+                            .font(.caption)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Reject") {
+                    appState.approveLearnSkillPermissions(false)
+                }
+                .buttonStyle(.bordered)
+
+                Button("Approve & Install") {
+                    appState.approveLearnSkillPermissions(true)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .background(Color.blue.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    private func parseObject() -> [String: Any] {
+        guard let data = payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return dict
+    }
+
+    private func parseSkillName() -> String? {
+        parseObject()["skill_name"] as? String
+    }
+
+    private func parseGoal() -> String? {
+        parseObject()["goal"] as? String
+    }
+
+    private func parsePermissions() -> [String] {
+        parseObject()["permissions"] as? [String] ?? []
+    }
+
+    private func parseTools() -> [String] {
+        parseObject()["tools"] as? [String] ?? []
+    }
+
+    private func parseTests() -> [String] {
+        parseObject()["tests"] as? [String] ?? []
     }
 }
 

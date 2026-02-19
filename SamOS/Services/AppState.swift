@@ -103,6 +103,7 @@ final class AppState: ObservableObject {
     @Published var learnedWebsiteCount: Int = 0
     @Published var autonomousLearningReportCount: Int = 0
     @Published var activeAutonomousLearningSession: AutonomousLearningService.ActiveSession?
+    @Published var activeLearnSkillSession: LearnSkillSession?
     @Published var isCameraEnabled: Bool = false
     @Published var cameraPermissionStatus: CameraPermission.Status = CameraPermission.currentStatus
     @Published var cameraErrorMessage: String?
@@ -119,11 +120,14 @@ final class AppState: ObservableObject {
     private let speechCoordinator: TurnSpeechCoordinating
     private let outputCanvasLogStore: OutputCanvasLogStore
     private let cameraVisionService: CameraVisionService
+    private let allowSamGatewayPath: Bool
 
     private var errorClearTask: Task<Void, Never>?
     private var ttsObserver: Task<Void, Never>?
     private var thinkingFillerTask: Task<Void, Never>?
     private var followUpExpiryTask: Task<Void, Never>?
+    private var samGatewayTurnTask: Task<Void, Never>?
+    private var samGatewayTurnSequence: Int = 0
 
     /// When true, the next TTS-finish triggers follow-up capture (no wake word needed).
     private var awaitingUserReply = false
@@ -189,6 +193,7 @@ final class AppState: ObservableObject {
         self.speechCoordinator = SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.allowSamGatewayPath = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
         self.ttsStartDeadlineSeconds = 1.6
         self.ttsTotalDeadlineSeconds = 45.0
         self.enforceStrictTurnSpeechPhases = true
@@ -200,6 +205,13 @@ final class AppState: ObservableObject {
         refreshAutonomousLearningDebug()
         refreshCameraDebug()
         maybeRunLiveVisionScriptIfRequested()
+    }
+
+    convenience init(container: AppContainer) {
+        self.init(
+            orchestrator: container.orchestrator,
+            allowSamGatewayPath: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        )
     }
 
     init(orchestrator: TurnOrchestrating,
@@ -216,6 +228,7 @@ final class AppState: ObservableObject {
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
              }
         },
+         allowSamGatewayPath: Bool? = nil,
          enableRuntimeServices: Bool = true) {
         self.orchestrator = orchestrator
         self.voicePipeline = voicePipeline
@@ -226,6 +239,8 @@ final class AppState: ObservableObject {
         self.speechCoordinator = speechCoordinator ?? SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.allowSamGatewayPath = allowSamGatewayPath
+            ?? (ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil)
         self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
         self.ttsTotalDeadlineSeconds = max(self.ttsStartDeadlineSeconds, ttsTotalDeadlineSeconds)
         self.enforceStrictTurnSpeechPhases = enforceStrictTurnSpeechPhases ?? enableRuntimeServices
@@ -250,6 +265,7 @@ final class AppState: ObservableObject {
                  TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
              }
          },
+         allowSamGatewayPath: Bool? = nil,
          enableRuntimeServices: Bool = true) {
         self.orchestrator = orchestrator
         self.voicePipeline = VoicePipelineCoordinator()
@@ -260,6 +276,8 @@ final class AppState: ObservableObject {
         self.speechCoordinator = speechCoordinator ?? SpeechCoordinator()
         self.outputCanvasLogStore = .shared
         self.cameraVisionService = .shared
+        self.allowSamGatewayPath = allowSamGatewayPath
+            ?? (ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil)
         self.ttsStartDeadlineSeconds = max(0.1, ttsStartDeadlineSeconds)
         self.ttsTotalDeadlineSeconds = max(self.ttsStartDeadlineSeconds, ttsTotalDeadlineSeconds)
         self.enforceStrictTurnSpeechPhases = enforceStrictTurnSpeechPhases ?? enableRuntimeServices
@@ -281,6 +299,7 @@ final class AppState: ObservableObject {
                              TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
                          }
                      },
+                     allowSamGatewayPath: Bool? = nil,
                      enableRuntimeServices: Bool = true) {
         self.init(
             orchestrator: orchestrator,
@@ -292,6 +311,7 @@ final class AppState: ObservableObject {
             ttsTotalDeadlineSeconds: 45.0,
             enforceStrictTurnSpeechPhases: nil,
             thinkingFillerSpeaker: thinkingFillerSpeaker,
+            allowSamGatewayPath: allowSamGatewayPath,
             enableRuntimeServices: enableRuntimeServices
         )
     }
@@ -305,6 +325,7 @@ final class AppState: ObservableObject {
                              TTSService.shared.speak(phrase, mode: .confirm, interrupt: false)
                          }
                      },
+                     allowSamGatewayPath: Bool? = nil,
                      enableRuntimeServices: Bool = true) {
         self.init(
             orchestrator: orchestrator,
@@ -315,6 +336,7 @@ final class AppState: ObservableObject {
             ttsTotalDeadlineSeconds: 45.0,
             enforceStrictTurnSpeechPhases: nil,
             thinkingFillerSpeaker: thinkingFillerSpeaker,
+            allowSamGatewayPath: allowSamGatewayPath,
             enableRuntimeServices: enableRuntimeServices
         )
     }
@@ -337,9 +359,11 @@ final class AppState: ObservableObject {
         }
         TaskScheduler.shared.startPolling()
         setupForgeQueueObservation()
+        setupLearnSkillObservation()
         setupAutonomousLearningObservation()
         setupCameraVision()
         scheduleOllamaWarmupIfNeeded()
+        TTSService.shared.prewarm()
 
         // Auto-start listening if user previously enabled it and mic is authorized
         if Self.userWantsListeningEnabled
@@ -412,9 +436,11 @@ final class AppState: ObservableObject {
     private func debugOnlyAudioNoiseMessage(for message: String) -> String? {
         let lower = message.lowercased()
         if lower.contains("-10877") {
+            MediaTraceBuffer.shared.record(MediaTracePhase.audioOverload)
             return "Suppressed benign AVAudio session hiccup (-10877); this is typically transient."
         }
         if lower.contains("halc_proxyiocontext") && lower.contains("overload") {
+            MediaTraceBuffer.shared.record(MediaTracePhase.audioOverload)
             return "Suppressed HALC IO overload warning; short overload during capture/playback handoff."
         }
         return nil
@@ -429,6 +455,18 @@ final class AppState: ObservableObject {
                 self.cameraLastFrameAt = capturedAt
                 self.cameraPermissionStatus = CameraPermission.currentStatus
             }
+        }
+
+        let monitor = CameraHealthMonitor.shared
+        monitor.onCameraLost = {
+            MediaTraceBuffer.shared.record(MediaTracePhase.cameraLost)
+        }
+        monitor.onCameraRecovered = {
+            MediaTraceBuffer.shared.record(MediaTracePhase.cameraRecovered)
+        }
+        monitor.onCameraDisabled = { [weak self] in
+            self?.isCameraEnabled = false
+            self?.cameraErrorMessage = "Camera disabled after repeated failures."
         }
     }
 
@@ -453,17 +491,17 @@ final class AppState: ObservableObject {
                     #if DEBUG
                     let correlationID = self.activeSpeechCorrelationID ?? "unknown"
                     print("[TTS_START] correlation_id=\(correlationID) retry_attempt=\(self.activeSpeechRetryAttempt)")
+                    DebugLogStore.shared.logTTS(turnID: self.activeTurnID, event: "start", correlationID: correlationID)
                     #endif
                     self.markTurnTTSStartedIfNeeded()
                 } else {
                     self.voicePipeline.resumeAfterTTSIfNeeded()
                     #if DEBUG
-                    let correlationID = self.activeSpeechCorrelationID ?? "unknown"
                     if let startedAt = self.activeSpeechStartedAt {
+                        let correlationID = self.activeSpeechCorrelationID ?? "unknown"
                         let ms = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
                         print("[TTS_END] correlation_id=\(correlationID) tts_ms=\(ms)")
-                    } else {
-                        print("[TTS_END] correlation_id=\(correlationID) tts_ms=unknown")
+                        DebugLogStore.shared.logTTS(turnID: self.activeTurnID, event: "end", durationMs: ms, correlationID: correlationID)
                     }
                     #endif
                     self.activeSpeechStartedAt = nil
@@ -553,6 +591,8 @@ final class AppState: ObservableObject {
     }
 
     func stopListening() {
+        samGatewayTurnTask?.cancel()
+        samGatewayTurnTask = nil
         voicePipeline.stopListening()
         speechStartMonitorTask?.cancel()
         speechStartMonitorTask = nil
@@ -613,6 +653,8 @@ final class AppState: ObservableObject {
                     cameraPreviewImage = preview
                 }
                 cameraLastFrameAt = cameraVisionService.latestFrameAt
+                CameraHealthMonitor.shared.resetRetryCount()
+                CameraHealthMonitor.shared.startMonitoring()
             } catch {
                 isCameraEnabled = false
                 Self.userWantsCameraEnabled = false
@@ -623,6 +665,7 @@ final class AppState: ObservableObject {
     }
 
     func stopCamera() {
+        CameraHealthMonitor.shared.stopMonitoring()
         cameraVisionService.stop()
         isCameraEnabled = false
         Self.userWantsCameraEnabled = false
@@ -677,6 +720,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    func flushSemanticMemoryForLifecycle() {
+        let sessionID = semanticMemorySessionID()
+        SemanticMemoryPipeline.shared.setActiveSessionID(sessionID)
+        Task { @MainActor in
+            await SemanticMemoryPipeline.shared.flushForLifecycle()
+        }
+    }
+
     private func showError(_ message: String) {
         lastError = message
         errorClearTask?.cancel()
@@ -687,11 +738,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func semanticMemorySessionID() -> String {
+        let trimmedGateway = M2Settings.samSessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedGateway.isEmpty {
+            return "gateway_\(trimmedGateway)"
+        }
+        return "local_session"
+    }
+
     // MARK: - Send Message
 
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let memorySessionID = semanticMemorySessionID()
+        SemanticMemoryPipeline.shared.setActiveSessionID(memorySessionID)
         let turnID = nextTurnID()
         activeTurnID = turnID
         turnSpeechPhase = .routing
@@ -740,7 +801,25 @@ final class AppState: ObservableObject {
             return
         }
 
-        // Everything else → orchestrator
+        // --- Sam Gateway path (clean pipe) ---
+        if allowSamGatewayPath && M2Settings.useSamGateway && !M2Settings.useOllama {
+            let isVoice = existingTurnStart != nil
+            samGatewayTurnTask?.cancel()
+            samGatewayTurnSequence += 1
+            let gatewayTurnSequence = samGatewayTurnSequence
+            samGatewayTurnTask = Task(priority: .userInitiated) {
+                await self.sendToSamGateway(
+                    text: trimmed,
+                    turnID: turnID,
+                    source: isVoice ? "stt" : "typed",
+                    gatewayTurnSequence: gatewayTurnSequence,
+                    memorySessionID: memorySessionID
+                )
+            }
+            return
+        }
+
+        // --- Legacy orchestrator path ---
         startThinkingFillerTimer(baseChatCount: baseChatCount, baseOutputCount: baseOutputCount)
         let turnInputMode: TurnInputMode = existingTurnStart != nil ? .voice : .text
         let intentAudioTimings = currentIntentAudioTimings()
@@ -764,6 +843,14 @@ final class AppState: ObservableObject {
             let assistantMessage = result.appendedChat.last(where: { $0.role == .assistant })?.text
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                await SemanticMemoryPipeline.shared.processTurn(
+                    sessionID: memorySessionID,
+                    turnID: turnID,
+                    userMessage: trimmed,
+                    assistantMessage: assistantMessage,
+                    inputSource: turnInputMode == .voice ? "stt" : "typed",
+                    sttConfidence: nil
+                )
                 _ = await self.memoryAutoSaveService.processTurn(
                     userMessage: trimmed,
                     assistantMessage: assistantMessage
@@ -781,6 +868,128 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Sam Gateway (Clean Pipe)
+
+    /// Send user text to the Sam gateway and apply the response.
+    /// No intent classification, plan execution, or tool routing — just text in, text out.
+    private func sendToSamGateway(text: String,
+                                  turnID: String,
+                                  source: String,
+                                  gatewayTurnSequence: Int,
+                                  memorySessionID: String) async {
+        pendingSlot = nil
+        let sessionId = M2Settings.samSessionId.isEmpty ? nil : M2Settings.samSessionId
+
+        #if DEBUG
+        print("[SAM_GATEWAY] turn_id=\(turnID) session=\(sessionId ?? "new") text=\(text.prefix(60))")
+        DebugLogStore.shared.logLLMRequest(turnID: turnID, provider: "sam_gateway", textPreview: String(text.prefix(100)))
+        #endif
+
+        do {
+            let reply = try await SamAPIClient.sendMessage(
+                sessionId: sessionId,
+                text: text,
+                source: source
+            )
+            guard gatewayTurnSequence == samGatewayTurnSequence else { return }
+
+            // Persist session ID for cross-launch continuity
+            if reply.newSession || M2Settings.samSessionId.isEmpty {
+                M2Settings.samSessionId = reply.sessionId
+            }
+
+            let assistantLatencyMs = activeTurnLatencyStartAt.map { Self.elapsedMs(since: $0) }
+
+            // Parse response for canvas items and clean spoken text
+            let parsed = SamResponseParser.parse(reply.replyText)
+            let hasCanvasContent = !parsed.canvasItems.isEmpty
+
+            // Chat bubble: clean text when canvas has the rich content, raw otherwise
+            let bubbleText = hasCanvasContent ? parsed.spokenText : reply.replyText
+            var assistantMessage = ChatMessage(
+                role: .assistant,
+                text: bubbleText,
+                llmProvider: .openai,
+                originProvider: .openai,
+                originReason: "sam_gateway",
+                latencyMs: assistantLatencyMs
+            )
+            assistantMessage.assistantResponseMode = .samGateway
+
+            cancelThinkingFiller()
+            clearThinkingFeedback()
+
+            chatMessages.append(assistantMessage)
+
+            #if DEBUG
+            print("[SAM_GATEWAY] reply | turn_id=\(turnID) | session=\(reply.sessionId) | model=\(reply.model) | server_ms=\(reply.latencyMs) | client_ms=\(assistantLatencyMs ?? 0) | tokens=\(reply.usage["total_tokens"] ?? 0)")
+            DebugLogStore.shared.logLLMResponse(
+                turnID: turnID, provider: "sam_gateway", model: reply.model,
+                durationMs: assistantLatencyMs,
+                responseBody: String(reply.replyText.prefix(500))
+            )
+            #endif
+
+            // Canvas items
+            if hasCanvasContent {
+                appendOutputItems(parsed.canvasItems, source: "sam_gateway")
+            }
+
+            // Speak the reply via TTS (stripped of markdown artifacts)
+            markTurnSpeechReady(turnID: turnID)
+            let speakable = parsed.spokenText
+            if !speakable.isEmpty {
+                enqueueSpeech([speakable], correlationID: turnID)
+            }
+
+            // Auto-listen after question
+            if isQuestionAutoListenFeatureEnabled
+                && endsWithSingleQuestionMark(speakable)
+                && isListeningEnabled {
+                awaitingUserReply = true
+                awaitingQuestionAutoListen = true
+            }
+
+            await SemanticMemoryPipeline.shared.processTurn(
+                sessionID: memorySessionID,
+                turnID: turnID,
+                userMessage: text,
+                assistantMessage: speakable,
+                inputSource: source,
+                sttConfidence: nil
+            )
+            _ = await memoryAutoSaveService.processTurn(
+                userMessage: text,
+                assistantMessage: speakable
+            )
+
+        } catch is CancellationError {
+            return
+        } catch {
+            guard gatewayTurnSequence == samGatewayTurnSequence else { return }
+            cancelThinkingFiller()
+            clearThinkingFeedback()
+
+            #if DEBUG
+            print("[SAM_GATEWAY_ERROR] turn_id=\(turnID) error=\(error)")
+            DebugLogStore.shared.logError(turnID: turnID, message: error.localizedDescription)
+            #endif
+
+            let errorText = "Sorry, I couldn't reach the server. (\(error.localizedDescription))"
+            chatMessages.append(ChatMessage(
+                role: .assistant,
+                text: errorText,
+                llmProvider: .none,
+                originReason: "sam_gateway_error"
+            ))
+        }
+
+        guard gatewayTurnSequence == samGatewayTurnSequence else { return }
+        samGatewayTurnTask = nil
+        activeTurnLatencyStartAt = nil
+        status = isListeningEnabled ? .listening : .idle
+    }
+
     // MARK: - Apply Orchestrator Result
 
     private func applyResult(_ result: TurnResult, turnID: String) {
@@ -791,6 +1000,12 @@ final class AppState: ObservableObject {
             let provider = result.llmProvider.rawValue
             let toolCount = result.executedToolSteps.count
             print("[Latency] assistant_total_ms=\(assistantLatencyMs) provider=\(provider) tool_steps=\(toolCount)")
+            DebugLogStore.shared.logRouting(
+                turnID: turnID, provider: provider,
+                reason: result.planProviderSelected.rawValue,
+                localOutcome: result.routeLocalOutcome,
+                durationMs: assistantLatencyMs
+            )
         }
         #endif
         if let assistantLatencyMs {
@@ -808,10 +1023,6 @@ final class AppState: ObservableObject {
                 appendedChat[idx].usedLocalKnowledge = true
             }
         }
-        for idx in appendedChat.indices where appendedChat[idx].role == .assistant && appendedChat[idx].originProvider == .openai {
-            appendedChat[idx].assistantResponseMode = currentAssistantResponseMode()
-        }
-
         chatMessages.append(contentsOf: appendedChat)
         appendOutputItems(result.appendedOutputs, source: "turn_result")
         if let attribution = result.knowledgeAttribution {
@@ -848,6 +1059,10 @@ final class AppState: ObservableObject {
             print("[OPENAI_CALLS_ERROR] turn_id=\(turnID) plan_provider=ollama count=\(openAICalls.count) callers=[\(callers)]")
         }
         OpenAICallTracker.shared.clear(turnID: turnID)
+        for step in result.executedToolSteps {
+            let argsStr = step.args.isEmpty ? nil : step.args.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+            DebugLogStore.shared.logTool(turnID: turnID, name: step.name, args: argsStr)
+        }
         #endif
 
         let finalAssistantText = appendedChat.last(where: { $0.role == .assistant })?.text
@@ -1330,6 +1545,11 @@ final class AppState: ObservableObject {
         let routerMs = trace.routerMs.map(String.init) ?? "n/a"
         print("[LatencyBreakdown] turn=\(trace.id) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) router_ms=\(routerMs) orchestrator_ms=\(str(orchestratorMs)) apply_ms=\(str(applyMs)) tts_wait_ms=\(str(ttsQueueWaitMs)) tts_ms=\(str(ttsMs)) total_ms=\(str(totalMs)) provider=\(trace.provider.rawValue) tool_steps=\(trace.toolSteps) user_chars=\(trace.userChars) assistant_chars=\(trace.assistantChars) reason=\(reason)")
         print("[PERF_TURN] turn_id=\(trace.turnID) mode=\(trace.inputMode) capture_ms=\(str(captureMs)) stt_ms=\(str(sttMs)) intent_local_ms=\(str(trace.intentLocalMs)) intent_openai_ms=\(str(trace.intentOpenAIMs)) plan_local_wire_ms=\(str(trace.planLocalWireMs)) plan_local_total_ms=\(str(trace.planLocalTotalMs)) plan_openai_ms=\(str(trace.planOpenAIMs)) tool_ms_total=\(str(trace.toolMsTotal)) tts_queue_wait_ms=\(str(ttsQueueWaitMs)) tts_synthesis_ms=\(str(ttsSynthesisMs)) tts_playback_start_ms=\(str(ttsPlaybackStartMs)) first_audio_ms=\(str(firstAudioMs)) total_ms=\(str(totalMs))")
+        DebugLogStore.shared.logLatency(
+            turnID: trace.turnID,
+            totalMs: totalMs ?? 0,
+            breakdown: "mode=\(trace.inputMode) capture=\(str(captureMs)) stt=\(str(sttMs)) router=\(routerMs) orch=\(str(orchestratorMs)) apply=\(str(applyMs)) tts_wait=\(str(ttsQueueWaitMs)) tts=\(str(ttsMs)) total=\(str(totalMs)) provider=\(trace.provider.rawValue)"
+        )
         #endif
     }
 
@@ -1428,11 +1648,6 @@ final class AppState: ObservableObject {
         }
     }
     #endif
-
-    private func currentAssistantResponseMode() -> AssistantResponseMode {
-        let useRealtimeSTT = OpenAISettings.realtimeModeEnabled && !OpenAISettings.realtimeUseClassicSTT
-        return useRealtimeSTT ? .realtimeAI : .openAIClassic
-    }
 
     private func formatKnowledgeAttribution(_ attribution: KnowledgeAttribution) -> String {
         var lines = [
@@ -1632,6 +1847,41 @@ final class AppState: ObservableObject {
             }
         }
         refreshAutonomousLearningDebug()
+    }
+
+    private func setupLearnSkillObservation() {
+        activeLearnSkillSession = LearnSkillController.shared.activeSession
+        LearnSkillController.shared.onEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .message(let message):
+                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                self.chatMessages.append(ChatMessage(role: .assistant, text: trimmed))
+            case .output(let item):
+                self.appendOutputItem(item, source: "learn_skill_event")
+            case .state(let session):
+                self.activeLearnSkillSession = session
+            }
+        }
+    }
+
+    func approveLearnSkillPermissions(_ approved: Bool) {
+        let action = ToolAction(
+            name: "skills.learn.approve_permissions",
+            args: ["approved": approved ? "true" : "false"],
+            say: nil
+        )
+        if let output = ToolsRuntime.shared.execute(action) {
+            appendOutputItem(output, source: "learn_skill_permissions")
+        }
+        guard approved else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let install = ToolsRuntime.shared.execute(ToolAction(name: "skills.learn.install", args: [:], say: nil)) {
+                self.appendOutputItem(install, source: "learn_skill_install")
+            }
+        }
     }
 
     private func handleAutonomousLearningCompletion(_ report: AutonomousLearningReport) {

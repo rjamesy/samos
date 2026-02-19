@@ -179,6 +179,9 @@ final class TurnRouter: TurnRouting {
         guard input.classification.confidence >= input.confidenceThreshold else { return false }
 
         let category = categoryForCapabilityRequest(text: text, classification: input.classification)
+        if category == .news {
+            return false
+        }
         let hasNativeTool = nativeToolExistsHandler(category)
         return !hasNativeTool
     }
@@ -283,7 +286,10 @@ final class TurnRouter: TurnRouting {
 
         if classification.needsWeb {
             let lower = text.lowercased()
-            if lower.contains("headline") || lower.contains("breaking news") || lower.contains("latest news") {
+            if lower.contains("breaking news")
+                || lower.contains("latest news")
+                || lower.hasPrefix("news")
+                || lower.contains(" news ") {
                 return .news
             }
             if lower.contains("score") || lower.contains("scores") || lower.contains("standings") {
@@ -363,9 +369,49 @@ final class TurnRouter: TurnRouting {
         guard let classification, classification.needsWeb else {
             return route
         }
+        let category = categoryForCapabilityRequest(text: requestText, classification: classification)
+
+        if category == .news {
+            if nativeToolExistsHandler(category) {
+                return RouteDecision(
+                    plan: Plan(steps: [
+                        .tool(
+                            name: "news.latest",
+                            args: [
+                                "text": .string(requestText)
+                            ],
+                            say: "I'll get the latest headlines."
+                        )
+                    ]),
+                    provider: route.provider,
+                    routerMs: route.routerMs,
+                    aiModelUsed: route.aiModelUsed,
+                    routeReason: "news_native_skill_route",
+                    planLocalWireMs: route.planLocalWireMs,
+                    planLocalTotalMs: route.planLocalTotalMs,
+                    planOpenAIMs: route.planOpenAIMs
+                )
+            }
+            return RouteDecision(
+                plan: Plan(steps: [
+                    .delegate(
+                        task: "capability_gap: latest news",
+                        context: "missing: news.basic tool package and news.latest skill (permission web.read)",
+                        say: "I can't do live news yet. I can learn that if you approve web access."
+                    )
+                ]),
+                provider: route.provider,
+                routerMs: route.routerMs,
+                aiModelUsed: route.aiModelUsed,
+                routeReason: "news_capability_gap_learn",
+                planLocalWireMs: route.planLocalWireMs,
+                planLocalTotalMs: route.planLocalTotalMs,
+                planOpenAIMs: route.planOpenAIMs
+            )
+        }
+
         guard !hasAllowedToolPlan(route.plan) else { return route }
 
-        let category = categoryForCapabilityRequest(text: requestText, classification: classification)
         if nativeToolExistsHandler(category) {
             return RouteDecision(
                 plan: Plan(steps: [.ask(slot: "web_query_detail", prompt: needsWebClarifyingPrompt)]),

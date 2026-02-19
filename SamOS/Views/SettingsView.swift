@@ -4,18 +4,7 @@ import Foundation
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
-
-    private enum SettingsTab: String, CaseIterable, Identifiable {
-        case general = "General"
-        case audioVisual = "Audio/Visual"
-        case aiLearning = "AI Learning"
-        case skills = "Skills"
-        case memory = "Memory"
-
-        var id: String { rawValue }
-    }
-
-    @State private var selectedTab: SettingsTab = .general
+    @StateObject private var rootViewModel = SettingsRootViewModel()
 
     // Wake Word
     @State private var porcupineAccessKey: String = M2Settings.porcupineAccessKey
@@ -34,6 +23,7 @@ struct SettingsView: View {
 
     // Router
     @State private var useEmotionalTone: Bool = M2Settings.useEmotionalTone
+    @State private var developerModeEnabled: Bool = M2Settings.developerModeEnabled
     @State private var faceRecognitionEnabled: Bool = M2Settings.faceRecognitionEnabled
     @State private var personalizedGreetingsEnabled: Bool = M2Settings.personalizedGreetingsEnabled
     @State private var useOllama: Bool = M2Settings.useOllama
@@ -42,6 +32,9 @@ struct SettingsView: View {
     @State private var preferOpenAIPlans: Bool = M2Settings.preferOpenAIPlans
     @State private var disableAutoClosePrompts: Bool = M2Settings.disableAutoClosePrompts
     @State private var ollamaCombinedTimeoutMs: Double = Double(M2Settings.ollamaCombinedTimeoutMs)
+
+    // Sam Gateway
+    @State private var samGatewayURL: String = M2Settings.samGatewayURL
 
     // Tone learning
     @State private var toneProfile: TonePreferenceProfile = TonePreferenceStore.shared.loadProfile()
@@ -57,8 +50,7 @@ struct SettingsView: View {
     // OpenAI
     @State private var openaiApiKey: String = OpenAISettings.apiKey
     @State private var youtubeApiKey: String = OpenAISettings.youtubeAPIKey
-    @State private var openaiGeneralModel: String = OpenAISettings.generalModel
-    @State private var openaiEscalationModel: String = OpenAISettings.escalationModel
+    @State private var openaiPreferredModel: String = OpenAISettings.generalModel
     @State private var openaiRealtimeModeEnabled: Bool = OpenAISettings.realtimeModeEnabled
     @State private var openaiRealtimeUseClassicSTT: Bool = OpenAISettings.realtimeUseClassicSTT
     @State private var openaiRealtimeModel: String = OpenAISettings.realtimeModel
@@ -66,11 +58,21 @@ struct SettingsView: View {
 
     // Memory
     @State private var memories: [MemoryRow] = []
+    @State private var semanticEpisodes: [SemanticEpisodeRecord] = []
+    @State private var selectedSemanticEpisodeID: String?
+    @State private var semanticEpisodeExport: String = ""
     @State private var showClearConfirmation = false
     @State private var faceClearFeedback: String = ""
 
     // Skills
-    @State private var installedSkills: [SkillSpec] = []
+    @State private var skillSearchQuery: String = ""
+    @State private var skillSearchResults: [SkillSearchResult] = []
+    @State private var searchedSkills = false
+    @State private var capabilitySearchQuery: String = ""
+    @State private var capabilitySearchResults: [CapabilityDescriptor] = []
+    @State private var searchedCapabilities = false
+    @State private var skillEditorDraft: SkillEditorDraft?
+    @State private var capabilityEditorDraft: CapabilityEditorDraft?
 
     // User
     @State private var userName: String = M2Settings.userName
@@ -95,7 +97,7 @@ struct SettingsView: View {
 
             Divider()
 
-            Picker("Settings Tab", selection: $selectedTab) {
+            Picker("Settings Tab", selection: $rootViewModel.selectedTab) {
                 ForEach(SettingsTab.allCases) { tab in
                     Text(tab.rawValue).tag(tab)
                 }
@@ -117,47 +119,80 @@ struct SettingsView: View {
                     .padding(.vertical, 6)
                 }
 
-                switch selectedTab {
+                switch rootViewModel.selectedTab {
                 case .general:
-                    generalSection
-                    toneLearningSection
-                    securitySection
+                    SettingsGeneralTabView(
+                        generalSection: AnyView(generalSection),
+                        toneLearningSection: AnyView(toneLearningSection),
+                        securitySection: AnyView(securitySection)
+                    )
 
                 case .audioVisual:
-                    wakeWordSection
-                    sttSection
-                    audioCaptureSection
-                    voiceOutputSection
-                    cameraVisionSection
+                    SettingsAudioVisualTabView(
+                        wakeWordSection: AnyView(wakeWordSection),
+                        sttSection: AnyView(sttSection),
+                        audioCaptureSection: AnyView(audioCaptureSection),
+                        voiceOutputSection: AnyView(voiceOutputSection),
+                        cameraVisionSection: AnyView(cameraVisionSection)
+                    )
 
                 case .aiLearning:
-                    routingSection
-                    openAISection
-                    aiLearningSection
+                    SettingsAILearningTabView(
+                        samGatewaySection: developerModeEnabled
+                            ? AnyView(samGatewaySection)
+                            : AnyView(developerModeRequiredSection),
+                        routingSection: AnyView(routingSection),
+                        openAISection: AnyView(openAISection),
+                        aiLearningSection: AnyView(aiLearningSection)
+                    )
 
                 case .skills:
-                    installedSkillsSection
-                    capabilitiesSection
+                    SettingsSkillsTabView(
+                        installedSkillsSection: AnyView(installedSkillsSection),
+                        capabilitiesSection: AnyView(capabilitiesSection)
+                    )
 
                 case .memory:
-                    memorySection
+                    SettingsMemoryTabView(memorySection: AnyView(memorySection))
                 }
             }
             .formStyle(.grouped)
+        }
+        .sheet(item: $skillEditorDraft) { draft in
+            SkillEditorSheet(
+                draft: draft,
+                onSave: { updated in
+                    saveSkillEdit(updated)
+                },
+                onDelete: { deleted in
+                    deleteSkill(deleted)
+                }
+            )
+        }
+        .sheet(item: $capabilityEditorDraft) { draft in
+            CapabilityEditorSheet(
+                draft: draft,
+                onSave: { updated in
+                    saveCapabilityEdit(updated)
+                }
+            )
         }
         .frame(minWidth: 560, minHeight: 560)
         .onAppear {
             appState.pauseListeningForSettings()
             reloadMemories()
+            reloadSemanticEpisodes()
             appState.refreshWebsiteLearningDebug()
             appState.refreshAutonomousLearningDebug()
             appState.refreshCameraDebug()
-            installedSkills = SkillStore.shared.loadInstalled()
             toneProfile = TonePreferenceStore.shared.loadProfile()
             useOllama = M2Settings.useOllama
+            developerModeEnabled = M2Settings.developerModeEnabled
             preferOpenAIPlans = M2Settings.preferOpenAIPlans
             ollamaEndpoint = M2Settings.ollamaEndpoint
             ollamaModel = M2Settings.ollamaModel
+            samGatewayURL = M2Settings.samGatewayURL
+            openaiPreferredModel = OpenAISettings.generalModel
         }
         .onDisappear {
             appState.resumeListeningAfterSettings()
@@ -181,6 +216,15 @@ struct SettingsView: View {
                 .onChange(of: useEmotionalTone) { _, newValue in
                     M2Settings.useEmotionalTone = newValue
                 }
+
+            Toggle("Developer mode", isOn: $developerModeEnabled)
+                .onChange(of: developerModeEnabled) { _, newValue in
+                    M2Settings.developerModeEnabled = newValue
+                }
+
+            Text("Developer mode reveals advanced routing and gateway controls.")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             if !M2Settings.affectMirroringEnabled {
                 Text("Emotional mirroring rollout is currently off. This preference will apply once enabled.")
@@ -379,10 +423,16 @@ struct SettingsView: View {
                     M2Settings.ollamaModel = newValue
                 }
 
-            Toggle("Prefer OpenAI plans (dev override)", isOn: $preferOpenAIPlans)
-                .onChange(of: preferOpenAIPlans) { _, newValue in
-                    M2Settings.preferOpenAIPlans = newValue
-                }
+            if developerModeEnabled {
+                Toggle("Prefer OpenAI plans (dev override)", isOn: $preferOpenAIPlans)
+                    .onChange(of: preferOpenAIPlans) { _, newValue in
+                        M2Settings.preferOpenAIPlans = newValue
+                    }
+            } else {
+                Text("Enable Developer mode to access plan-routing override controls.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
 
             Toggle("Disable auto-close prompts", isOn: $disableAutoClosePrompts)
                 .onChange(of: disableAutoClosePrompts) { _, newValue in
@@ -570,6 +620,48 @@ struct SettingsView: View {
         }
     }
 
+    private var samGatewaySection: some View {
+        Section("Sam Gateway") {
+            TextField("Gateway URL", text: $samGatewayURL)
+                .onChange(of: samGatewayURL) { _, newValue in
+                    M2Settings.samGatewayURL = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            if M2Settings.useSamGateway {
+                if M2Settings.useOllama {
+                    Text("Configured — Ollama remains primary while 'Use Ollama' is enabled.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Active — all input routed to Sam agent via gateway")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                }
+                HStack {
+                    Text("Session: \(M2Settings.samSessionId.isEmpty ? "none" : M2Settings.samSessionId)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("New Session") {
+                        M2Settings.samSessionId = ""
+                    }
+                    .font(.caption)
+                }
+            } else {
+                Text("Empty = disabled. Set URL to route all input to the Sam gateway (e.g. http://localhost:8002)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var developerModeRequiredSection: some View {
+        Section("Sam Gateway") {
+            Text("Developer mode is disabled. Sam Gateway settings are hidden.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
     private var openAISection: some View {
         Section("OpenAI") {
             SecureField("API Key", text: $openaiApiKey)
@@ -582,29 +674,25 @@ struct SettingsView: View {
                     OpenAISettings.youtubeAPIKey = newValue
                 }
 
-            Picker("General Model", selection: $openaiGeneralModel) {
-                ForEach(OpenAISettings.generalModelOptions, id: \.self) { model in
-                    Text(model).tag(model)
+            TextField("Preferred OpenAI model", text: $openaiPreferredModel)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: openaiPreferredModel) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let selected = trimmed.isEmpty ? OpenAISettings.defaultPreferredModel : trimmed
+                    openaiPreferredModel = selected
+                    OpenAISettings.generalModel = selected
+                    OpenAISettings.escalationModel = selected
+                }
+
+            Menu("Use model preset") {
+                ForEach(OpenAISettings.preferredModelFallbacks, id: \.self) { model in
+                    Button(model) {
+                        openaiPreferredModel = model
+                        OpenAISettings.generalModel = model
+                        OpenAISettings.escalationModel = model
+                    }
                 }
             }
-            .pickerStyle(.menu)
-            .onChange(of: openaiGeneralModel) { _, newValue in
-                OpenAISettings.generalModel = newValue
-            }
-
-            Picker("Escalation Model (Complex Tasks)", selection: $openaiEscalationModel) {
-                ForEach(OpenAISettings.escalationModelOptions, id: \.self) { model in
-                    Text(model).tag(model)
-                }
-            }
-            .pickerStyle(.menu)
-            .onChange(of: openaiEscalationModel) { _, newValue in
-                OpenAISettings.escalationModel = newValue
-            }
-
-            Text("Complex requests automatically use the escalation model.")
-                .font(.caption)
-                .foregroundColor(.secondary)
 
             Toggle("Realtime Mode (WebSocket transcription)", isOn: $openaiRealtimeModeEnabled)
                 .onChange(of: openaiRealtimeModeEnabled) { _, newValue in
@@ -650,10 +738,7 @@ struct SettingsView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
-                        Text("General: \(OpenAISettings.generalModel)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Text("Escalation: \(OpenAISettings.escalationModel)")
+                        Text("Preferred: \(OpenAISettings.generalModel)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                         Text(OpenAISettings.isYouTubeConfigured ? "YouTube API configured" : "YouTube API not configured")
@@ -672,16 +757,6 @@ struct SettingsView: View {
                 } else {
                     Text("API key required").foregroundColor(.secondary)
                 }
-            }
-        }
-        .onAppear {
-            if !OpenAISettings.generalModelOptions.contains(openaiGeneralModel) {
-                openaiGeneralModel = OpenAISettings.generalModelOptions.first ?? "gpt-4o-mini"
-                OpenAISettings.generalModel = openaiGeneralModel
-            }
-            if !OpenAISettings.escalationModelOptions.contains(openaiEscalationModel) {
-                openaiEscalationModel = OpenAISettings.escalationModelOptions.first ?? "gpt-4o"
-                OpenAISettings.escalationModel = openaiEscalationModel
             }
         }
     }
@@ -731,41 +806,367 @@ struct SettingsView: View {
     }
 
     private var installedSkillsSection: some View {
-        Section("Installed Skills") {
-            if installedSkills.isEmpty {
-                Text("No skills installed")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-            } else {
-                ForEach(installedSkills) { skill in
-                    LabeledContent(skill.name) {
-                        Text(skill.triggerPhrases.prefix(3).joined(separator: ", "))
-                            .foregroundColor(.secondary)
+        Group {
+            Section("Skill Search") {
+                TextField("Search skills (for example: news, weather, alarm)", text: $skillSearchQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        runSkillSearch()
+                    }
+
+                HStack {
+                    Button("Search Skills") {
+                        runSkillSearch()
+                    }
+                    .buttonStyle(.borderless)
+
+                    if searchedSkills {
+                        Text("\(skillSearchResults.count) match\(skillSearchResults.count == 1 ? "" : "es")")
                             .font(.caption)
-                            .lineLimit(1)
+                            .foregroundColor(.secondary)
                     }
                 }
+
+                Text("Skills are loaded only when you search. Click a result to edit/save, and delete skills if needed.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
-            LabeledContent("Count") {
-                Text("\(installedSkills.count)")
+            if searchedSkills {
+                Section("Skill Results") {
+                    if skillSearchResults.isEmpty {
+                        Text("No skills matched your search.")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                    } else {
+                        ForEach(skillSearchResults) { result in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Button {
+                                    openSkillEditor(result)
+                                } label: {
+                                    HStack {
+                                        Text(result.name)
+                                        Spacer()
+                                        Text(result.kind.label)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+
+                                Text("ID: \(result.skillID)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+
+                                Text("Keywords: \(result.keywords.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+
+                                if result.capabilities.isEmpty {
+                                    Text("Capabilities: none linked")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("Capabilities: \(result.capabilities.map(\.id).joined(separator: ", "))")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        HStack(spacing: 8) {
+                                            ForEach(result.capabilities, id: \.id) { capability in
+                                                Button(capability.name) {
+                                                    openCapabilityEditor(capability)
+                                                }
+                                                .buttonStyle(.borderless)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
             }
         }
     }
 
     private var capabilitiesSection: some View {
-        Section("Capabilities") {
-            LabeledContent("Registered Tools") {
-                Text("\(ToolRegistry.shared.allTools.count)")
+        Group {
+            Section("Capability Search") {
+                TextField("Search capabilities (for example: news.basic, weather)", text: $capabilitySearchQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        runCapabilitySearch()
+                    }
+
+                HStack {
+                    Button("Search Capabilities") {
+                        runCapabilitySearch()
+                    }
+                    .buttonStyle(.borderless)
+
+                    if searchedCapabilities {
+                        Text("\(capabilitySearchResults.count) match\(capabilitySearchResults.count == 1 ? "" : "es")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Capabilities are shared and deduplicated. Skills can link to one or many capabilities.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
-            ForEach(ToolRegistry.shared.allTools, id: \.name) { tool in
-                LabeledContent(tool.name) {
-                    Text(tool.description)
-                        .foregroundColor(.secondary)
-                        .font(.caption)
+
+            if searchedCapabilities {
+                Section("Capability Results") {
+                    if capabilitySearchResults.isEmpty {
+                        Text("No capabilities matched your search.")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                    } else {
+                        ForEach(capabilitySearchResults, id: \.id) { capability in
+                            Button {
+                                openCapabilityEditor(capability)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(capability.name)
+                                        Spacer()
+                                        Text(capability.id)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Text("Tools: \(capability.tools.joined(separator: ", "))")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+                                    if !capability.permissions.isEmpty {
+                                        Text("Permissions: \(capability.permissions.joined(separator: ", "))")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 4)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    private func runSkillSearch() {
+        let query = skillSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchedSkills = false
+            skillSearchResults = []
+            return
+        }
+
+        let store = SkillStore.shared
+        let catalog = CapabilityCatalog.shared
+        let legacy = store.searchInstalledSkills(query: query, limit: 80).map { skill in
+            let capabilities = capabilities(for: skill)
+            return SkillSearchResult(
+                kind: .legacy,
+                skillID: skill.id,
+                name: skill.name,
+                keywords: skill.triggerPhrases,
+                capabilities: capabilities
+            )
+        }
+        let packages = store.searchInstalledPackages(query: query, limit: 80).map { package in
+            let capabilities = capabilities(for: package)
+            return SkillSearchResult(
+                kind: .package,
+                skillID: package.manifest.skillID,
+                name: package.manifest.name,
+                keywords: package.plan.intentPatterns,
+                capabilities: capabilities
+            )
+        }
+
+        var merged: [String: SkillSearchResult] = [:]
+        for entry in legacy + packages {
+            let key = "\(entry.kind.rawValue)#\(entry.skillID)"
+            merged[key] = entry
+        }
+
+        let sorted = merged.values.sorted { lhs, rhs in
+            if lhs.name == rhs.name { return lhs.skillID < rhs.skillID }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+
+        skillSearchResults = sorted
+        searchedSkills = true
+
+        if capabilitySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let capabilityIDs = Set(sorted.flatMap { $0.capabilities.map(\.id) })
+            capabilitySearchResults = capabilityIDs.compactMap { catalog.definition(for: $0) }.sorted { $0.name < $1.name }
+            searchedCapabilities = !capabilitySearchResults.isEmpty
+        }
+    }
+
+    private func runCapabilitySearch() {
+        let query = capabilitySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchedCapabilities = false
+            capabilitySearchResults = []
+            return
+        }
+        capabilitySearchResults = CapabilityCatalog.shared.search(query, limit: 120)
+        searchedCapabilities = true
+    }
+
+    private func capabilities(for skill: SkillSpec) -> [CapabilityDescriptor] {
+        let explicit = SkillCapabilityLinkStore.shared.capabilities(forSkillID: skill.id)
+        let inferredTools = skill.steps.map(\.action).filter {
+            let lower = $0.lowercased()
+            return lower != "talk" && lower != "ask"
+        }
+        var capabilityIDs = Set(explicit)
+        for tool in inferredTools {
+            if let capabilityID = CapabilityCatalog.shared.capabilityID(forTool: tool) {
+                capabilityIDs.insert(capabilityID)
+            }
+        }
+        return capabilityIDs.compactMap { CapabilityCatalog.shared.definition(for: $0) }.sorted { $0.name < $1.name }
+    }
+
+    private func capabilities(for package: SkillPackage) -> [CapabilityDescriptor] {
+        let explicit = SkillCapabilityLinkStore.shared.capabilities(forSkillID: package.manifest.skillID)
+        let inferredTools = package.plan.toolRequirements.map(\.name)
+        var capabilityIDs = Set(explicit)
+        for tool in inferredTools {
+            if let capabilityID = CapabilityCatalog.shared.capabilityID(forTool: tool) {
+                capabilityIDs.insert(capabilityID)
+            }
+        }
+        return capabilityIDs.compactMap { CapabilityCatalog.shared.definition(for: $0) }.sorted { $0.name < $1.name }
+    }
+
+    private func openSkillEditor(_ result: SkillSearchResult) {
+        let selectedCapabilityIDs = Set(result.capabilities.map(\.id))
+        let draft = SkillEditorDraft(
+            kind: result.kind,
+            skillID: result.skillID,
+            name: result.name,
+            keywordsCSV: result.keywords.joined(separator: ", "),
+            selectedCapabilityIDs: selectedCapabilityIDs,
+            allCapabilities: CapabilityCatalog.shared.allCapabilities()
+        )
+        skillEditorDraft = draft
+    }
+
+    private func openCapabilityEditor(_ capability: CapabilityDescriptor) {
+        let override = CapabilityMetadataStore.shared.override(for: capability.id)
+        capabilityEditorDraft = CapabilityEditorDraft(
+            capabilityID: capability.id,
+            name: override?.name ?? capability.name,
+            toolsCSV: (override?.tools ?? capability.tools).joined(separator: ", "),
+            permissionsCSV: (override?.permissions ?? capability.permissions).joined(separator: ", "),
+            keywordsCSV: (override?.keywords.isEmpty == false ? override?.keywords : capability.keywords)?.joined(separator: ", ") ?? ""
+        )
+    }
+
+    private func saveSkillEdit(_ draft: SkillEditorDraft) {
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keywords = parseCSV(draft.keywordsCSV)
+        let linkedCapabilities = Array(draft.selectedCapabilityIDs).sorted()
+
+        switch draft.kind {
+        case .legacy:
+            guard let existing = SkillStore.shared.get(id: draft.skillID) else { return }
+            var updated = SkillSpec(
+                id: existing.id,
+                name: name.isEmpty ? existing.name : name,
+                version: existing.version,
+                triggerPhrases: keywords.isEmpty ? existing.triggerPhrases : keywords,
+                slots: existing.slots,
+                steps: existing.steps,
+                onTrigger: existing.onTrigger
+            )
+            updated.status = existing.status
+            updated.approvedAt = existing.approvedAt
+            updated.disabledAt = existing.disabledAt
+            _ = SkillStore.shared.install(updated)
+
+        case .package:
+            guard var package = SkillStore.shared.getPackage(id: draft.skillID) else { return }
+            if !name.isEmpty {
+                package.manifest.name = name
+                package.plan.name = name
+            }
+            if !keywords.isEmpty {
+                package.plan.intentPatterns = keywords
+            }
+            var requirementsByTool: [String: SkillToolRequirement] = [:]
+            for requirement in package.plan.toolRequirements {
+                let mergedPermissions = Array(Set(requirement.permissions + ToolPermissionCatalog.requiredPermissions(for: requirement.name))).sorted()
+                requirementsByTool[requirement.name] = SkillToolRequirement(name: requirement.name, permissions: mergedPermissions)
+            }
+            for capabilityID in linkedCapabilities {
+                guard let capability = CapabilityCatalog.shared.definition(for: capabilityID) else { continue }
+                for tool in capability.tools {
+                    let existing = requirementsByTool[tool]
+                    let mergedPermissions = Array(
+                        Set((existing?.permissions ?? []) + capability.permissions + ToolPermissionCatalog.requiredPermissions(for: tool))
+                    ).sorted()
+                    requirementsByTool[tool] = SkillToolRequirement(name: tool, permissions: mergedPermissions)
+                }
+            }
+            package.plan.toolRequirements = requirementsByTool.values.sorted { $0.name < $1.name }
+            if var signoff = package.signoff {
+                signoff.packageHash = SkillForgePipelineV2.packageHash(package)
+                package.signoff = signoff
+            }
+            _ = SkillStore.shared.installPackage(package)
+        }
+
+        SkillCapabilityLinkStore.shared.setCapabilities(linkedCapabilities, forSkillID: draft.skillID)
+        runSkillSearch()
+        if searchedCapabilities {
+            runCapabilitySearch()
+        }
+    }
+
+    private func deleteSkill(_ draft: SkillEditorDraft) {
+        switch draft.kind {
+        case .legacy:
+            _ = SkillStore.shared.remove(id: draft.skillID)
+        case .package:
+            _ = SkillStore.shared.removePackage(id: draft.skillID)
+        }
+        SkillCapabilityLinkStore.shared.remove(skillID: draft.skillID)
+        runSkillSearch()
+    }
+
+    private func saveCapabilityEdit(_ draft: CapabilityEditorDraft) {
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tools = parseCSV(draft.toolsCSV)
+        let permissions = parseCSV(draft.permissionsCSV)
+        let keywords = parseCSV(draft.keywordsCSV)
+        CapabilityMetadataStore.shared.saveOverride(
+            capabilityID: draft.capabilityID,
+            name: name.isEmpty ? nil : name,
+            tools: tools.isEmpty ? nil : tools,
+            permissions: permissions.isEmpty ? nil : permissions,
+            keywords: keywords
+        )
+        runCapabilitySearch()
+        if searchedSkills {
+            runSkillSearch()
+        }
+    }
+
+    private func parseCSV(_ raw: String) -> [String] {
+        raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private var memorySection: some View {
@@ -777,6 +1178,10 @@ struct SettingsView: View {
 
             LabeledContent("Total") {
                 Text("\(memories.count)")
+                    .font(.body.monospacedDigit())
+            }
+            LabeledContent("Semantic Episodes") {
+                Text("\(semanticEpisodes.count)")
                     .font(.body.monospacedDigit())
             }
             LabeledContent("Facts") {
@@ -801,9 +1206,71 @@ struct SettingsView: View {
                     .foregroundColor(MemoryStore.shared.isAvailable ? .green : .red)
             }
 
+            if semanticEpisodes.isEmpty {
+                Text("No semantic episodes yet.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Episodes")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+
+                ForEach(semanticEpisodes.prefix(10), id: \.id) { episode in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(episode.payload.title)
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text(SemanticMemoryStore.localDayString(episode.updatedAt))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Text(episode.payload.summary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                        HStack {
+                            Button("View") {
+                                selectedSemanticEpisodeID = episode.id
+                                semanticEpisodeExport = SemanticMemoryPipeline.shared.exportEpisodeJSON(id: episode.id) ?? ""
+                            }
+                            .buttonStyle(.borderless)
+
+                            Button("Export JSON") {
+                                semanticEpisodeExport = SemanticMemoryPipeline.shared.exportEpisodeJSON(id: episode.id) ?? ""
+                            }
+                            .buttonStyle(.borderless)
+
+                            Button("Delete", role: .destructive) {
+                                _ = SemanticMemoryPipeline.shared.deleteEpisode(id: episode.id)
+                                reloadSemanticEpisodes()
+                            }
+                            .buttonStyle(.borderless)
+
+                            Spacer()
+
+                            Text("conf \(String(format: "%.2f", episode.payload.confidence))")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            if !semanticEpisodeExport.isEmpty {
+                Text("Episode JSON Preview")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                TextEditor(text: $semanticEpisodeExport)
+                    .font(.caption.monospaced())
+                    .frame(minHeight: 120, maxHeight: 180)
+            }
+
             HStack {
                 Button("Refresh") {
                     reloadMemories()
+                    reloadSemanticEpisodes()
                 }
                 .buttonStyle(.borderless)
 
@@ -815,7 +1282,9 @@ struct SettingsView: View {
                 .confirmationDialog("Clear all memories?", isPresented: $showClearConfirmation) {
                     Button("Clear All", role: .destructive) {
                         MemoryStore.shared.clearMemories()
+                        SemanticMemoryPipeline.shared.clearForTesting()
                         reloadMemories()
+                        reloadSemanticEpisodes()
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
@@ -850,6 +1319,10 @@ struct SettingsView: View {
         memories = MemoryStore.shared.listMemories()
     }
 
+    private func reloadSemanticEpisodes() {
+        semanticEpisodes = SemanticMemoryPipeline.shared.listEpisodes(limit: 80)
+    }
+
     private func selectFile(title: String, types: [UTType], completion: @escaping (URL) -> Void) {
         let panel = NSOpenPanel()
         panel.title = title
@@ -861,5 +1334,184 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             completion(url)
         }
+    }
+}
+
+private enum SkillSearchKind: String, Codable {
+    case legacy
+    case package
+
+    var label: String {
+        switch self {
+        case .legacy: return "Legacy Skill"
+        case .package: return "JSON Skill"
+        }
+    }
+}
+
+private struct SkillSearchResult: Identifiable {
+    var kind: SkillSearchKind
+    var skillID: String
+    var name: String
+    var keywords: [String]
+    var capabilities: [CapabilityDescriptor]
+
+    var id: String { "\(kind.rawValue)#\(skillID)" }
+}
+
+private struct SkillEditorDraft: Identifiable {
+    var kind: SkillSearchKind
+    var skillID: String
+    var name: String
+    var keywordsCSV: String
+    var selectedCapabilityIDs: Set<String>
+    var allCapabilities: [CapabilityDescriptor]
+
+    var id: String { "\(kind.rawValue)#\(skillID)" }
+}
+
+private struct CapabilityEditorDraft: Identifiable {
+    var capabilityID: String
+    var name: String
+    var toolsCSV: String
+    var permissionsCSV: String
+    var keywordsCSV: String
+
+    var id: String { capabilityID }
+}
+
+private struct SkillEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: SkillEditorDraft
+    let onSave: (SkillEditorDraft) -> Void
+    let onDelete: (SkillEditorDraft) -> Void
+
+    init(draft: SkillEditorDraft,
+         onSave: @escaping (SkillEditorDraft) -> Void,
+         onDelete: @escaping (SkillEditorDraft) -> Void) {
+        _draft = State(initialValue: draft)
+        self.onSave = onSave
+        self.onDelete = onDelete
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit Skill")
+                .font(.title3.weight(.semibold))
+
+            Text("ID: \(draft.skillID)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextField("Skill name", text: $draft.name)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Invocation keywords (comma-separated)", text: $draft.keywordsCSV)
+                .textFieldStyle(.roundedBorder)
+
+            Text("Linked capabilities")
+                .font(.subheadline.weight(.semibold))
+
+            if draft.allCapabilities.isEmpty {
+                Text("No capabilities available.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(draft.allCapabilities, id: \.id) { capability in
+                            Toggle(isOn: Binding(
+                                get: { draft.selectedCapabilityIDs.contains(capability.id) },
+                                set: { selected in
+                                    if selected {
+                                        draft.selectedCapabilityIDs.insert(capability.id)
+                                    } else {
+                                        draft.selectedCapabilityIDs.remove(capability.id)
+                                    }
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(capability.name)
+                                    Text(capability.id)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+
+            HStack {
+                Button("Delete Skill", role: .destructive) {
+                    onDelete(draft)
+                    dismiss()
+                }
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    onSave(draft)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
+private struct CapabilityEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: CapabilityEditorDraft
+    let onSave: (CapabilityEditorDraft) -> Void
+
+    init(draft: CapabilityEditorDraft, onSave: @escaping (CapabilityEditorDraft) -> Void) {
+        _draft = State(initialValue: draft)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit Capability")
+                .font(.title3.weight(.semibold))
+
+            Text("ID: \(draft.capabilityID)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextField("Capability name", text: $draft.name)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Tools (comma-separated)", text: $draft.toolsCSV)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Permissions (comma-separated)", text: $draft.permissionsCSV)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Keywords (comma-separated)", text: $draft.keywordsCSV)
+                .textFieldStyle(.roundedBorder)
+
+            Text("Capabilities are shared and deduplicated. Skills link to these capabilities instead of cloning them.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    onSave(draft)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 540, minHeight: 320)
     }
 }

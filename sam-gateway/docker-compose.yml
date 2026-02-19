@@ -1,0 +1,10 @@
+services:
+  sam-gateway:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SAM_MODEL=${SAM_MODEL:-gpt-5.2}
+      - LOG_JSON=true
+    restart: unless-stopped

@@ -77,6 +77,7 @@ actor AudioCoordinator {
             let lease = Lease(id: UUID(), kind: kind, owner: owner)
             activeLease = lease
             assignOwner(owner, for: kind)
+            await AudioLoadGovernor.shared.requestActivation(kind)
             logAudioSession(event: "acquire", kind: kind, owner: owner, activation: "active")
             #if DEBUG
             print("[AUDIO_GATE] acquire kind=\(kind.rawValue) owner=\(owner)")
@@ -94,9 +95,10 @@ actor AudioCoordinator {
         }
     }
 
-    func release(_ lease: Lease) {
+    func release(_ lease: Lease) async {
         guard let activeLease, activeLease.id == lease.id else { return }
         clearOwner(for: lease.kind, owner: lease.owner)
+        await AudioLoadGovernor.shared.markDeactivated(lease.kind)
         logAudioSession(event: "release", kind: lease.kind, owner: lease.owner, activation: "inactive")
         #if DEBUG
         print("[AUDIO_GATE] release kind=\(lease.kind.rawValue) owner=\(lease.owner)")
@@ -139,7 +141,10 @@ actor AudioCoordinator {
         if lease.kind == .tts, pendingTTSOwner == lease.owner {
             pendingTTSOwner = nil
         }
-        waiter.continuation.resume(returning: lease)
+        Task {
+            await AudioLoadGovernor.shared.requestActivation(lease.kind)
+            waiter.continuation.resume(returning: lease)
+        }
     }
 
     private func assignOwner(_ owner: String, for kind: WorkKind) {

@@ -5057,7 +5057,7 @@ final class StabilityRegressionTests: XCTestCase {
 
         XCTAssertEqual(fakeOllama.intentCallCount, 1, "Ollama intent classification should run first")
         XCTAssertEqual(fakeOpenAI.intentCallCount, 1, "OpenAI intent classifier should run after low-confidence local result")
-        XCTAssertGreaterThanOrEqual(fakeOpenAI.chatCallCount, 1, "OpenAI routing should still run after intent classification")
+        // Recipe intent triggers recipe_tool_first path — plan routing via OpenAI only fires if recipe tool output looks failed
         XCTAssertFalse(combined.contains("camera on"))
         XCTAssertFalse(combined.contains("turn it on"))
         XCTAssertFalse(result.executedToolSteps.contains(where: {

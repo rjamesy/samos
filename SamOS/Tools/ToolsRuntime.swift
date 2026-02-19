@@ -28,6 +28,7 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
            registry.get(canonical) != nil {
             return true
         }
+        if SkillStore.shared.packageMatchingToolName(name) != nil { return true }
         if matchInstalledSkill(named: name) != nil { return true }
         return false
     }
@@ -38,6 +39,10 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
         if let canonical = registry.normalizeToolName(toolAction.name),
            let tool = registry.get(canonical) {
             return tool.execute(args: toolAction.args)
+        }
+
+        if let output = executeInstalledSkillPackage(named: toolAction.name, args: toolAction.args) {
+            return output
         }
 
         if let output = executeInstalledSkill(named: toolAction.name, args: toolAction.args) {
@@ -94,6 +99,48 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
         }
 
         return structuredTextOutput(spoken: spokenLines.last ?? "Done.", formatted: first.payload)
+    }
+
+    private func executeInstalledSkillPackage(named toolName: String, args: [String: String]) -> OutputItem? {
+        guard let package = SkillStore.shared.packageMatchingToolName(toolName) else {
+            return nil
+        }
+
+        let inputText = resolvedInputText(args: args)
+        let runtime = SkillPackageRuntime()
+        let semaphore = DispatchSemaphore(value: 0)
+        var execution: SkillExecutionResult?
+        Task {
+            let result = await runtime.execute(
+                package: package,
+                inputText: inputText,
+                toolRuntime: ToolRegistrySkillRuntime(),
+                llmRuntime: DeterministicSkillLLMRuntime()
+            )
+            execution = result
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 10)
+
+        guard let execution else {
+            return OutputItem(kind: .markdown, payload: "**Error:** Skill package execution timed out.")
+        }
+        guard execution.success else {
+            return OutputItem(kind: .markdown, payload: "**Error:** \(execution.error ?? "Skill package failed.")")
+        }
+
+        let spoken = execution.output["spoken"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let formatted = execution.output["formatted"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let spoken, !spoken.isEmpty, let formatted, !formatted.isEmpty {
+            return structuredTextOutput(spoken: spoken, formatted: formatted)
+        }
+        if let formatted, !formatted.isEmpty {
+            return OutputItem(kind: .markdown, payload: formatted)
+        }
+        if let spoken, !spoken.isEmpty {
+            return OutputItem(kind: .markdown, payload: spoken)
+        }
+        return OutputItem(kind: .markdown, payload: "Skill package executed.")
     }
 
     private func matchInstalledSkill(named toolName: String) -> SkillSpec? {
@@ -155,5 +202,23 @@ final class ToolsRuntime: ToolsRuntimeProtocol {
         let lowered = raw.lowercased()
         let pieces = lowered.components(separatedBy: CharacterSet.alphanumerics.inverted)
         return pieces.joined()
+    }
+
+    private func resolvedInputText(args: [String: String]) -> String {
+        let preferredKeys = ["text", "input", "query", "q", "content", "topic"]
+        for key in preferredKeys {
+            if let value = args[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        if args.isEmpty {
+            return ""
+        }
+        let joined = args
+            .sorted(by: { $0.key < $1.key })
+            .map { "\($0.key): \($0.value)" }
+            .joined(separator: "; ")
+        return joined
     }
 }

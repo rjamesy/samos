@@ -22,24 +22,19 @@ enum MessageOriginProvider: String, Equatable {
 }
 
 enum AssistantResponseMode: String, Equatable {
-    case openAIClassic
-    case realtimeAI
+    case samGateway
 
     var shortLabel: String {
         switch self {
-        case .openAIClassic:
-            return "OpenAI Classic"
-        case .realtimeAI:
-            return "Realtime AI"
+        case .samGateway:
+            return "Sam Agent (GPT-5.2)"
         }
     }
 
     var pipelineLabel: String {
         switch self {
-        case .openAIClassic:
-            return "Classic STT + ElevenLabs TTS"
-        case .realtimeAI:
-            return "Realtime STT + ElevenLabs TTS"
+        case .samGateway:
+            return "Sam Gateway + ElevenLabs TTS"
         }
     }
 }

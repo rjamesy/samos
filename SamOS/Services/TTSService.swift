@@ -40,6 +40,21 @@ final class TTSService {
 
     private init() {}
 
+    /// Warms DNS + TLS connection pool to ElevenLabs so first speech has lower latency.
+    func prewarm() {
+        guard ElevenLabsSettings.isConfigured else { return }
+        Task.detached(priority: .utility) {
+            guard let url = URL(string: "https://api.elevenlabs.io") else { return }
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5
+            _ = try? await URLSession.shared.data(for: request)
+            #if DEBUG
+            await MainActor.run { print("[TTS_PREWARM] ElevenLabs connection pool warmed") }
+            #endif
+        }
+    }
+
     /// Enqueues multiple lines for sequential playback.
     /// Reuses current playback when the same correlation ID is active.
     /// Cancels in-progress speech only for explicit turn replacement.

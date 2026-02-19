@@ -161,28 +161,64 @@ enum OpenAISettings {
 
     // MARK: - Model
 
-    static let generalModelOptions: [String] = [
-        "gpt-4o-mini",
+    static let defaultPreferredModel = "gpt-5.2"
+
+    /// Local fallback list used by Settings UI. Dynamic model discovery is intentionally disabled.
+    static let preferredModelFallbacks: [String] = [
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-4.1",
         "gpt-4.1-mini",
         "gpt-4o",
-        "gpt-4.1"
+        "gpt-4o-mini"
+    ]
+
+    // Backward-compatible aliases used by existing UI/tests.
+    static let generalModelOptions: [String] = [
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-4o-mini"
     ]
 
     static let escalationModelOptions: [String] = [
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-4.1",
+        "gpt-4.1-mini",
         "gpt-4o",
-        "gpt-4.1"
+        "gpt-4o-mini"
     ]
 
     /// General/default chat model used for most requests.
     static var generalModel: String {
-        get { defaults.string(forKey: Key.model) ?? "gpt-4o-mini" }
-        set { defaults.set(newValue, forKey: Key.model) }
+        get {
+            let stored = defaults.string(forKey: Key.model)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return stored.isEmpty ? defaultPreferredModel : stored
+        }
+        set {
+            let normalized = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaults.set(normalized.isEmpty ? defaultPreferredModel : normalized, forKey: Key.model)
+        }
     }
 
     /// Higher-quality model used for complex tasks.
     static var escalationModel: String {
-        get { defaults.string(forKey: Key.escalationModel) ?? "gpt-4o" }
-        set { defaults.set(newValue, forKey: Key.escalationModel) }
+        get {
+            let stored = defaults.string(forKey: Key.escalationModel)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return stored.isEmpty ? generalModel : stored
+        }
+        set {
+            let normalized = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaults.set(normalized.isEmpty ? generalModel : normalized, forKey: Key.escalationModel)
+        }
     }
 
     /// Backward-compatible alias.

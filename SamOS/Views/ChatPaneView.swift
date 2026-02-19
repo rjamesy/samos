@@ -140,6 +140,15 @@ struct ChatPaneView: View {
 
                     Spacer()
 
+                    Button(action: { appState.toggleMute() }) {
+                        Image(systemName: appState.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.callout)
+                            .foregroundColor(appState.isMuted ? .red : .secondary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help(appState.isMuted ? "Unmute Voice" : "Mute Voice")
+
                     Button(action: toggleListening) {
                         Image(systemName: appState.isListeningEnabled ? "mic.fill" : "mic")
                             .font(.callout)

@@ -139,6 +139,21 @@ final class SkillForgeQueueTests: XCTestCase {
         XCTAssertEqual(tool.name, "forge_queue_clear")
     }
 
+    func testSkillsListToolName() {
+        let tool = SkillsListTool()
+        XCTAssertEqual(tool.name, "skills.list")
+    }
+
+    func testSkillsRunSimToolName() {
+        let tool = SkillsRunSimTool()
+        XCTAssertEqual(tool.name, "skills.run_sim")
+    }
+
+    func testSkillsResetBaselineToolName() {
+        let tool = SkillsResetBaselineTool()
+        XCTAssertEqual(tool.name, "skills.reset_baseline")
+    }
+
     func testForgeQueueStatusToolEmptyQueue() {
         let tool = ForgeQueueStatusTool()
         let result = tool.execute(args: [:])
@@ -159,6 +174,9 @@ final class SkillForgeQueueTests: XCTestCase {
         XCTAssertNotNil(registry.get("start_skillforge"), "start_skillforge must be registered")
         XCTAssertNotNil(registry.get("forge_queue_status"), "forge_queue_status must be registered")
         XCTAssertNotNil(registry.get("forge_queue_clear"), "forge_queue_clear must be registered")
+        XCTAssertNotNil(registry.get("skills.list"), "skills.list must be registered")
+        XCTAssertNotNil(registry.get("skills.run_sim"), "skills.run_sim must be registered")
+        XCTAssertNotNil(registry.get("skills.reset_baseline"), "skills.reset_baseline must be registered")
         XCTAssertNotNil(registry.get("describe_camera_view"), "describe_camera_view must be registered")
         XCTAssertNotNil(registry.get("find_camera_objects"), "find_camera_objects must be registered")
         XCTAssertNotNil(registry.get("get_camera_face_presence"), "get_camera_face_presence must be registered")
@@ -542,5 +560,841 @@ final class CameraVisionToolBehaviorTests: XCTestCase {
         XCTAssertEqual(output.kind, .markdown)
         XCTAssertTrue(output.payload.contains("camera_memory_note"))
         XCTAssertFalse(store.listMemories(filterType: .note).isEmpty)
+    }
+}
+
+// MARK: - Phase 4 Tests
+
+final class SkillValidatorPhase4Tests: XCTestCase {
+    private func baseEchoPackage() -> SkillPackage {
+        let packages = SkillStore.baselinePackages()
+        guard let echo = packages.first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            XCTFail("Missing baseline echo package")
+            return packages[0]
+        }
+        return echo
+    }
+
+    func testValidatorRejectsMissingToolRequirements() {
+        var package = baseEchoPackage()
+        package.plan.toolRequirements = []
+        package.spec.steps.insert(
+            SkillPackageStep(
+                id: "call_tool",
+                type: .toolCall,
+                extract: nil,
+                format: nil,
+                toolCall: SkillToolCallStep(name: "show_text", args: ["markdown": "hi"], outputVar: nil),
+                llmCall: nil,
+                branch: nil,
+                returnStep: nil
+            ),
+            at: 0
+        )
+        let result = SkillPackageValidator().validate(
+            package: package,
+            availableToolNames: Set(ToolRegistry.shared.canonicalToolNames)
+        )
+        XCTAssertFalse(result.isValid)
+        XCTAssertTrue(result.errors.contains(where: { $0.contains("not declared in tool_requirements") }))
+    }
+
+    func testValidatorRejectsInvalidSchema() {
+        var package = baseEchoPackage()
+        package.plan.inputsSchema = SkillJSONSchema(type: .array, items: nil)
+        let result = SkillPackageValidator().validate(
+            package: package,
+            availableToolNames: Set(ToolRegistry.shared.canonicalToolNames)
+        )
+        XCTAssertFalse(result.isValid)
+        XCTAssertTrue(result.errors.contains(where: { $0.contains("array schema is missing items schema") }))
+    }
+
+    func testValidatorRejectsNondeterministicLLMCall() {
+        var package = baseEchoPackage()
+        package.spec.steps.insert(
+            SkillPackageStep(
+                id: "llm",
+                type: .llmCall,
+                extract: nil,
+                format: nil,
+                toolCall: nil,
+                llmCall: SkillLLMCallStep(
+                    promptTemplate: "hello",
+                    responseVar: "resp",
+                    temperature: 0.7,
+                    maxOutputTokens: 0,
+                    jsonOnly: false
+                ),
+                branch: nil,
+                returnStep: nil
+            ),
+            at: 0
+        )
+        let result = SkillPackageValidator().validate(
+            package: package,
+            availableToolNames: Set(ToolRegistry.shared.canonicalToolNames)
+        )
+        XCTAssertFalse(result.isValid)
+        XCTAssertTrue(result.errors.contains(where: { $0.contains("deterministic temperature 0") }))
+        XCTAssertTrue(result.errors.contains(where: { $0.contains("max_output_tokens > 0") }))
+        XCTAssertTrue(result.errors.contains(where: { $0.contains("json_only=true") }))
+    }
+}
+
+final class SkillSimPhase4Tests: XCTestCase {
+    func testSkillSimPassesForEchoFormat() async {
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return XCTFail("Missing baseline echo package")
+        }
+        let report = await SkillSimHarness().run(
+            package: package,
+            toolRuntime: SandboxSkillToolRuntime(declaredTools: Set(package.plan.toolRequirements.map(\.name))),
+            llmRuntime: DeterministicSkillLLMRuntime()
+        )
+        XCTAssertTrue(report.passed)
+    }
+
+    func testSkillSimFailsOnExpectedMismatch() async {
+        guard var package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return XCTFail("Missing baseline echo package")
+        }
+        package.tests = [
+            SkillTestCase(
+                name: "mismatch",
+                inputText: "Rewrite this as dot points: one, two",
+                expected: ["formatted": .string("this will not match")]
+            )
+        ]
+        let report = await SkillSimHarness().run(
+            package: package,
+            toolRuntime: SandboxSkillToolRuntime(declaredTools: Set(package.plan.toolRequirements.map(\.name))),
+            llmRuntime: DeterministicSkillLLMRuntime()
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.cases.first?.failureReason?.contains("output mismatch") == true)
+    }
+}
+
+private final class ScriptedSkillForgeGPTClient: SkillForgeGPTClient {
+    struct IterationScript {
+        let plan: SkillPlan
+        let spec: SkillSpecV2
+        let package: SkillPackage
+        let approval: SkillApproverResponse
+    }
+
+    let modelName: String
+    private let scripts: [IterationScript]
+    private(set) var currentIteration: Int = 0
+    private(set) var capturedFeedback: [SkillForgeFeedback] = []
+
+    init(modelName: String = "gpt-5.2-test", scripts: [IterationScript]) {
+        self.modelName = modelName
+        self.scripts = scripts
+    }
+
+    func makePlan(requirements: SkillForgeRequirements,
+                  availableTools: [SkillToolDescriptor],
+                  feedback: SkillForgeFeedback) async throws -> SkillPlan {
+        _ = requirements
+        _ = availableTools
+        capturedFeedback.append(feedback)
+        currentIteration += 1
+        let index = min(currentIteration - 1, scripts.count - 1)
+        return scripts[index].plan
+    }
+
+    func makeSpec(plan: SkillPlan,
+                  requirements: SkillForgeRequirements,
+                  feedback: SkillForgeFeedback) async throws -> SkillSpecV2 {
+        _ = plan
+        _ = requirements
+        _ = feedback
+        let index = min(max(currentIteration - 1, 0), scripts.count - 1)
+        return scripts[index].spec
+    }
+
+    func buildPackage(plan: SkillPlan,
+                      spec: SkillSpecV2,
+                      requirements: SkillForgeRequirements,
+                      feedback: SkillForgeFeedback) async throws -> SkillPackage {
+        _ = plan
+        _ = spec
+        _ = requirements
+        _ = feedback
+        let index = min(max(currentIteration - 1, 0), scripts.count - 1)
+        return scripts[index].package
+    }
+
+    func approve(package: SkillPackage,
+                 validation: SkillValidationResult,
+                 simulation: SkillSimulationReport) async throws -> SkillApproverResponse {
+        _ = package
+        _ = validation
+        _ = simulation
+        let index = min(max(currentIteration - 1, 0), scripts.count - 1)
+        return scripts[index].approval
+    }
+}
+
+final class SkillForgePipelinePhase4Tests: XCTestCase {
+    private func makeStore() -> SkillStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SkillForgeV2-\(UUID().uuidString)", isDirectory: true)
+        return SkillStore(directory: dir)
+    }
+
+    private func makeRequirements() -> SkillForgeRequirements {
+        SkillForgeRequirements(goal: "Rewrite text as bullet points", missing: "No formatter skill", constraints: [])
+    }
+
+    private func makeScriptsForSuccess() -> [ScriptedSkillForgeGPTClient.IterationScript] {
+        let baseline = SkillStore.baselinePackages()
+        guard let echo = baseline.first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return []
+        }
+
+        var invalidToolPackage = echo
+        invalidToolPackage.plan.toolRequirements = []
+        invalidToolPackage.spec.steps.insert(
+            SkillPackageStep(
+                id: "tool",
+                type: .toolCall,
+                extract: nil,
+                format: nil,
+                toolCall: SkillToolCallStep(name: "show_text", args: ["markdown": "x"], outputVar: nil),
+                llmCall: nil,
+                branch: nil,
+                returnStep: nil
+            ),
+            at: 0
+        )
+
+        var simFailPackage = echo
+        simFailPackage.tests = [
+            SkillTestCase(
+                name: "bad expectation",
+                inputText: "Rewrite this as dot points: alpha, beta",
+                expected: ["formatted": .string("not-present")]
+            )
+        ]
+
+        var finalPackage = echo
+        finalPackage.tests = echo.plan.testCases
+
+        return [
+            ScriptedSkillForgeGPTClient.IterationScript(
+                plan: invalidToolPackage.plan,
+                spec: invalidToolPackage.spec,
+                package: invalidToolPackage,
+                approval: SkillApproverResponse(
+                    approved: false,
+                    reason: "not reached",
+                    requiredChanges: ["remove undeclared tool"],
+                    riskNotes: [],
+                    packageHash: nil
+                )
+            ),
+            ScriptedSkillForgeGPTClient.IterationScript(
+                plan: simFailPackage.plan,
+                spec: simFailPackage.spec,
+                package: simFailPackage,
+                approval: SkillApproverResponse(
+                    approved: false,
+                    reason: "not reached",
+                    requiredChanges: ["fix tests"],
+                    riskNotes: [],
+                    packageHash: nil
+                )
+            ),
+            ScriptedSkillForgeGPTClient.IterationScript(
+                plan: finalPackage.plan,
+                spec: finalPackage.spec,
+                package: finalPackage,
+                approval: SkillApproverResponse(
+                    approved: true,
+                    reason: "Looks good",
+                    requiredChanges: [],
+                    riskNotes: [],
+                    packageHash: nil
+                )
+            )
+        ]
+    }
+
+    func testPipelineLoopsUntilApprovedThenInstalls() async {
+        let store = makeStore()
+        let scripts = makeScriptsForSuccess()
+        guard !scripts.isEmpty else { return XCTFail("Missing scripts") }
+
+        let fakeGPT = ScriptedSkillForgeGPTClient(scripts: scripts)
+        let pipeline = SkillForgePipelineV2(
+            gptClient: fakeGPT,
+            store: store,
+            maxIterations: 10
+        )
+
+        let outcome = await pipeline.run(requirements: makeRequirements(), onLog: { _ in })
+
+        XCTAssertTrue(outcome.approved)
+        XCTAssertGreaterThanOrEqual(outcome.iterations, 3, "Pipeline should loop through failures before approval")
+
+        guard let installed = outcome.installedPackage else {
+            return XCTFail("Expected installed package")
+        }
+        XCTAssertNotNil(installed.signoff)
+        XCTAssertEqual(installed.signoff?.model, fakeGPT.modelName)
+        XCTAssertFalse(installed.signoff?.approvedAtISO8601.isEmpty ?? true)
+        XCTAssertFalse(installed.signoff?.packageHash.isEmpty ?? true)
+
+        let persisted = store.getPackage(id: installed.manifest.skillID)
+        XCTAssertNotNil(persisted, "Package should only be persisted after approval")
+    }
+}
+
+final class SkillForgeRejectPhase4Tests: XCTestCase {
+    private func makeStore() -> SkillStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SkillForgeReject-\(UUID().uuidString)", isDirectory: true)
+        return SkillStore(directory: dir)
+    }
+
+    func testPipelineBlocksWhenGPTAlwaysRejects() async {
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return XCTFail("Missing baseline package")
+        }
+        let rejectScript = ScriptedSkillForgeGPTClient.IterationScript(
+            plan: package.plan,
+            spec: package.spec,
+            package: package,
+            approval: SkillApproverResponse(
+                approved: false,
+                reason: "Needs stricter safety wording",
+                requiredChanges: ["add constraint text"],
+                riskNotes: ["minor policy mismatch"],
+                packageHash: nil
+            )
+        )
+        let fakeGPT = ScriptedSkillForgeGPTClient(scripts: [rejectScript])
+        let store = makeStore()
+        let pipeline = SkillForgePipelineV2(
+            gptClient: fakeGPT,
+            store: store,
+            maxIterations: 3
+        )
+
+        let outcome = await pipeline.run(
+            requirements: SkillForgeRequirements(
+                goal: "format notes",
+                missing: "missing formatter",
+                constraints: []
+            ),
+            onLog: { _ in }
+        )
+
+        XCTAssertFalse(outcome.approved)
+        XCTAssertNil(outcome.installedPackage)
+        XCTAssertEqual(outcome.requiredChanges, ["add constraint text"])
+        XCTAssertTrue((outcome.lastCritique ?? "").contains("Needs stricter safety wording"))
+        XCTAssertNil(store.getPackage(id: package.manifest.skillID), "Rejected package must not be installed")
+    }
+}
+
+// MARK: - Phase 5/6 Learn + News Tests
+
+
+private final class TestLogger: AppLogger {
+    private(set) var events: [String] = []
+
+    func info(_ event: String, metadata: [String: String]) {
+        _ = metadata
+        events.append("info:\(event)")
+    }
+
+    func error(_ event: String, metadata: [String: String]) {
+        _ = metadata
+        events.append("error:\(event)")
+    }
+}
+
+private final class FakeForgeRunner: SkillForgePipelineRunning {
+    let outcome: SkillForgePipelineOutcome
+    let logs: [String]
+
+    init(outcome: SkillForgePipelineOutcome, logs: [String] = []) {
+        self.outcome = outcome
+        self.logs = logs
+    }
+
+    func run(requirements: SkillForgeRequirements,
+             onLog: @escaping (String) -> Void,
+             installOnApproval: Bool) async -> SkillForgePipelineOutcome {
+        _ = requirements
+        _ = installOnApproval
+        for line in logs {
+            onLog(line)
+        }
+        return outcome
+    }
+}
+
+private struct FakeNewsToolRuntime: SkillPackageToolRuntime {
+    let items: [SkillJSONValue]
+
+    func callTool(name: String, args: [String: String]) -> SkillToolCallResult {
+        _ = args
+        guard name == "news.fetch" else {
+            return SkillToolCallResult(success: false, output: [:], error: "MissingTool(\(name))")
+        }
+        return SkillToolCallResult(
+            success: true,
+            output: [
+                "generated_at": .string("2026-02-19T00:00:00Z"),
+                "items": .array(items)
+            ],
+            error: nil
+        )
+    }
+}
+
+private final class MapNewsHTTPClient: NewsHTTPClient {
+    let dataByURL: [String: Data]
+
+    init(dataByURL: [String: Data]) {
+        self.dataByURL = dataByURL
+    }
+
+    func fetch(url: URL) async throws -> Data {
+        if let data = dataByURL[url.absoluteString] {
+            return data
+        }
+        throw NSError(domain: "MapNewsHTTPClient", code: 404)
+    }
+}
+
+@MainActor
+final class LearnSkillNewsPhaseTests: XCTestCase {
+
+    private func waitForState(_ controller: LearnSkillController,
+                              _ expected: LearnSkillState,
+                              timeout: TimeInterval = 2.0) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if controller.activeSession?.state == expected {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return controller.activeSession?.state == expected
+    }
+
+    private func makeSandboxComponents() -> (SkillStore, ToolPackageStore, PermissionScopeStore, URL) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LearnSkillTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let skillStore = SkillStore(directory: base.appendingPathComponent("skills", isDirectory: true))
+        let suite = "learn-skill-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let permissionStore = PermissionScopeStore(defaults: defaults)
+        let toolStore = ToolPackageStore(
+            fileURL: base.appendingPathComponent("tool_packages.json"),
+            permissionStore: permissionStore
+        )
+        return (skillStore, toolStore, permissionStore, base.appendingPathComponent("learn_session.json"))
+    }
+
+    func testLearnSkillHappyPathRequiresApprovalThenInstalls() async {
+        let (skillStore, toolStore, permissionStore, persistenceURL) = makeSandboxComponents()
+        let logger = TestLogger()
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return XCTFail("Missing baseline echo package")
+        }
+        let outcome = SkillForgePipelineOutcome(
+            approved: true,
+            installedPackage: package,
+            iterations: 3,
+            blockedReason: nil,
+            lastCritique: nil,
+            requiredChanges: []
+        )
+        let runner = FakeForgeRunner(
+            outcome: outcome,
+            logs: ["[DraftPlan] iteration 1", "[ValidateLocal] iteration 2", "[Simulate] iteration 3"]
+        )
+        let controller = LearnSkillController(
+            logger: logger,
+            persistenceURL: persistenceURL,
+            pipelineFactory: { runner },
+            skillStore: skillStore,
+            toolPackageStore: toolStore,
+            permissionStore: permissionStore
+        )
+
+        _ = controller.start(goalText: "Create a bullet formatter skill")
+        let reachedPermissionReview = await waitForState(controller, .userPermissionReview)
+        XCTAssertTrue(reachedPermissionReview)
+        XCTAssertEqual(controller.activeSession?.iterationCount, 3)
+
+        let deniedInstall = await controller.installApprovedSkill()
+        XCTAssertTrue(deniedInstall.localizedCaseInsensitiveContains("not approved"))
+
+        let approve = controller.approvePermissions(true)
+        XCTAssertTrue(approve.localizedCaseInsensitiveContains("ready"))
+
+        let install = await controller.installApprovedSkill()
+        XCTAssertTrue(install.localizedCaseInsensitiveContains("installed"))
+        XCTAssertEqual(controller.activeSession?.state, .done)
+        XCTAssertNotNil(skillStore.getPackage(id: package.manifest.skillID))
+        XCTAssertTrue(logger.events.contains("info:learn_skill_installed"))
+    }
+
+    func testLearnSkillUserRejectsPermissionsBlocksInstall() async {
+        let (skillStore, toolStore, permissionStore, persistenceURL) = makeSandboxComponents()
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "news.latest" }) else {
+            return XCTFail("Missing baseline news package")
+        }
+        let outcome = SkillForgePipelineOutcome(
+            approved: true,
+            installedPackage: package,
+            iterations: 2,
+            blockedReason: nil,
+            lastCritique: nil,
+            requiredChanges: []
+        )
+        let controller = LearnSkillController(
+            logger: TestLogger(),
+            persistenceURL: persistenceURL,
+            pipelineFactory: { FakeForgeRunner(outcome: outcome) },
+            skillStore: skillStore,
+            toolPackageStore: toolStore,
+            permissionStore: permissionStore
+        )
+
+        _ = controller.start(goalText: "Learn latest news")
+        let reachedPermissionReview = await waitForState(controller, .userPermissionReview)
+        XCTAssertTrue(reachedPermissionReview)
+        XCTAssertTrue(controller.activeSession?.requestedPermissions.contains(PermissionScope.webRead.rawValue) == true)
+
+        let reject = controller.approvePermissions(false)
+        XCTAssertTrue(reject.localizedCaseInsensitiveContains("canceled"))
+        XCTAssertEqual(controller.activeSession?.state, .blocked)
+        XCTAssertFalse(toolStore.isInstalled("news.basic"))
+        XCTAssertNil(skillStore.getPackage(id: "news.latest"))
+    }
+
+    func testLearnSkillBlockedWhenGPTRejects() async {
+        let (skillStore, toolStore, permissionStore, persistenceURL) = makeSandboxComponents()
+        let outcome = SkillForgePipelineOutcome(
+            approved: false,
+            installedPackage: nil,
+            iterations: 4,
+            blockedReason: "Reached max iterations",
+            lastCritique: "Needs required changes",
+            requiredChanges: ["add deterministic limits"]
+        )
+        let controller = LearnSkillController(
+            logger: TestLogger(),
+            persistenceURL: persistenceURL,
+            pipelineFactory: { FakeForgeRunner(outcome: outcome) },
+            skillStore: skillStore,
+            toolPackageStore: toolStore,
+            permissionStore: permissionStore
+        )
+
+        _ = controller.start(goalText: "Build impossible skill")
+        let reachedBlocked = await waitForState(controller, .blocked)
+        XCTAssertTrue(reachedBlocked)
+        XCTAssertTrue(controller.activeSession?.blockedReason?.contains("Reached max iterations") == true)
+        XCTAssertTrue(skillStore.loadInstalledPackages().isEmpty)
+        XCTAssertFalse(toolStore.isInstalled("news.basic"))
+    }
+
+    func testLearnSkillSessionResumesFromPersistedPermissionReviewState() async {
+        let (skillStore, toolStore, permissionStore, persistenceURL) = makeSandboxComponents()
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "skill.echo_format" }) else {
+            return XCTFail("Missing baseline echo package")
+        }
+        let outcome = SkillForgePipelineOutcome(
+            approved: true,
+            installedPackage: package,
+            iterations: 1,
+            blockedReason: nil,
+            lastCritique: nil,
+            requiredChanges: []
+        )
+        let controllerA = LearnSkillController(
+            logger: TestLogger(),
+            persistenceURL: persistenceURL,
+            pipelineFactory: { FakeForgeRunner(outcome: outcome) },
+            skillStore: skillStore,
+            toolPackageStore: toolStore,
+            permissionStore: permissionStore
+        )
+
+        _ = controllerA.start(goalText: "Build formatter")
+        let reachedPermissionReview = await waitForState(controllerA, .userPermissionReview)
+        XCTAssertTrue(reachedPermissionReview)
+
+        let controllerB = LearnSkillController(
+            logger: TestLogger(),
+            persistenceURL: persistenceURL,
+            pipelineFactory: { FakeForgeRunner(outcome: outcome) },
+            skillStore: skillStore,
+            toolPackageStore: toolStore,
+            permissionStore: permissionStore
+        )
+        XCTAssertEqual(controllerB.activeSession?.state, .userPermissionReview)
+    }
+
+    func testBaselineSkillsStillSimulate() async {
+        let baseline = SkillStore.baselinePackages()
+        for id in ["skill.echo_format", "skill.meeting_minutes_stub"] {
+            guard let package = baseline.first(where: { $0.manifest.skillID == id }) else {
+                return XCTFail("Missing baseline package \(id)")
+            }
+            let report = await SkillSimHarness().run(
+                package: package,
+                toolRuntime: SandboxSkillToolRuntime(declaredTools: Set(package.plan.toolRequirements.map(\.name))),
+                llmRuntime: DeterministicSkillLLMRuntime()
+            )
+            XCTAssertTrue(report.passed, "Expected \(id) simulation to pass")
+        }
+    }
+
+    func testNewsDateParserSupportsRssAndISO() {
+        XCTAssertNotNil(NewsDateParser.parse("Thu, 19 Feb 2026 09:45:00 +0000"))
+        XCTAssertNotNil(NewsDateParser.parse("2026-02-19T09:45:00Z"))
+    }
+
+    func testNewsAggregationAppliesRecencyAndDedupe() async {
+        let now = Date(timeIntervalSince1970: 1_771_500_000)
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+        fmt.dateFormat = "E, d MMM yyyy HH:mm:ss Z"
+
+        let fresh = fmt.string(from: now.addingTimeInterval(-1_800))
+        let fresh2 = fmt.string(from: now.addingTimeInterval(-600))
+        let old = fmt.string(from: now.addingTimeInterval(-90 * 3600))
+        let xml = """
+        <rss><channel>
+          <item><title>AI market surges today</title><link>https://a.test/1</link><pubDate>\(fresh)</pubDate><description>desc</description></item>
+          <item><title>AI market surges today!</title><link>https://a.test/2</link><pubDate>\(fresh2)</pubDate><description>desc</description></item>
+          <item><title>Old economy headline</title><link>https://a.test/3</link><pubDate>\(old)</pubDate><description>old</description></item>
+          <item><title>Chip updates continue</title><link>https://a.test/4</link><description>no date</description></item>
+        </channel></rss>
+        """
+        let source = NewsSource(id: "s", name: "Source", url: "https://feeds.test/rss", country: nil)
+        let service = NewsAggregationService(
+            client: MapNewsHTTPClient(dataByURL: [source.url: Data(xml.utf8)]),
+            sources: [source],
+            nowProvider: { now }
+        )
+
+        let items = await service.latest(query: "ai", country: nil, topics: [], timeWindowHours: 24, maxItems: 10)
+        XCTAssertEqual(items.count, 1, "Expected dedupe + recency to reduce to one fresh AI headline")
+        XCTAssertTrue(items[0].title.lowercased().contains("ai market surges"))
+    }
+
+    func testToolPackageInstallGateRequiresPermissionApproval() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ToolInstallGate-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let suite = "tool-gate-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let permissions = PermissionScopeStore(defaults: defaults)
+        let store = ToolPackageStore(
+            fileURL: base.appendingPathComponent("tool_packages.json"),
+            permissionStore: permissions
+        )
+
+        let blocked = store.install(
+            packageID: "news.basic",
+            tools: ["news.fetch"],
+            permissions: [PermissionScope.webRead.rawValue]
+        )
+        XCTAssertFalse(blocked.installed)
+
+        permissions.approve(scopes: [PermissionScope.webRead.rawValue])
+        let allowed = store.install(
+            packageID: "news.basic",
+            tools: ["news.fetch"],
+            permissions: [PermissionScope.webRead.rawValue]
+        )
+        XCTAssertTrue(allowed.installed)
+        XCTAssertTrue(store.isInstalled("news.basic"))
+    }
+
+    func testToolPackageInstallReusesExistingCapabilityWithSamePayload() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ToolInstallReuse-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let suite = "tool-reuse-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let permissions = PermissionScopeStore(defaults: defaults)
+        permissions.approve(scopes: [PermissionScope.webRead.rawValue])
+        let store = ToolPackageStore(
+            fileURL: base.appendingPathComponent("tool_packages.json"),
+            permissionStore: permissions
+        )
+
+        let first = store.install(
+            packageID: "news.basic",
+            tools: ["news.fetch"],
+            permissions: [PermissionScope.webRead.rawValue]
+        )
+        XCTAssertTrue(first.installed)
+        XCTAssertEqual(store.listInstalled().count, 1)
+
+        let duplicate = store.install(
+            packageID: "news.clone",
+            tools: ["news.fetch"],
+            permissions: [PermissionScope.webRead.rawValue]
+        )
+        XCTAssertTrue(duplicate.installed)
+        XCTAssertTrue(duplicate.reason.contains("reused_existing:news.basic"))
+        XCTAssertFalse(store.isInstalled("news.clone"))
+        XCTAssertEqual(store.listInstalled().count, 1, "Duplicate capability payload should reuse existing package")
+    }
+
+    func testNewsSkillExecutionFormatsSourceAndDateAndFiltersOldDuplicates() async {
+        guard let package = SkillStore.baselinePackages().first(where: { $0.manifest.skillID == "news.latest" }) else {
+            return XCTFail("Missing baseline news skill package")
+        }
+
+        let now = Date()
+        let iso = ISO8601DateFormatter()
+        let fresh = iso.string(from: now.addingTimeInterval(-1_800))
+        let old = iso.string(from: now.addingTimeInterval(-100 * 3600))
+        let runtime = SkillPackageRuntime()
+        let exec = await runtime.execute(
+            package: package,
+            inputText: "latest ai news",
+            toolRuntime: FakeNewsToolRuntime(items: [
+                .object([
+                    "title": .string("AI chip race accelerates"),
+                    "source": .string("Reuters"),
+                    "published_at": .string(fresh),
+                    "url": .string("https://r.test/1")
+                ]),
+                .object([
+                    "title": .string("AI chip race accelerates!"),
+                    "source": .string("Reuters"),
+                    "published_at": .string(fresh),
+                    "url": .string("https://r.test/2")
+                ]),
+                .object([
+                    "title": .string("Old macro headline"),
+                    "source": .string("BBC"),
+                    "published_at": .string(old),
+                    "url": .string("https://b.test/3")
+                ])
+            ]),
+            llmRuntime: DeterministicSkillLLMRuntime()
+        )
+
+        XCTAssertTrue(exec.success)
+        let formatted = exec.output["formatted"]?.stringValue ?? ""
+        XCTAssertTrue(formatted.contains("Reuters"))
+        XCTAssertTrue(formatted.contains("["))
+        XCTAssertFalse(formatted.lowercased().contains("old macro headline"))
+        XCTAssertEqual(formatted.components(separatedBy: "AI chip race accelerates").count - 1, 1)
+    }
+
+    func testTurnRouterRoutesNewsToNativeSkillOrCapabilityGap() async {
+        let classify: TurnRouter.IntentClassificationHandler = { _, _, _ in
+            IntentClassificationResult(
+                classification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                ),
+                provider: .rule,
+                attemptedLocal: false,
+                attemptedOpenAI: false,
+                localSkipReason: nil,
+                intentRouterMsLocal: nil,
+                intentRouterMsOpenAI: nil,
+                localConfidence: nil,
+                openAIConfidence: nil,
+                confidenceThreshold: 0.7,
+                localTimeoutSeconds: nil,
+                escalationReason: nil
+            )
+        }
+        let routePlan: TurnRouter.PlanRouteHandler = { _ in
+            RouteDecision(
+                plan: Plan(steps: [.talk(say: "fallback")]),
+                provider: .none,
+                routerMs: 1,
+                aiModelUsed: nil,
+                routeReason: "test",
+                planLocalWireMs: nil,
+                planLocalTotalMs: nil,
+                planOpenAIMs: nil
+            )
+        }
+
+        let native = TurnRouter(
+            classifyIntent: classify,
+            routePlan: routePlan,
+            nativeToolExists: { category in category == .news },
+            normalizeToolName: { _ in nil },
+            isAllowedTool: { _ in false }
+        )
+        let nativeDecision = await native.routePlan(
+            TurnPlanRouteRequest(
+                text: "latest news",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+        guard case .tool(let name, _, _) = nativeDecision.plan.steps.first else {
+            return XCTFail("Expected tool step for native news route")
+        }
+        XCTAssertEqual(name, "news.latest")
+
+        let missing = TurnRouter(
+            classifyIntent: classify,
+            routePlan: routePlan,
+            nativeToolExists: { _ in false },
+            normalizeToolName: { _ in nil },
+            isAllowedTool: { _ in false }
+        )
+        let missingDecision = await missing.routePlan(
+            TurnPlanRouteRequest(
+                text: "latest news",
+                history: [],
+                pendingSlot: nil,
+                reason: .userChat,
+                promptContext: nil,
+                intentClassification: IntentClassification(
+                    intent: .webRequest,
+                    confidence: 0.9,
+                    notes: "",
+                    autoCaptureHint: false,
+                    needsWeb: true
+                )
+            )
+        )
+        guard case .delegate(let task, _, _) = missingDecision.plan.steps.first else {
+            return XCTFail("Expected delegate capability gap for missing news capability")
+        }
+        XCTAssertTrue(task.lowercased().contains("capability_gap"))
     }
 }

@@ -238,6 +238,433 @@ final class SelfLearningLoopTests: XCTestCase {
     }
 }
 
+@MainActor
+final class MemoryEvalTests: XCTestCase {
+    private final class NoopLogger: AppLogger {
+        func info(_ event: String, metadata: [String: String]) {}
+        func error(_ event: String, metadata: [String: String]) {}
+    }
+
+    private final class FakeSemanticMemoryLLM: SemanticMemoryLLMClient {
+        var episodeResponses: [String]
+        var profileResponses: [String]
+        var fixResponses: [String]
+
+        init(episodeResponses: [String], profileResponses: [String], fixResponses: [String] = []) {
+            self.episodeResponses = episodeResponses
+            self.profileResponses = profileResponses
+            self.fixResponses = fixResponses
+        }
+
+        func completeJSON(systemPrompt: String, userPrompt: String) async throws -> String {
+            let lower = systemPrompt.lowercased()
+            if lower.contains("fix json") {
+                if !fixResponses.isEmpty { return fixResponses.removeFirst() }
+                if !episodeResponses.isEmpty { return episodeResponses.removeFirst() }
+                if !profileResponses.isEmpty { return profileResponses.removeFirst() }
+                return "{}"
+            }
+            if lower.contains("episode schema") {
+                if !episodeResponses.isEmpty { return episodeResponses.removeFirst() }
+                return "{}"
+            }
+            if lower.contains("profile facts") || lower.contains("should_store") {
+                if !profileResponses.isEmpty { return profileResponses.removeFirst() }
+                return "[]"
+            }
+            return "{}"
+        }
+    }
+
+    private struct EvalRig {
+        let store: SemanticMemoryStore
+        let pipeline: SemanticMemoryPipeline
+        let llm: FakeSemanticMemoryLLM
+    }
+
+    private func makeRig(episodeResponses: [String],
+                         profileResponses: [String],
+                         fixResponses: [String] = []) -> EvalRig {
+        let logger = NoopLogger()
+        let llm = FakeSemanticMemoryLLM(
+            episodeResponses: episodeResponses,
+            profileResponses: profileResponses,
+            fixResponses: fixResponses
+        )
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("semantic-memory-eval-\(UUID().uuidString).sqlite3")
+        let store = SemanticMemoryStore(dbPath: dbURL.path, logger: logger)
+        let pipeline = SemanticMemoryPipeline(store: store, llm: llm, logger: logger)
+        pipeline.setActiveSessionID("eval_session")
+        return EvalRig(store: store, pipeline: pipeline, llm: llm)
+    }
+
+    private func episodeJSON(title: String,
+                             summary: String,
+                             when: String? = nil,
+                             where whereValue: String? = nil,
+                             who: [String] = [],
+                             details: [String: String] = [:],
+                             decisions: [SemanticEpisodeDecision] = [],
+                             actions: [SemanticEpisodeAction] = [],
+                             tags: [String] = [],
+                             importance: Double = 0.8,
+                             confidence: Double = 0.9) -> String {
+        let payload = SemanticEpisodePayload(
+            title: title,
+            summary: summary,
+            entities: .empty,
+            facts: SemanticEpisodeFacts(when: when, whereValue: whereValue, who: who, details: details),
+            decisions: decisions,
+            actions: actions,
+            tags: tags,
+            importance: importance,
+            confidence: confidence
+        )
+        return SemanticMemoryStore.encodeJSONString(payload) ?? "{}"
+    }
+
+    private func profileJSON(_ facts: [SemanticProfileFactPayload]) -> String {
+        SemanticMemoryStore.encodeJSONString(facts) ?? "[]"
+    }
+
+    func testScenario1VetAppointmentBookingStoredAndLinked() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(
+                    title: "Vet appointment booking",
+                    summary: "Booked Bailey at Green Vet for Friday 10:30am.",
+                    when: "Friday 10:30am",
+                    where: "Green Vet Clinic",
+                    who: ["Bailey"],
+                    details: ["outcome": "booking_confirmed"],
+                    tags: ["vet", "appointment"]
+                )
+            ],
+            profileResponses: ["[]"]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t1",
+            userMessage: "Please book Bailey's vet appointment for Friday morning, thanks",
+            assistantMessage: "Done - Friday at 10:30am at Green Vet.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let episodes = rig.pipeline.listEpisodes()
+        XCTAssertEqual(episodes.count, 1)
+        XCTAssertEqual(episodes[0].payload.facts.whereValue, "Green Vet Clinic")
+        XCTAssertEqual(episodes[0].payload.facts.when, "Friday 10:30am")
+        XCTAssertTrue(rig.store.hasMemoryLinks(memoryType: .episode, memoryID: episodes[0].id))
+    }
+
+    func testScenario2PreferenceRecallPizzaWhenHungry() async {
+        let rig = makeRig(
+            episodeResponses: [episodeJSON(title: "Food preference mention", summary: "User said they like pizza.", tags: ["food"])],
+            profileResponses: [
+                profileJSON([
+                    SemanticProfileFactPayload(
+                        kind: .preference,
+                        key: "likes_food",
+                        value: ["text": "pizza"],
+                        confidence: 0.94,
+                        shouldStore: true
+                    )
+                ])
+            ]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t2",
+            userMessage: "I like pizza, that's all",
+            assistantMessage: "Noted.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let injected = rig.pipeline.injectionContext(for: "I'm hungry")
+        XCTAssertTrue(injected.block.lowercased().contains("pizza"))
+        XCTAssertFalse(injected.shouldClarify)
+    }
+
+    func testScenario3PreferredNameRichardRecall() async {
+        let rig = makeRig(
+            episodeResponses: [episodeJSON(title: "Identity preference", summary: "User prefers to be called Richard.")],
+            profileResponses: [
+                profileJSON([
+                    SemanticProfileFactPayload(
+                        kind: .identity,
+                        key: "preferred_name",
+                        value: ["text": "Richard"],
+                        confidence: 0.98,
+                        shouldStore: true
+                    )
+                ])
+            ]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t3",
+            userMessage: "Please call me Richard from now on, thanks",
+            assistantMessage: "Will do.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let injected = rig.pipeline.injectionContext(for: "what's my name?")
+        XCTAssertTrue(injected.block.contains("Richard"))
+    }
+
+    func testScenario4TodoDueDateExtracted() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(
+                    title: "Tax todo",
+                    summary: "User asked Sam to remind tax filing by Tuesday.",
+                    actions: [
+                        SemanticEpisodeAction(task: "Finish tax filing", owner: "user", due: "Tuesday")
+                    ],
+                    tags: ["todo", "tax"]
+                )
+            ],
+            profileResponses: ["[]"]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t4",
+            userMessage: "Remind me to finish tax filing by Tuesday, done",
+            assistantMessage: "Reminder captured.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let episodes = rig.pipeline.listEpisodes()
+        XCTAssertEqual(episodes.count, 1)
+        XCTAssertEqual(episodes[0].payload.actions.first?.due, "Tuesday")
+    }
+
+    func testScenario5ConflictingFactCorrectionPrefersUpdatedValue() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(title: "Meeting day v1", summary: "Meeting is Monday."),
+                episodeJSON(title: "Meeting day correction", summary: "Meeting corrected to Tuesday.")
+            ],
+            profileResponses: [
+                profileJSON([
+                    SemanticProfileFactPayload(
+                        kind: .routine,
+                        key: "meeting_day",
+                        value: ["text": "Monday"],
+                        confidence: 0.81,
+                        shouldStore: true
+                    )
+                ]),
+                profileJSON([
+                    SemanticProfileFactPayload(
+                        kind: .routine,
+                        key: "meeting_day",
+                        value: ["text": "Tuesday"],
+                        confidence: 0.96,
+                        shouldStore: true
+                    )
+                ])
+            ]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t5a",
+            userMessage: "The team meeting is Monday, thanks",
+            assistantMessage: "Logged.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t5b",
+            userMessage: "Actually it's Tuesday not Monday, done",
+            assistantMessage: "Updated.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let facts = rig.store.listProfileFacts()
+        let day = facts.first(where: { $0.key == "meeting_day" })?.value["text"]
+        XCTAssertEqual(day, "Tuesday")
+    }
+
+    func testScenario6DailySummaryCreatedOnDateChange() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(title: "Day one planning", summary: "Planned sprint tasks."),
+                episodeJSON(title: "Day two note", summary: "Checked progress.")
+            ],
+            profileResponses: ["[]", "[]"]
+        )
+
+        let day1 = Date(timeIntervalSince1970: 1_735_689_600) // 2025-01-01
+        let day2 = day1.addingTimeInterval(86_400)
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t6a",
+            userMessage: "Let's plan sprint goals, thanks",
+            assistantMessage: "Planned.",
+            inputSource: "typed",
+            sttConfidence: nil,
+            now: day1
+        )
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t6b",
+            userMessage: "Daily check-in done",
+            assistantMessage: "Checked.",
+            inputSource: "typed",
+            sttConfidence: nil,
+            now: day2
+        )
+
+        let day1Key = SemanticMemoryStore.localDayString(day1)
+        let summary = rig.store.dailySummary(date: day1Key)
+        XCTAssertNotNil(summary)
+        XCTAssertTrue(summary?.summary.contains("Day one planning") == true)
+        if let summary {
+            XCTAssertTrue(rig.store.hasMemoryLinks(memoryType: .daily, memoryID: summary.date))
+        }
+    }
+
+    func testScenario7MultiTopicStoredSeparately() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(title: "Project roadmap", summary: "Discussed project milestones.", tags: ["project"]),
+                episodeJSON(title: "Family weekend", summary: "Planned family outing.", tags: ["family"])
+            ],
+            profileResponses: ["[]", "[]"]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t7a",
+            userMessage: "Let's map project milestones, done",
+            assistantMessage: "Mapped.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t7b",
+            userMessage: "Let's plan family weekend, thanks",
+            assistantMessage: "Planned.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let episodes = rig.pipeline.listEpisodes()
+        XCTAssertEqual(episodes.count, 2)
+        XCTAssertTrue(episodes.contains(where: { $0.payload.title == "Project roadmap" }))
+        XCTAssertTrue(episodes.contains(where: { $0.payload.title == "Family weekend" }))
+    }
+
+    func testScenario8SensitiveMedicalNotStoredWhenNotStable() async {
+        let rig = makeRig(
+            episodeResponses: [episodeJSON(title: "Medical concern mention", summary: "User mentioned symptoms but asked not to store.")],
+            profileResponses: [
+                profileJSON([
+                    SemanticProfileFactPayload(
+                        kind: .constraint,
+                        key: "medical_condition",
+                        value: ["text": "stomach pain"],
+                        confidence: 0.92,
+                        shouldStore: false
+                    )
+                ])
+            ]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t8",
+            userMessage: "My stomach hurts but don't store this, done",
+            assistantMessage: "Understood.",
+            inputSource: "typed",
+            sttConfidence: nil
+        )
+
+        let facts = rig.store.listProfileFacts()
+        XCTAssertTrue(facts.isEmpty)
+    }
+
+    func testScenario9LowSTTConfidenceReducesStoredConfidenceAndTriggersClarify() async {
+        let rig = makeRig(
+            episodeResponses: [
+                episodeJSON(
+                    title: "Voice note with low confidence",
+                    summary: "Potentially uncertain capture from STT.",
+                    confidence: 0.9
+                )
+            ],
+            profileResponses: ["[]"]
+        )
+
+        await rig.pipeline.processTurn(
+            sessionID: "eval_session",
+            turnID: "t9",
+            userMessage: "i think i said something important thanks",
+            assistantMessage: "Captured.",
+            inputSource: "stt",
+            sttConfidence: 0.30
+        )
+
+        guard let episode = rig.pipeline.listEpisodes().first else {
+            return XCTFail("Expected stored episode")
+        }
+        XCTAssertLessThan(episode.payload.confidence, 0.70)
+
+        let injection = rig.pipeline.injectionContext(for: "what's my important note?")
+        XCTAssertTrue(injection.shouldClarify)
+    }
+
+    func testScenario10InjectorRespectsSizeCap() async {
+        let rig = makeRig(episodeResponses: [], profileResponses: [])
+
+        var messageID: Int64 = 0
+        for idx in 0..<24 {
+            messageID = rig.store.appendMessage(
+                role: .user,
+                text: "Project \(idx) verbose memory input",
+                sessionID: "eval_session",
+                turnID: "t10-\(idx)",
+                metaJSON: nil
+            ) ?? 0
+            let payload = SemanticEpisodePayload(
+                title: "Project Memory \(idx)",
+                summary: String(repeating: "Detailed summary for project memory \(idx). ", count: 20),
+                entities: .empty,
+                facts: .empty,
+                decisions: [],
+                actions: [],
+                tags: ["project", "memory"],
+                importance: 0.8,
+                confidence: 0.9
+            )
+            _ = rig.store.upsertEpisode(
+                id: nil,
+                sessionID: "eval_session",
+                payload: payload,
+                sourceMessageIDs: [messageID]
+            )
+        }
+
+        let injected = rig.pipeline.injectionContext(for: "project memory")
+        XCTAssertLessThanOrEqual(injected.block.count, 2800)
+    }
+}
+
 final class WebsiteLearningStoreTests: XCTestCase {
 
     private func makeLearningStore() -> WebsiteLearningStore {

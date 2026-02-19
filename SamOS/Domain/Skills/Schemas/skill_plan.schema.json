@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SkillPlan",
+  "type": "object",
+  "required": [
+    "skill_id",
+    "name",
+    "version",
+    "intent_patterns",
+    "inputs_schema",
+    "outputs_schema",
+    "tool_requirements",
+    "conversation_policy",
+    "test_cases"
+  ],
+  "properties": {
+    "skill_id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "intent_patterns": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "inputs_schema": { "type": "object" },
+    "outputs_schema": { "type": "object" },
+    "tool_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "permissions"],
+        "properties": {
+          "name": { "type": "string" },
+          "permissions": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "conversation_policy": {
+      "type": "object",
+      "required": ["tone", "safety_constraints"],
+      "properties": {
+        "tone": { "type": "string" },
+        "safety_constraints": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "test_cases": { "type": "array", "items": { "type": "object" }, "minItems": 1 }
+  },
+  "additionalProperties": false
+}

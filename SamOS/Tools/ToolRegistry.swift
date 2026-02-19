@@ -8,6 +8,10 @@ protocol Tool {
     func execute(args: [String: String]) -> OutputItem
 }
 
+protocol PermissionScopedTool {
+    var requiredPermissions: [String] { get }
+}
+
 // MARK: - Tool Registry
 
 final class ToolRegistry: ToolNameNormalizing {
@@ -44,6 +48,11 @@ final class ToolRegistry: ToolNameNormalizing {
         "learnwebsite": "learn_website",
         "learn_website": "learn_website",
 
+        "getnews": "news.fetch",
+        "get_news": "news.fetch",
+        "newsfetch": "news.fetch",
+        "news_fetch": "news.fetch",
+
         // Kept for clean rejection when no canonical browser tool exists.
         "web": "browse_web",
         "browseweb": "browse_web",
@@ -60,36 +69,19 @@ final class ToolRegistry: ToolNameNormalizing {
     private var tools: [String: Tool] = [:]
 
     private init() {
-        register(ShowTextTool())
-        register(FindRecipeTool())
-        register(FindImageTool())
-        register(FindVideoTool())
-        register(FindFilesTool())
-        register(ShowImageTool())
-        register(DescribeCameraViewTool())
-        register(CameraObjectFinderTool())
-        register(CameraFacePresenceTool())
-        register(EnrollCameraFaceTool())
-        register(RecognizeCameraFacesTool())
-        register(CameraVisualQATool())
-        register(CameraInventorySnapshotTool())
-        register(SaveCameraMemoryNoteTool())
-        register(CapabilityGapToClaudePromptTool())
-        register(SaveMemoryTool())
-        register(ListMemoriesTool())
-        register(DeleteMemoryTool())
-        register(ClearMemoriesTool())
-        register(ScheduleTaskTool())
-        register(CancelTaskTool())
-        register(ListTasksTool())
-        register(LearnWebsiteTool())
-        register(AutonomousLearnTool())
-        register(StopAutonomousLearnTool())
-        register(GetWeatherTool())
-        register(GetTimeTool())
-        register(StartSkillForgeTool())
-        register(ForgeQueueStatusTool())
-        register(ForgeQueueClearTool())
+        let contributors: [ToolRegistryContributor] = [
+            CoreToolsRegistryContributor(),
+            CameraToolsRegistryContributor(),
+            CapabilityToolsRegistryContributor(),
+            MemoryToolsRegistryContributor(),
+            SchedulingToolsRegistryContributor(),
+            LearningToolsRegistryContributor(),
+            WebToolsRegistryContributor(),
+            SkillsToolsRegistryContributor(),
+        ]
+        contributors.forEach { contributor in
+            contributor.register(into: self)
+        }
     }
 
     func register(_ tool: Tool) {
@@ -117,6 +109,11 @@ final class ToolRegistry: ToolNameNormalizing {
         for key in Self.lookupKeys(for: raw) {
             if knownTools.contains(key) {
                 return key
+            }
+            if let normalizedMatch = knownTools.first(where: {
+                Self.normalizedSnakeCase($0) == key || Self.compactIdentifier($0) == key
+            }) {
+                return normalizedMatch
             }
             guard let alias = Self.toolNameAliases[key] else { continue }
             let canonical = Self.normalizedSnakeCase(alias)
@@ -3880,5 +3877,455 @@ private extension Array {
     subscript(safe index: Int) -> Element? {
         guard indices.contains(index) else { return nil }
         return self[index]
+    }
+}
+
+// MARK: - News Capability (Phase 6)
+
+protocol NewsHTTPClient {
+    func fetch(url: URL) async throws -> Data
+}
+
+struct URLSessionNewsHTTPClient: NewsHTTPClient {
+    func fetch(url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("SamOS/1.0 (news.fetch)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw NSError(domain: "NewsFetch", code: 1, userInfo: [NSLocalizedDescriptionKey: "HTTP failure"])
+        }
+        return data
+    }
+}
+
+struct NewsSource: Codable, Equatable {
+    let id: String
+    let name: String
+    let url: String
+    let country: String?
+}
+
+struct NewsHeadline: Equatable {
+    let title: String
+    let source: String
+    let publishedAt: Date?
+    let url: String
+    let summary: String?
+}
+
+private struct NewsFetchEnvelope: Codable {
+    let generatedAt: String
+    let items: [NewsFetchItem]
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case items
+    }
+}
+
+private struct NewsFetchItem: Codable {
+    let title: String
+    let source: String
+    let publishedAt: String?
+    let url: String
+    let summary: String?
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case source
+        case publishedAt = "published_at"
+        case url
+        case summary
+    }
+}
+
+final class NewsSourceCatalog {
+    static let shared = NewsSourceCatalog()
+
+    private(set) var sources: [NewsSource]
+
+    init(bundle: Bundle = .main) {
+        if let decoded = Self.loadSources(bundle: bundle) {
+            self.sources = decoded
+        } else {
+            self.sources = Self.defaultSources
+        }
+    }
+
+    private static func loadSources(bundle: Bundle) -> [NewsSource]? {
+        var candidates: [URL] = []
+        if let bundleURL = bundle.url(forResource: "news_sources", withExtension: "json") {
+            candidates.append(bundleURL)
+        }
+
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        candidates.append(cwd.appendingPathComponent("news_sources.json"))
+        candidates.append(cwd.appendingPathComponent("SamOS/news_sources.json"))
+
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode([NewsSource].self, from: data),
+                  !decoded.isEmpty else {
+                continue
+            }
+            return decoded
+        }
+        return nil
+    }
+
+    private static let defaultSources: [NewsSource] = [
+        NewsSource(id: "reuters_world", name: "Reuters", url: "https://www.reutersagency.com/feed/?best-topics=world&post_type=best", country: nil),
+        NewsSource(id: "bbc_world", name: "BBC", url: "http://feeds.bbci.co.uk/news/world/rss.xml", country: nil),
+        NewsSource(id: "nyt_world", name: "NYTimes", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", country: nil),
+        NewsSource(id: "guardian_world", name: "The Guardian", url: "https://www.theguardian.com/world/rss", country: nil),
+        NewsSource(id: "abc_au", name: "ABC News AU", url: "https://www.abc.net.au/news/feed/51120/rss.xml", country: "AU"),
+        NewsSource(id: "sbs_au", name: "SBS News", url: "https://www.sbs.com.au/news/topic/latest/rss.xml", country: "AU"),
+        NewsSource(id: "smh_au", name: "SMH", url: "https://www.smh.com.au/rss/feed.xml", country: "AU"),
+        NewsSource(id: "wsj_world", name: "WSJ", url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml", country: nil),
+        NewsSource(id: "cnbc_top", name: "CNBC", url: "https://www.cnbc.com/id/100003114/device/rss/rss.html", country: nil)
+    ]
+}
+
+enum NewsDateParser {
+    private static let formats: [String] = [
+        "E, d MMM yyyy HH:mm:ss Z",
+        "E, dd MMM yyyy HH:mm:ss Z",
+        "E, d MMM yyyy HH:mm Z",
+        "yyyy-MM-dd'T'HH:mm:ssZ",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+        "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+        "yyyy-MM-dd'T'HH:mmXXXXX",
+        "yyyy-MM-dd HH:mm:ss Z"
+    ]
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            if let date = formatter.date(from: raw) {
+                return date
+            }
+        }
+        if let iso = ISO8601DateFormatter().date(from: raw) {
+            return iso
+        }
+        return nil
+    }
+}
+
+final class RSSFeedParser: NSObject, XMLParserDelegate {
+    private var items: [NewsHeadline] = []
+    private var inItem = false
+    private var currentElement = ""
+    private var buffer = ""
+    private var title = ""
+    private var link = ""
+    private var pubDate = ""
+    private var summary = ""
+    private var source = ""
+
+    func parse(data: Data, fallbackSource: String) -> [NewsHeadline] {
+        items = []
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        parser.shouldResolveExternalEntities = false
+        _ = parser.parse()
+        return items.map { headline in
+            let normalizedSource = headline.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? fallbackSource
+                : headline.source
+            return NewsHeadline(
+                title: headline.title,
+                source: normalizedSource,
+                publishedAt: headline.publishedAt,
+                url: headline.url,
+                summary: headline.summary
+            )
+        }
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        let lower = elementName.lowercased()
+        currentElement = lower
+        buffer = ""
+        if lower == "item" || lower == "entry" {
+            inItem = true
+            title = ""
+            link = ""
+            pubDate = ""
+            summary = ""
+            source = ""
+        }
+        if inItem, lower == "link", let href = attributeDict["href"], !href.isEmpty {
+            link = href
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        buffer.append(string)
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let lower = elementName.lowercased()
+        let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if inItem {
+            switch lower {
+            case "title":
+                if !trimmed.isEmpty { title = trimmed }
+            case "link":
+                if !trimmed.isEmpty, URL(string: trimmed)?.scheme?.hasPrefix("http") == true { link = trimmed }
+            case "pubdate", "published", "updated":
+                if !trimmed.isEmpty { pubDate = trimmed }
+            case "description", "summary", "content":
+                if !trimmed.isEmpty { summary = strippedHTML(trimmed) }
+            case "source":
+                if !trimmed.isEmpty { source = trimmed }
+            case "item", "entry":
+                inItem = false
+                if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    items.append(
+                        NewsHeadline(
+                            title: title,
+                            source: source,
+                            publishedAt: NewsDateParser.parse(pubDate),
+                            url: link,
+                            summary: summary.isEmpty ? nil : summary
+                        )
+                    )
+                }
+            default:
+                break
+            }
+        }
+
+        buffer = ""
+    }
+
+    private func strippedHTML(_ text: String) -> String {
+        let noTags = text.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        return noTags.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+final class NewsAggregationService {
+    private let client: NewsHTTPClient
+    private let sources: [NewsSource]
+    private let nowProvider: () -> Date
+
+    init(client: NewsHTTPClient = URLSessionNewsHTTPClient(),
+         sources: [NewsSource] = NewsSourceCatalog.shared.sources,
+         nowProvider: @escaping () -> Date = Date.init) {
+        self.client = client
+        self.sources = sources
+        self.nowProvider = nowProvider
+    }
+
+    func latest(query: String?,
+                country: String?,
+                topics: [String],
+                timeWindowHours: Int,
+                maxItems: Int) async -> [NewsHeadline] {
+        let selected = selectedSources(country: country)
+        guard !selected.isEmpty else { return [] }
+
+        let fetched = await withTaskGroup(of: [NewsHeadline].self) { group -> [NewsHeadline] in
+            for source in selected {
+                guard let url = URL(string: source.url) else { continue }
+                group.addTask { [client] in
+                    do {
+                        let data = try await client.fetch(url: url)
+                        return RSSFeedParser().parse(data: data, fallbackSource: source.name)
+                    } catch {
+                        return []
+                    }
+                }
+            }
+            var merged: [NewsHeadline] = []
+            for await items in group {
+                merged.append(contentsOf: items)
+            }
+            return merged
+        }
+
+        let filtered = applyQueryFilters(
+            fetched,
+            query: query?.lowercased(),
+            topics: topics.map { $0.lowercased() }
+        )
+        let recent = applyRecencyFilter(filtered, windowHours: timeWindowHours)
+        let deduped = dedupe(recent)
+        let sorted = deduped.sorted { lhs, rhs in
+            switch (lhs.publishedAt, rhs.publishedAt) {
+            case let (l?, r?):
+                if l != r { return l > r }
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                break
+            }
+            return lhs.title < rhs.title
+        }
+        return Array(sorted.prefix(max(1, min(maxItems, 50))))
+    }
+
+    private func selectedSources(country: String?) -> [NewsSource] {
+        let normalizedCountry = country?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard let normalizedCountry, !normalizedCountry.isEmpty else {
+            return Array(sources.prefix(12))
+        }
+        let local = sources.filter { $0.country?.uppercased() == normalizedCountry }
+        let global = sources.filter { $0.country == nil }
+        if local.isEmpty {
+            return Array((global + sources).prefix(12))
+        }
+        return Array((local + global).prefix(12))
+    }
+
+    private func applyQueryFilters(_ items: [NewsHeadline], query: String?, topics: [String]) -> [NewsHeadline] {
+        let rawTokens = ([query].compactMap { $0 } + topics)
+            .flatMap { $0.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 }
+        guard !rawTokens.isEmpty else { return items }
+
+        return items.filter { item in
+            let haystack = "\(item.title) \(item.summary ?? "")".lowercased()
+            return rawTokens.contains { haystack.contains($0) }
+        }
+    }
+
+    private func applyRecencyFilter(_ items: [NewsHeadline], windowHours: Int) -> [NewsHeadline] {
+        let cutoff = nowProvider().addingTimeInterval(TimeInterval(-max(1, windowHours) * 3600))
+        return items.filter { item in
+            guard let date = item.publishedAt else { return true }
+            return date >= cutoff
+        }
+    }
+
+    private func dedupe(_ items: [NewsHeadline]) -> [NewsHeadline] {
+        var result: [NewsHeadline] = []
+        for item in items {
+            if let idx = result.firstIndex(where: { titleSimilarity($0.title, item.title) >= 0.90 }) {
+                if isNewer(item, than: result[idx]) {
+                    result[idx] = item
+                }
+            } else {
+                result.append(item)
+            }
+        }
+        return result
+    }
+
+    private func isNewer(_ lhs: NewsHeadline, than rhs: NewsHeadline) -> Bool {
+        switch (lhs.publishedAt, rhs.publishedAt) {
+        case let (l?, r?):
+            return l > r
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case (.none, .none):
+            return lhs.title.count > rhs.title.count
+        }
+    }
+
+    private func titleSimilarity(_ lhs: String, _ rhs: String) -> Double {
+        let left = tokenSet(normalizedTitle(lhs))
+        let right = tokenSet(normalizedTitle(rhs))
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        let intersection = left.intersection(right).count
+        let union = left.union(right).count
+        guard union > 0 else { return 0 }
+        return Double(intersection) / Double(union)
+    }
+
+    private func normalizedTitle(_ title: String) -> String {
+        title.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9\\s]", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func tokenSet(_ value: String) -> Set<String> {
+        Set(value.split(separator: " ").map(String.init).filter { $0.count > 1 })
+    }
+}
+
+struct NewsFetchTool: Tool, PermissionScopedTool {
+    let name = "news.fetch"
+    let description = "Fetch latest news headlines from trusted RSS sources with recency filtering and dedupe."
+    let requiredPermissions = [PermissionScope.webRead.rawValue]
+
+    func execute(args: [String: String]) -> OutputItem {
+        guard ToolPackageStore.shared.isInstalled("news.basic") else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "Tool package `news.basic` is not installed. Approve `web.read` and install news capability first."
+            )
+        }
+        guard PermissionScopeStore.shared.isApproved(PermissionScope.webRead.rawValue) else {
+            return OutputItem(kind: .markdown, payload: "Permission `web.read` is required for news.fetch.")
+        }
+
+        let query = args["query"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let country = args["country"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let topics = parseTopics(args["topics"])
+        let timeWindowHours = Int(args["time_window_hours"] ?? "") ?? 24
+        let maxItems = Int(args["max_items"] ?? "") ?? 15
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var items: [NewsHeadline] = []
+        Task {
+            items = await NewsAggregationService().latest(
+                query: query,
+                country: country,
+                topics: topics,
+                timeWindowHours: max(1, min(timeWindowHours, 168)),
+                maxItems: max(1, min(maxItems, 50))
+            )
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 12)
+
+        let formatter = ISO8601DateFormatter()
+        let envelope = NewsFetchEnvelope(
+            generatedAt: formatter.string(from: Date()),
+            items: items.map {
+                NewsFetchItem(
+                    title: $0.title,
+                    source: $0.source,
+                    publishedAt: $0.publishedAt.map { formatter.string(from: $0) },
+                    url: $0.url,
+                    summary: $0.summary
+                )
+            }
+        )
+
+        guard let data = try? JSONEncoder().encode(envelope),
+              let json = String(data: data, encoding: .utf8) else {
+            return OutputItem(kind: .markdown, payload: "{\"generated_at\":\"\",\"items\":[]}")
+        }
+        return OutputItem(kind: .markdown, payload: json)
+    }
+
+    private func parseTopics(_ raw: String?) -> [String] {
+        guard let raw = raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        return raw
+            .split(whereSeparator: { $0 == "," || $0 == "|" })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }

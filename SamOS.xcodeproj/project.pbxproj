@@ -20,6 +20,26 @@
 		ABB58215C2CD3EF3B6911E99 /* OutputCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */; };
 		075BFC936FBAAC823E44DE99 /* StatusStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */; };
 		403890EFEA26F4B9A4438DB5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6309BED275DC3241D9EA7065 /* SettingsView.swift */; };
+		AAF100000000000000000206 /* SettingsModules.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000106 /* SettingsModules.swift */; };
+		AAF100000000000000000201 /* ArchitectureModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000101 /* ArchitectureModule.swift */; };
+		BA0000000000000000000001 /* AppContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* AppContainer.swift */; };
+		BA0000000000000000000002 /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000002 /* AppLogger.swift */; };
+		BA0000000000000000000003 /* TimingTracer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000003 /* TimingTracer.swift */; };
+		BA0000000000000000000004 /* LLMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000004 /* LLMClient.swift */; };
+		BA0000000000000000000005 /* MemoryContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000005 /* MemoryContracts.swift */; };
+		BA0000000000000000000006 /* FallbackPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000006 /* FallbackPolicy.swift */; };
+		BA0000000000000000000007 /* ResponsePresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000007 /* ResponsePresenter.swift */; };
+		BA0000000000000000000008 /* RoutePlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000008 /* RoutePlanner.swift */; };
+		BA0000000000000000000009 /* RoutingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000009 /* RoutingService.swift */; };
+		BA000000000000000000000A /* TurnPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000A /* TurnPipeline.swift */; };
+		BA000000000000000000000B /* TurnRoutingServiceAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000B /* TurnRoutingServiceAdapter.swift */; };
+		BA000000000000000000000C /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000C /* SettingsStore.swift */; };
+		BA0000000000000000000012 /* SettingsKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000012 /* SettingsKeys.swift */; };
+		BA000000000000000000000D /* SkillContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000D /* SkillContracts.swift */; };
+		BA000000000000000000000E /* ToolContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000E /* ToolContracts.swift */; };
+		BA000000000000000000000F /* ToolRegistryContributors.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000000F /* ToolRegistryContributors.swift */; };
+		BA0000000000000000000010 /* OllamaLLMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000010 /* OllamaLLMClient.swift */; };
+		BA0000000000000000000011 /* OpenAILLMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000011 /* OpenAILLMClient.swift */; };
 		8FDD9BAA8816BB89724C844E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */; };
 		A1B2C3D4E5F60001AABB0001 /* M2Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */; };
 		A1B2C3D4E5F60001AABB0002 /* MicrophonePermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60001AABB1002 /* MicrophonePermission.swift */; };
@@ -99,8 +119,11 @@
 		AA2222222222222222222105 /* ToolNormalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221105 /* ToolNormalizationTests.swift */; };
 		AA2222222222222222222106 /* TurnRouterCombinedContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221106 /* TurnRouterCombinedContractTests.swift */; };
 		AA2222222222222222222107 /* TurnTraceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222221107 /* TurnTraceTests.swift */; };
+		AA3333333333333333332101 /* SettingsReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3333333333333333331101 /* SettingsReliabilityTests.swift */; };
+		AA3333333333333333332102 /* SettingsCoverageReportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3333333333333333331102 /* SettingsCoverageReportTests.swift */; };
 		F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */; };
 		F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */; };
+		F3A4B5C6D7E80001AA0000B6 /* SemanticMemoryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000B5 /* SemanticMemoryEngine.swift */; };
 		F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */; };
 		F3A4B5C6D7E80001AA000096 /* IntentAudioDiagnosticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */; };
 			F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */; };
@@ -109,11 +132,23 @@
 			F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */; };
 			F3A4B5C6D7E80001AA000091 /* FaceGreetingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000090 /* FaceGreetingManager.swift */; };
 			F3A4B5C6D7E80001AA000093 /* FaceGreetingManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */; };
-		F3A4B5C6D7E80001AA000098 /* TurnRouterNormalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */; };
+		F3A4B5C6D7E80001AA000098 /* StrictSchemaFallbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000097 /* StrictSchemaFallbackTests.swift */; };
 		F3A4B5C6D7E80001AA00009A /* OpenAICallGatingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */; };
 		F3A4B5C6D7E80001AA00009C /* CombinedTimeoutBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */; };
+		F3A4B5C6D7E80001AA0000A2 /* CameraHealthMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000A1 /* CameraHealthMonitor.swift */; };
+		F3A4B5C6D7E80001AA0000A4 /* AudioLoadGovernor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000A3 /* AudioLoadGovernor.swift */; };
+		F3A4B5C6D7E80001AA0000A6 /* StabilityPhase3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000A5 /* StabilityPhase3Tests.swift */; };
 		F3A4B5C6D7E80001AA00009E /* OpenAILeakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */; };
 		F3A4B5C6D7E80001AA0000A0 /* WeatherArgCompletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */; };
+		F3A4B5C6D7E80001AA0000A8 /* SamAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000A7 /* SamAPIClient.swift */; };
+		F3A4B5C6D7E80001AA0000AA /* SamResponseParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000A9 /* SamResponseParser.swift */; };
+		F3A4B5C6D7E80001AA0000AC /* SamResponseParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000AB /* SamResponseParserTests.swift */; };
+		F3A4B5C6D7E80001AA0000B2 /* DebugLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000B1 /* DebugLogStore.swift */; };
+		F3A4B5C6D7E80001AA0000B4 /* DebugPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5C6D7E80001AA0000B3 /* DebugPanelView.swift */; };
+		AAF100000000000000000202 /* AppContainerWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000102 /* AppContainerWiringTests.swift */; };
+		AAF100000000000000000203 /* RoutingServiceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000103 /* RoutingServiceContractTests.swift */; };
+		AAF100000000000000000204 /* SettingsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000104 /* SettingsStoreTests.swift */; };
+		AAF100000000000000000205 /* DomainLayerDependencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000105 /* DomainLayerDependencyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -141,6 +176,26 @@
 		50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputCanvasView.swift; sourceTree = "<group>"; };
 		5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusStripView.swift; sourceTree = "<group>"; };
 		6309BED275DC3241D9EA7065 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		AAF100000000000000000106 /* SettingsModules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModules.swift; sourceTree = "<group>"; };
+		AAF100000000000000000101 /* ArchitectureModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchitectureModule.swift; sourceTree = "<group>"; };
+		BB0000000000000000000001 /* AppContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/DI/AppContainer.swift; sourceTree = "<group>"; };
+		BB0000000000000000000002 /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Logging/AppLogger.swift; sourceTree = "<group>"; };
+		BB0000000000000000000003 /* TimingTracer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Timing/TimingTracer.swift; sourceTree = "<group>"; };
+		BB0000000000000000000004 /* LLMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Conversation/LLMClient.swift; sourceTree = "<group>"; };
+		BB0000000000000000000005 /* MemoryContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Memory/MemoryContracts.swift; sourceTree = "<group>"; };
+		BB0000000000000000000006 /* FallbackPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/FallbackPolicy.swift; sourceTree = "<group>"; };
+		BB0000000000000000000007 /* ResponsePresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/ResponsePresenter.swift; sourceTree = "<group>"; };
+		BB0000000000000000000008 /* RoutePlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/RoutePlanner.swift; sourceTree = "<group>"; };
+		BB0000000000000000000009 /* RoutingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/RoutingService.swift; sourceTree = "<group>"; };
+		BB000000000000000000000A /* TurnPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/TurnPipeline.swift; sourceTree = "<group>"; };
+		BB000000000000000000000B /* TurnRoutingServiceAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Routing/TurnRoutingServiceAdapter.swift; sourceTree = "<group>"; };
+		BB000000000000000000000C /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Settings/SettingsStore.swift; sourceTree = "<group>"; };
+		BB0000000000000000000012 /* SettingsKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Settings/SettingsKeys.swift; sourceTree = "<group>"; };
+		BB000000000000000000000D /* SkillContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Skills/SkillContracts.swift; sourceTree = "<group>"; };
+		BB000000000000000000000E /* ToolContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Tools/ToolContracts.swift; sourceTree = "<group>"; };
+		BB000000000000000000000F /* ToolRegistryContributors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Domain/Tools/ToolRegistryContributors.swift; sourceTree = "<group>"; };
+		BB0000000000000000000010 /* OllamaLLMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Infrastructure/Ollama/OllamaLLMClient.swift; sourceTree = "<group>"; };
+		BB0000000000000000000011 /* OpenAILLMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Infrastructure/OpenAI/OpenAILLMClient.swift; sourceTree = "<group>"; };
 		BCCA16A6B6B85C4EBFD44AB6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		08B846B80FCF554DBFBC1F2E /* SamOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SamOS.entitlements; sourceTree = "<group>"; };
 		A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = M2Settings.swift; sourceTree = "<group>"; };
@@ -222,8 +277,11 @@
 		AA2222222222222222221105 /* ToolNormalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolNormalizationTests.swift; sourceTree = "<group>"; };
 		AA2222222222222222221106 /* TurnRouterCombinedContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnRouterCombinedContractTests.swift; sourceTree = "<group>"; };
 		AA2222222222222222221107 /* TurnTraceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnTraceTests.swift; sourceTree = "<group>"; };
+		AA3333333333333333331101 /* SettingsReliabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsReliabilityTests.swift; sourceTree = "<group>"; };
+		AA3333333333333333331102 /* SettingsCoverageReportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCoverageReportTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevSecretsStore.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveService.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000B5 /* SemanticMemoryEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticMemoryEngine.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryAutoSaveTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentAudioDiagnosticsStore.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAttributionScorer.swift; sourceTree = "<group>"; };
@@ -232,11 +290,23 @@
 			F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceProfileStoreTests.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000090 /* FaceGreetingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceGreetingManager.swift; sourceTree = "<group>"; };
 			F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceGreetingManagerTests.swift; sourceTree = "<group>"; };
-		F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnRouterNormalizationTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA000097 /* StrictSchemaFallbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrictSchemaFallbackTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICallGatingTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CombinedTimeoutBudgetTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000A1 /* CameraHealthMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraHealthMonitor.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000A3 /* AudioLoadGovernor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLoadGovernor.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000A5 /* StabilityPhase3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityPhase3Tests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAILeakTests.swift; sourceTree = "<group>"; };
 		F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherArgCompletionTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000A7 /* SamAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamAPIClient.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000A9 /* SamResponseParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamResponseParser.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000AB /* SamResponseParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamResponseParserTests.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000B1 /* DebugLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogStore.swift; sourceTree = "<group>"; };
+		F3A4B5C6D7E80001AA0000B3 /* DebugPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugPanelView.swift; sourceTree = "<group>"; };
+		AAF100000000000000000102 /* AppContainerWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/AppContainerWiringTests.swift; sourceTree = "<group>"; };
+		AAF100000000000000000103 /* RoutingServiceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/RoutingServiceContractTests.swift; sourceTree = "<group>"; };
+		AAF100000000000000000104 /* SettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/SettingsStoreTests.swift; sourceTree = "<group>"; };
+		AAF100000000000000000105 /* DomainLayerDependencyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/DomainLayerDependencyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -297,6 +367,24 @@
 			isa = PBXGroup;
 			children = (
 				C940048EF2AE6339FE371742 /* SamOSApp.swift */,
+				BB0000000000000000000001 /* AppContainer.swift */,
+				BB0000000000000000000002 /* AppLogger.swift */,
+				BB0000000000000000000003 /* TimingTracer.swift */,
+				BB0000000000000000000004 /* LLMClient.swift */,
+				BB0000000000000000000005 /* MemoryContracts.swift */,
+				BB0000000000000000000006 /* FallbackPolicy.swift */,
+				BB0000000000000000000007 /* ResponsePresenter.swift */,
+				BB0000000000000000000008 /* RoutePlanner.swift */,
+				BB0000000000000000000009 /* RoutingService.swift */,
+				BB000000000000000000000A /* TurnPipeline.swift */,
+				BB000000000000000000000B /* TurnRoutingServiceAdapter.swift */,
+				BB000000000000000000000C /* SettingsStore.swift */,
+				BB0000000000000000000012 /* SettingsKeys.swift */,
+				BB000000000000000000000D /* SkillContracts.swift */,
+				BB000000000000000000000E /* ToolContracts.swift */,
+				BB000000000000000000000F /* ToolRegistryContributors.swift */,
+				BB0000000000000000000010 /* OllamaLLMClient.swift */,
+				BB0000000000000000000011 /* OpenAILLMClient.swift */,
 				157DC95D9E1AABF8F305E922 /* Models */,
 				E0BE75350FC0A9D98E54750E /* Services */,
 				07F9AB5EC54B6D1E17DA1ADE /* Tools */,
@@ -330,6 +418,7 @@
 			isa = PBXGroup;
 			children = (
 				2FBCF656B0C1D7DF5C21FDEA /* AppState.swift */,
+				AAF100000000000000000101 /* ArchitectureModule.swift */,
 				4FC138EDD9EAAABC3B51985C /* MockRouter.swift */,
 				A1B2C3D4E5F60001AABB1001 /* M2Settings.swift */,
 				A1B2C3D4E5F60001AABB1002 /* MicrophonePermission.swift */,
@@ -340,9 +429,12 @@
 				A1B2C3D4E5F60001AABB1007 /* OllamaRouter.swift */,
 				B1A2C3D4E5F60001CCDD1002 /* MemoryStore.swift */,
 				F3A4B5C6D7E80001AA000078 /* MemoryAutoSaveService.swift */,
+				F3A4B5C6D7E80001AA0000B5 /* SemanticMemoryEngine.swift */,
 					F3A4B5C6D7E80001AA000082 /* KnowledgeAttributionScorer.swift */,
 					F3A4B5C6D7E80001AA000086 /* FaceProfileStore.swift */,
 					F3A4B5C6D7E80001AA000090 /* FaceGreetingManager.swift */,
+					F3A4B5C6D7E80001AA0000A1 /* CameraHealthMonitor.swift */,
+					F3A4B5C6D7E80001AA0000A3 /* AudioLoadGovernor.swift */,
 					D1E2F3A4B5C60001EEFF1001 /* SoundCuePlayer.swift */,
 				E2F3A4B5C6D70001FF001001 /* KeychainStore.swift */,
 				F3A4B5C6D7E80001AA000076 /* DevSecretsStore.swift */,
@@ -370,6 +462,9 @@
 				F3A4B5C6D7E80001AA000052 /* SkillForgeQueueService.swift */,
 				F3A4B5C6D7E80001AA000066 /* OpenAIRouter.swift */,
 				F3A4B5C6D7E80001AA000095 /* IntentAudioDiagnosticsStore.swift */,
+				F3A4B5C6D7E80001AA0000A7 /* SamAPIClient.swift */,
+				F3A4B5C6D7E80001AA0000A9 /* SamResponseParser.swift */,
+				F3A4B5C6D7E80001AA0000B1 /* DebugLogStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -394,6 +489,8 @@
 				50B9AA33B1ACDD17FC2BA6E5 /* OutputCanvasView.swift */,
 				5EAC5BAD25C724AE503FF997 /* StatusStripView.swift */,
 				6309BED275DC3241D9EA7065 /* SettingsView.swift */,
+				AAF100000000000000000106 /* SettingsModules.swift */,
+				F3A4B5C6D7E80001AA0000B3 /* DebugPanelView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -409,6 +506,10 @@
 		CC000100000000000000A001 /* SamOSTests */ = {
 			isa = PBXGroup;
 			children = (
+				AAF100000000000000000102 /* AppContainerWiringTests.swift */,
+				AAF100000000000000000103 /* RoutingServiceContractTests.swift */,
+				AAF100000000000000000104 /* SettingsStoreTests.swift */,
+				AAF100000000000000000105 /* DomainLayerDependencyTests.swift */,
 				CC0001000000000000F00002 /* ActionTests.swift */,
 				CC0001000000000000F00003 /* OllamaRouterTests.swift */,
 				CC0001000000000000F00004 /* MockRouterTests.swift */,
@@ -437,16 +538,20 @@
 				AA2222222222222222221105 /* ToolNormalizationTests.swift */,
 				AA2222222222222222221106 /* TurnRouterCombinedContractTests.swift */,
 				AA2222222222222222221107 /* TurnTraceTests.swift */,
+				AA3333333333333333331101 /* SettingsReliabilityTests.swift */,
+				AA3333333333333333331102 /* SettingsCoverageReportTests.swift */,
 				F3A4B5C6D7E80001AA000072 /* TextUnescaperTests.swift */,
 				F3A4B5C6D7E80001AA000080 /* MemoryAutoSaveTests.swift */,
 					F3A4B5C6D7E80001AA000084 /* KnowledgeAttributionCalibrationTests.swift */,
 					F3A4B5C6D7E80001AA000088 /* FaceProfileStoreTests.swift */,
 					F3A4B5C6D7E80001AA000092 /* FaceGreetingManagerTests.swift */,
-				F3A4B5C6D7E80001AA000097 /* TurnRouterNormalizationTests.swift */,
+				F3A4B5C6D7E80001AA000097 /* StrictSchemaFallbackTests.swift */,
 				F3A4B5C6D7E80001AA000099 /* OpenAICallGatingTests.swift */,
+				F3A4B5C6D7E80001AA0000A5 /* StabilityPhase3Tests.swift */,
 				F3A4B5C6D7E80001AA00009B /* CombinedTimeoutBudgetTests.swift */,
 				F3A4B5C6D7E80001AA00009D /* OpenAILeakTests.swift */,
 				F3A4B5C6D7E80001AA00009F /* WeatherArgCompletionTests.swift */,
+				F3A4B5C6D7E80001AA0000AB /* SamResponseParserTests.swift */,
 				);
 			path = SamOSTests;
 			sourceTree = "<group>";
@@ -535,6 +640,24 @@
 			buildActionMask = 2147483647;
 			files = (
 				21A54DC032EA5D65B23371B3 /* SamOSApp.swift in Sources */,
+				BA0000000000000000000001 /* AppContainer.swift in Sources */,
+				BA0000000000000000000002 /* AppLogger.swift in Sources */,
+				BA0000000000000000000003 /* TimingTracer.swift in Sources */,
+				BA0000000000000000000004 /* LLMClient.swift in Sources */,
+				BA0000000000000000000005 /* MemoryContracts.swift in Sources */,
+				BA0000000000000000000006 /* FallbackPolicy.swift in Sources */,
+				BA0000000000000000000007 /* ResponsePresenter.swift in Sources */,
+				BA0000000000000000000008 /* RoutePlanner.swift in Sources */,
+				BA0000000000000000000009 /* RoutingService.swift in Sources */,
+				BA000000000000000000000A /* TurnPipeline.swift in Sources */,
+				BA000000000000000000000B /* TurnRoutingServiceAdapter.swift in Sources */,
+				BA000000000000000000000C /* SettingsStore.swift in Sources */,
+				BA0000000000000000000012 /* SettingsKeys.swift in Sources */,
+				BA000000000000000000000D /* SkillContracts.swift in Sources */,
+				BA000000000000000000000E /* ToolContracts.swift in Sources */,
+				BA000000000000000000000F /* ToolRegistryContributors.swift in Sources */,
+				BA0000000000000000000010 /* OllamaLLMClient.swift in Sources */,
+				BA0000000000000000000011 /* OpenAILLMClient.swift in Sources */,
 				9663987A0946F4CF44F079AC /* ChatMessage.swift in Sources */,
 				F90569FF63928B21B354F40B /* OutputItem.swift in Sources */,
 				E2595C1AC05EFD410C94B874 /* Action.swift in Sources */,
@@ -547,6 +670,7 @@
 				ABB58215C2CD3EF3B6911E99 /* OutputCanvasView.swift in Sources */,
 				075BFC936FBAAC823E44DE99 /* StatusStripView.swift in Sources */,
 				403890EFEA26F4B9A4438DB5 /* SettingsView.swift in Sources */,
+				AAF100000000000000000206 /* SettingsModules.swift in Sources */,
 				A1B2C3D4E5F60001AABB0001 /* M2Settings.swift in Sources */,
 				A1B2C3D4E5F60001AABB0002 /* MicrophonePermission.swift in Sources */,
 				A1B2C3D4E5F60001AABB0003 /* AudioCaptureService.swift in Sources */,
@@ -592,10 +716,17 @@
 				F3A4B5C6D7E80001AA000071 /* TextUnescaper.swift in Sources */,
 				F3A4B5C6D7E80001AA000077 /* DevSecretsStore.swift in Sources */,
 				F3A4B5C6D7E80001AA000079 /* MemoryAutoSaveService.swift in Sources */,
+				F3A4B5C6D7E80001AA0000B6 /* SemanticMemoryEngine.swift in Sources */,
 				F3A4B5C6D7E80001AA000096 /* IntentAudioDiagnosticsStore.swift in Sources */,
 					F3A4B5C6D7E80001AA000083 /* KnowledgeAttributionScorer.swift in Sources */,
 					F3A4B5C6D7E80001AA000087 /* FaceProfileStore.swift in Sources */,
 					F3A4B5C6D7E80001AA000091 /* FaceGreetingManager.swift in Sources */,
+					F3A4B5C6D7E80001AA0000A2 /* CameraHealthMonitor.swift in Sources */,
+					F3A4B5C6D7E80001AA0000A4 /* AudioLoadGovernor.swift in Sources */,
+				F3A4B5C6D7E80001AA0000A8 /* SamAPIClient.swift in Sources */,
+				F3A4B5C6D7E80001AA0000AA /* SamResponseParser.swift in Sources */,
+				F3A4B5C6D7E80001AA0000B2 /* DebugLogStore.swift in Sources */,
+				F3A4B5C6D7E80001AA0000B4 /* DebugPanelView.swift in Sources */,
 				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -603,6 +734,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AAF100000000000000000202 /* AppContainerWiringTests.swift in Sources */,
+				AAF100000000000000000203 /* RoutingServiceContractTests.swift in Sources */,
+				AAF100000000000000000204 /* SettingsStoreTests.swift in Sources */,
+				AAF100000000000000000205 /* DomainLayerDependencyTests.swift in Sources */,
 				CC0001000000000000B00001 /* ActionTests.swift in Sources */,
 				CC0001000000000000B00002 /* OllamaRouterTests.swift in Sources */,
 				CC0001000000000000B00003 /* MockRouterTests.swift in Sources */,
@@ -631,16 +766,20 @@
 				AA2222222222222222222105 /* ToolNormalizationTests.swift in Sources */,
 				AA2222222222222222222106 /* TurnRouterCombinedContractTests.swift in Sources */,
 				AA2222222222222222222107 /* TurnTraceTests.swift in Sources */,
+				AA3333333333333333332101 /* SettingsReliabilityTests.swift in Sources */,
+				AA3333333333333333332102 /* SettingsCoverageReportTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000073 /* TextUnescaperTests.swift in Sources */,
 				F3A4B5C6D7E80001AA000081 /* MemoryAutoSaveTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000085 /* KnowledgeAttributionCalibrationTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000089 /* FaceProfileStoreTests.swift in Sources */,
 					F3A4B5C6D7E80001AA000093 /* FaceGreetingManagerTests.swift in Sources */,
-				F3A4B5C6D7E80001AA000098 /* TurnRouterNormalizationTests.swift in Sources */,
+				F3A4B5C6D7E80001AA000098 /* StrictSchemaFallbackTests.swift in Sources */,
 				F3A4B5C6D7E80001AA00009A /* OpenAICallGatingTests.swift in Sources */,
+				F3A4B5C6D7E80001AA0000A6 /* StabilityPhase3Tests.swift in Sources */,
 				F3A4B5C6D7E80001AA00009C /* CombinedTimeoutBudgetTests.swift in Sources */,
 				F3A4B5C6D7E80001AA00009E /* OpenAILeakTests.swift in Sources */,
 				F3A4B5C6D7E80001AA0000A0 /* WeatherArgCompletionTests.swift in Sources */,
+				F3A4B5C6D7E80001AA0000AC /* SamResponseParserTests.swift in Sources */,
 				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

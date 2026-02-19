@@ -199,12 +199,59 @@ final class SkillTests: XCTestCase {
            let data = try? Data(contentsOf: url) {
             let skill = try JSONDecoder().decode(SkillSpec.self, from: data)
             XCTAssertEqual(skill.id, "alarm_v1")
-            XCTAssertEqual(skill.name, "Alarm")
+            XCTAssertEqual(skill.name, "Alarm (schedule_task)")
             XCTAssertFalse(skill.triggerPhrases.isEmpty)
             XCTAssertFalse(skill.steps.isEmpty)
             XCTAssertNotNil(skill.onTrigger)
         }
         // If bundle resource not available in test target, that's OK — the main test is the decode
+    }
+
+    func testRuntimeBaselinePackagesExcludeDemoSkills() {
+        let full = SkillStore.baselinePackages()
+        let runtimeOnly = SkillStore.baselinePackages(includeDemoPackages: false)
+
+        XCTAssertGreaterThanOrEqual(full.count, 3)
+        XCTAssertEqual(runtimeOnly.map(\.manifest.skillID), ["news.latest"])
+    }
+
+    func testSkillCapabilityLinkStoreRoundTrip() {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SkillCapabilityLinks-\(UUID().uuidString).json")
+        let store = SkillCapabilityLinkStore(fileURL: temp)
+
+        store.setCapabilities(["news.basic", "weather.basic"], forSkillID: "skill.news_weather")
+        XCTAssertEqual(
+            store.capabilities(forSkillID: "skill.news_weather"),
+            ["news.basic", "weather.basic"]
+        )
+
+        store.remove(skillID: "skill.news_weather")
+        XCTAssertTrue(store.capabilities(forSkillID: "skill.news_weather").isEmpty)
+    }
+
+    func testCapabilityCatalogSearchFindsNewsCapability() {
+        let results = CapabilityCatalog.shared.search("latest news", limit: 10)
+        XCTAssertTrue(results.contains(where: { $0.id == "news.basic" }))
+    }
+
+    func testCapabilityMetadataOverridePersists() {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CapabilityOverrides-\(UUID().uuidString).json")
+        let store = CapabilityMetadataStore(fileURL: temp)
+        store.saveOverride(
+            capabilityID: "news.basic",
+            name: "News Capability",
+            tools: ["news.fetch"],
+            permissions: ["web.read"],
+            keywords: ["headlines", "latest"]
+        )
+
+        let saved = store.override(for: "news.basic")
+        XCTAssertEqual(saved?.name, "News Capability")
+        XCTAssertEqual(saved?.tools ?? [], ["news.fetch"])
+        XCTAssertEqual(saved?.permissions ?? [], ["web.read"])
+        XCTAssertEqual(saved?.keywords ?? [], ["headlines", "latest"])
     }
 
     // MARK: - SkillEngine Matching

@@ -106,6 +106,20 @@ enum ActionValidator {
                 _ = minutes
             }
 
+        case "skills.learn.start":
+            let goal = (toolAction.args["goal_text"] ?? toolAction.args["goal"] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if goal.isEmpty {
+                reasons.append("skills.learn.start requires non-empty 'goal_text' (or 'goal').")
+            }
+
+        case "skills.learn.approve_permissions":
+            let approvedRaw = (toolAction.args["approved"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let accepted = ["true", "false", "1", "0", "yes", "no", "y", "n"]
+            if !accepted.contains(approvedRaw) {
+                reasons.append("skills.learn.approve_permissions requires 'approved' true/false.")
+            }
+
         default:
             break
         }

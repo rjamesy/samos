@@ -144,8 +144,23 @@ final class OpenAILeakTests: XCTestCase {
     // MARK: - Leak Tests
 
     func testLocalSuccessGreetingNoOpenAILeak() async {
-        let bareGreeting = #"{"action":"TALK","say":"Hello! How can I help?"}"#
-        let localTransport = CombinedRouteTransportStub(responseText: bareGreeting, wireMs: 10)
+        // Valid combined envelope — OpenAI should NOT be called
+        let validGreeting = """
+        {
+          "intent": "greeting",
+          "confidence": 0.95,
+          "autoCaptureHint": false,
+          "needsWeb": false,
+          "notes": "",
+          "plan": {
+            "action": "PLAN",
+            "steps": [
+              { "step": "talk", "say": "Hello! How can I help?" }
+            ]
+          }
+        }
+        """
+        let localTransport = CombinedRouteTransportStub(responseText: validGreeting, wireMs: 10)
         let openAIProvider = OpenAIProviderStub(
             intentRawJSON: #"{"intent":"greeting","confidence":0.9,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#
         )
@@ -158,8 +173,8 @@ final class OpenAILeakTests: XCTestCase {
 
         _ = await orchestrator.processTurn("hello", history: [], inputMode: .voice)
 
-        XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI classify must not fire on successful bare greeting")
-        XCTAssertEqual(openAIProvider.routePlanCalls, 0, "OpenAI routePlan must not fire on successful bare greeting")
+        XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI classify must not fire on valid local greeting")
+        XCTAssertEqual(openAIProvider.routePlanCalls, 0, "OpenAI routePlan must not fire on valid local greeting")
     }
 
     func testLocalSuccessQnANoOpenAILeak() async {
@@ -193,6 +208,41 @@ final class OpenAILeakTests: XCTestCase {
 
         XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI classify must not fire on valid local QnA")
         XCTAssertEqual(openAIProvider.routePlanCalls, 0, "OpenAI routePlan must not fire on valid local QnA")
+    }
+
+    func testLocalUncertainTalkFallsBackToOpenAI() async {
+        let uncertainCombined = """
+        {
+          "intent": "general_qna",
+          "confidence": 0.86,
+          "autoCaptureHint": false,
+          "needsWeb": false,
+          "notes": "",
+          "plan": {
+            "action": "PLAN",
+            "steps": [
+              { "step": "talk", "say": "Sorry, I can't find that answer right now." }
+            ]
+          }
+        }
+        """
+        let localTransport = CombinedRouteTransportStub(responseText: uncertainCombined, wireMs: 10)
+        let openAIProvider = OpenAIProviderStub(
+            intentRawJSON: #"{"intent":"general_qna","confidence":0.92,"autoCaptureHint":false,"needsWeb":false,"notes":""}"#,
+            plan: Plan(steps: [.talk(say: "OpenAI fallback answer")])
+        )
+        let toolRunner = ToolRunnerStub()
+        let orchestrator = makeOrchestrator(
+            localTransport: localTransport,
+            openAIProvider: openAIProvider,
+            toolRunner: toolRunner
+        )
+
+        let result = await orchestrator.processTurn("answer this", history: [], inputMode: .voice)
+
+        XCTAssertEqual(openAIProvider.classifyCalls, 1, "Uncertain local TALK should escalate to OpenAI classify")
+        XCTAssertEqual(openAIProvider.routePlanCalls, 1, "Uncertain local TALK should escalate to OpenAI planning")
+        XCTAssertEqual(result.llmProvider, .openai)
     }
 
     func testLocalSuccessToolPlanNoOpenAILeak() async {

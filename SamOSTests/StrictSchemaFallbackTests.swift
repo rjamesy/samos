@@ -3,7 +3,7 @@ import AppKit
 @testable import SamOS
 
 @MainActor
-final class TurnRouterNormalizationTests: XCTestCase {
+final class StrictSchemaFallbackTests: XCTestCase {
 
     private final class CombinedRouteTransportStub: OllamaTransport, OllamaWireTimedTransport {
         var responseText: String
@@ -145,9 +145,9 @@ final class TurnRouterNormalizationTests: XCTestCase {
         )
     }
 
-    // MARK: - Normalization Tests
+    // MARK: - Strict Schema Fallback Tests
 
-    func testBareActionTalkIsNormalizedToValidCombinedResult() async {
+    func testBareActionTalkTriggersOpenAIFallback() async {
         let bareAction = #"{"action":"TALK","say":"hi"}"#
         let localTransport = CombinedRouteTransportStub(responseText: bareAction, wireMs: 10)
         let openAIProvider = OpenAIProviderStub(
@@ -163,13 +163,11 @@ final class TurnRouterNormalizationTests: XCTestCase {
         let result = await orchestrator.processTurn("hi", history: [], inputMode: .voice)
 
         XCTAssertEqual(localTransport.wireTimedCallCount, 1)
-        XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI should not be called when bare action is normalized")
-        XCTAssertEqual(openAIProvider.routePlanCalls, 0)
-        XCTAssertEqual(result.llmProvider, .ollama)
-        XCTAssertEqual(result.routeLocalOutcome, "ok")
+        XCTAssertEqual(openAIProvider.classifyCalls, 1, "Bare action should trigger OpenAI fallback")
+        XCTAssertEqual(result.llmProvider, .openai)
     }
 
-    func testBarePlanWithStepsIsNormalized() async {
+    func testBarePlanTriggersOpenAIFallback() async {
         let barePlan = #"{"action":"PLAN","steps":[{"step":"talk","say":"hello there"}]}"#
         let localTransport = CombinedRouteTransportStub(responseText: barePlan, wireMs: 10)
         let openAIProvider = OpenAIProviderStub(
@@ -185,43 +183,50 @@ final class TurnRouterNormalizationTests: XCTestCase {
         let result = await orchestrator.processTurn("hello", history: [], inputMode: .voice)
 
         XCTAssertEqual(localTransport.wireTimedCallCount, 1)
-        XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI should not be called for normalized bare PLAN")
-        XCTAssertEqual(openAIProvider.routePlanCalls, 0)
-        XCTAssertEqual(result.llmProvider, .ollama)
-        XCTAssertEqual(result.routeLocalOutcome, "ok")
+        XCTAssertEqual(openAIProvider.classifyCalls, 1, "Bare PLAN should trigger OpenAI fallback")
+        XCTAssertEqual(result.llmProvider, .openai)
     }
 
     func testGreetingDetectedFromBareTalk() async {
         let bareGreeting = #"{"action":"TALK","say":"hello there!"}"#
         let router = OllamaRouter(transport: CombinedRouteTransportStub(responseText: bareGreeting, wireMs: 5))
 
-        let result = try? await router.routeCombinedWithTiming(
-            "hello",
-            state: TurnRouterState(cameraRunning: false, faceKnown: false, pendingSlot: nil, lastAssistantLine: nil),
-            wireDeadlineMs: 5000
-        )
-
-        XCTAssertNotNil(result)
-        XCTAssertEqual(result?.result.classification.intent, .greeting)
-        XCTAssertEqual(result?.result.classification.notes, "normalized_from_bare_action")
+        do {
+            _ = try await router.routeCombinedWithTiming(
+                "hello",
+                state: TurnRouterState(cameraRunning: false, faceKnown: false, pendingSlot: nil, lastAssistantLine: nil),
+                wireDeadlineMs: 5000
+            )
+            XCTFail("Expected schemaMismatch to be thrown for bare action")
+        } catch {
+            // Bare action should now throw schemaMismatch (no normalization rescue)
+            guard case OllamaRouter.OllamaError.schemaMismatch = error else {
+                XCTFail("Expected schemaMismatch but got \(error)")
+                return
+            }
+        }
     }
 
     func testNonGreetingDetectedFromBareTalk() async {
         let bareTalk = #"{"action":"TALK","say":"The weather is nice today"}"#
         let router = OllamaRouter(transport: CombinedRouteTransportStub(responseText: bareTalk, wireMs: 5))
 
-        let result = try? await router.routeCombinedWithTiming(
-            "how's the weather",
-            state: TurnRouterState(cameraRunning: false, faceKnown: false, pendingSlot: nil, lastAssistantLine: nil),
-            wireDeadlineMs: 5000
-        )
-
-        XCTAssertNotNil(result)
-        XCTAssertEqual(result?.result.classification.intent, .generalQnA)
-        XCTAssertEqual(result?.result.classification.notes, "normalized_from_bare_action")
+        do {
+            _ = try await router.routeCombinedWithTiming(
+                "how's the weather",
+                state: TurnRouterState(cameraRunning: false, faceKnown: false, pendingSlot: nil, lastAssistantLine: nil),
+                wireDeadlineMs: 5000
+            )
+            XCTFail("Expected schemaMismatch to be thrown for bare action")
+        } catch {
+            guard case OllamaRouter.OllamaError.schemaMismatch = error else {
+                XCTFail("Expected schemaMismatch but got \(error)")
+                return
+            }
+        }
     }
 
-    func testInvalidPlanStepsConvertedToTalkFallback() async {
+    func testInvalidPlanStepsTriggersOpenAIFallback() async {
         // Envelope is valid but plan steps are strings instead of objects
         let invalidPlanSteps = """
         {
@@ -249,12 +254,10 @@ final class TurnRouterNormalizationTests: XCTestCase {
 
         let result = await orchestrator.processTurn("tell me something", history: [], inputMode: .voice)
 
-        // Should normalize to a talk fallback rather than falling back to OpenAI
+        // Invalid plan steps should trigger OpenAI fallback (no normalization rescue)
         XCTAssertEqual(localTransport.wireTimedCallCount, 1)
-        XCTAssertEqual(openAIProvider.classifyCalls, 0, "OpenAI should not be called when invalid plan is normalized to talk fallback")
-        XCTAssertEqual(openAIProvider.routePlanCalls, 0)
-        XCTAssertEqual(result.llmProvider, .ollama)
-        XCTAssertEqual(result.routeLocalOutcome, "ok")
+        XCTAssertEqual(openAIProvider.classifyCalls, 1, "Invalid plan steps should trigger OpenAI fallback")
+        XCTAssertEqual(result.llmProvider, .openai)
     }
 
     func testValidCombinedResponsePassesThroughUnchanged() async {

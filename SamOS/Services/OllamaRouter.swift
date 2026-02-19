@@ -393,6 +393,13 @@ final class OllamaRouter {
 
         #if DEBUG
         print("[OllamaRouter] Raw combined response: \(responseText)")
+        Task { @MainActor in
+            DebugLogStore.shared.logLLMResponse(
+                turnID: TurnExecutionContext.turnID, provider: "ollama",
+                durationMs: wireMs,
+                responseBody: String(responseText.prefix(500))
+            )
+        }
         #endif
 
         let parseStartedAt = CFAbsoluteTimeGetCurrent()
@@ -486,6 +493,13 @@ final class OllamaRouter {
         }
         #if DEBUG
         print("[OllamaRouter] Raw plan response: \(responseText)")
+        Task { @MainActor in
+            DebugLogStore.shared.logLLMResponse(
+                turnID: TurnExecutionContext.turnID, provider: "ollama",
+                durationMs: wireMs,
+                responseBody: String(responseText.prefix(500))
+            )
+        }
         #endif
 
         let parseStartedAt = CFAbsoluteTimeGetCurrent()
@@ -835,78 +849,6 @@ final class OllamaRouter {
         return Plan.fromAction(try parseAction(from: text))
     }
 
-    private func normalizeCombinedRoute(dict: [String: Any],
-                                       userInput: String) -> CombinedRouteLLMOutput? {
-        // Case A: Bare action response (has "action" but no "intent" envelope)
-        if dict["action"] != nil && dict["intent"] == nil {
-            let actionRaw = (dict["action"] as? String ?? "").uppercased()
-            // Re-serialize and parse via existing plan/action parser
-            guard let reserializedData = try? JSONSerialization.data(withJSONObject: dict),
-                  let reserializedText = String(data: reserializedData, encoding: .utf8),
-                  let parsedPlan = try? parsePlanOrAction(from: reserializedText) else {
-                return nil
-            }
-
-            // Detect greeting intent from bare TALK
-            let detectedIntent: RoutedIntent
-            if actionRaw == "TALK" {
-                let say = (dict["say"] as? String ?? "").lowercased()
-                let greetingWords = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
-                if greetingWords.contains(where: { say.contains($0) }) {
-                    detectedIntent = .greeting
-                } else {
-                    detectedIntent = .generalQnA
-                }
-            } else {
-                detectedIntent = .generalQnA
-            }
-
-            return CombinedRouteLLMOutput(
-                classification: IntentClassification(
-                    intent: detectedIntent,
-                    confidence: 0.7,
-                    notes: "normalized_from_bare_action",
-                    autoCaptureHint: false,
-                    needsWeb: false
-                ),
-                plan: parsedPlan
-            )
-        }
-
-        // Case B: Valid envelope but plan steps fail to parse
-        if dict["intent"] != nil && dict["plan"] != nil {
-            guard let intentRaw = dict["intent"] as? String,
-                  let intent = RoutedIntent(rawValue: intentRaw) else {
-                return nil
-            }
-            let confidence = min(1.0, max(0.0, dict["confidence"] as? Double ?? 0.5))
-            let needsWeb = dict["needsWeb"] as? Bool ?? false
-
-            guard let planObject = dict["plan"] as? [String: Any] else { return nil }
-            guard let planData = try? JSONSerialization.data(withJSONObject: planObject),
-                  let planText = String(data: planData, encoding: .utf8) else { return nil }
-
-            // Only rescue if plan parsing actually fails
-            if (try? parsePlanOrAction(from: planText)) != nil {
-                return nil  // plan is valid, let strict path handle it
-            }
-
-            // Plan failed to parse — convert to safe TALK fallback
-            return CombinedRouteLLMOutput(
-                classification: IntentClassification(
-                    intent: intent,
-                    confidence: confidence,
-                    notes: "normalized_invalid_plan_to_talk_fallback",
-                    autoCaptureHint: false,
-                    needsWeb: needsWeb
-                ),
-                plan: Plan(steps: [.talk(say: "Sorry — can you rephrase that?")])
-            )
-        }
-
-        return nil
-    }
-
     private func parseCombinedRoute(from text: String,
                                     userInput: String) throws -> CombinedRouteLLMOutput {
         let sanitized = sanitizeLLMText(text)
@@ -916,38 +858,42 @@ final class OllamaRouter {
             throw OllamaError.jsonParseFailed(text)
         }
 
-        // Try normalization rescue first (handles bare actions, invalid plan steps)
-        if let normalized = normalizeCombinedRoute(dict: dict, userInput: userInput) {
+        let logSchemaFail = {
             #if DEBUG
-            print("[OllamaRouter] normalizeCombinedRoute rescued response: \(normalized.classification.notes)")
+            print("[ROUTE_SCHEMA_FAIL] provider=ollama raw=\(String(jsonString.prefix(200)))")
             #endif
-            return normalized
         }
 
         var reasons: [String] = []
         guard let intentRaw = dict["intent"] as? String,
               let intent = RoutedIntent(rawValue: intentRaw) else {
             reasons.append("missing/invalid intent")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
         guard let confidence = dict["confidence"] as? Double else {
             reasons.append("missing confidence")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
         guard let autoCaptureHint = dict["autoCaptureHint"] as? Bool else {
             reasons.append("missing autoCaptureHint")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
         guard let needsWeb = dict["needsWeb"] as? Bool else {
             reasons.append("missing needsWeb")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
         guard let notes = dict["notes"] as? String else {
             reasons.append("missing notes")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
         guard let planObject = dict["plan"] as? [String: Any] else {
             reasons.append("missing plan object")
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: reasons)
         }
 
@@ -955,6 +901,7 @@ final class OllamaRouter {
         do {
             planData = try JSONSerialization.data(withJSONObject: planObject)
         } catch {
+            logSchemaFail()
             throw OllamaError.schemaMismatch(raw: jsonString, reasons: ["invalid plan object"])
         }
         let planText = String(data: planData, encoding: .utf8) ?? "{}"
@@ -972,6 +919,7 @@ final class OllamaRouter {
                 plan: parsedPlan
             )
         } catch OllamaError.schemaMismatch(let raw, let parseReasons) {
+            logSchemaFail()
             if let failure = unknownToolValidationFailure(from: parseReasons, userInput: userInput, raw: raw) {
                 throw OllamaError.validationFailure(failure)
             }

@@ -2,9 +2,12 @@ import Foundation
 
 private struct LocalKnowledgeContext {
     let items: [KnowledgeSourceSnippet]
+    let memoryPromptBlock: String
+    let memoryShouldClarify: Bool
+    let memoryClarificationPrompt: String?
 
     var hasMemoryHints: Bool {
-        items.contains { $0.kind == .memory }
+        items.contains { $0.kind == .memory } || !memoryPromptBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
@@ -614,6 +617,7 @@ struct PromptRuntimeContext: Equatable {
     let sessionSummary: String
     let interactionStateJSON: String
     let identityContextLine: String?
+    let relevantMemoriesBlock: String
     let responseBudget: ResponseLengthBudget
 
     init(mode: ConversationMode,
@@ -623,6 +627,7 @@ struct PromptRuntimeContext: Equatable {
          sessionSummary: String,
          interactionStateJSON: String,
          identityContextLine: String? = nil,
+         relevantMemoriesBlock: String = "",
          responseBudget: ResponseLengthBudget) {
         self.mode = mode
         self.affect = affect
@@ -631,6 +636,7 @@ struct PromptRuntimeContext: Equatable {
         self.sessionSummary = sessionSummary
         self.interactionStateJSON = interactionStateJSON
         self.identityContextLine = identityContextLine
+        self.relevantMemoriesBlock = relevantMemoriesBlock
         self.responseBudget = responseBudget
     }
 }
@@ -1762,7 +1768,10 @@ private struct PlanRoutePolicy {
         switch openAIStatus {
         case .ready:
             guard useOllama else { return [.openai] }
-            return preferOpenAIPlans ? [.openai, .ollama] : [.ollama, .openai]
+            if preferOpenAIPlans {
+                return [.openai]
+            }
+            return [.ollama, .openai]
         case .invalid:
             return useOllama ? [.ollama] : [.none]
         case .missing:
@@ -1849,6 +1858,7 @@ final class TurnOrchestrator {
     private let maxToolFeedbackBudgetMs = 3600
     private let openAIToolFeedbackTimeoutSeconds: Double = 2.2
     private let ollamaToolFeedbackTimeoutSeconds: Double = 1.2
+    private let ollamaFallbackOpenAIModel = "gpt-5.2"
     private let unknownToolPromptCooldownSeconds: TimeInterval = 300
     private let cameraBlindnessGraceWindowSeconds: TimeInterval = 10
     private let toolRunner: TurnToolRunning
@@ -1861,6 +1871,7 @@ final class TurnOrchestrator {
     private var lastIntentClassification: IntentClassificationResult?
     private var currentTurnCaptureAfterReplyHint: Bool = false
     private var currentRoutingTask: Task<Void, Never>?
+    private var latencyTracker = LatencyTracker()
 
     var pendingSlot: PendingSlot? = nil
 
@@ -2140,6 +2151,11 @@ final class TurnOrchestrator {
 
     func processTurn(_ text: String, history: [ChatMessage], inputMode: TurnInputMode) async -> TurnResult {
         // Cancel any in-flight routing from a previous turn
+        if currentRoutingTask != nil {
+            #if DEBUG
+            print("[OPENAI_CANCEL] turn=\(turnCounter) cancelling_stale_routing_task")
+            #endif
+        }
         currentRoutingTask?.cancel()
         currentRoutingTask = nil
         turnCounter += 1
@@ -2154,6 +2170,17 @@ final class TurnOrchestrator {
         let userText = sanitized.isEmpty ? text : sanitized
         let localKnowledgeContext = buildLocalKnowledgeContext(for: userText)
         let hasMemoryHints = localKnowledgeContext.hasMemoryHints
+        if localKnowledgeContext.memoryShouldClarify,
+           let clarification = localKnowledgeContext.memoryClarificationPrompt {
+            var immediate = immediateTalkTurnResult(message: clarification)
+            immediate.llmProvider = .none
+            immediate.originProvider = .local
+            immediate.executionProvider = .local
+            immediate.originReason = "memory_confidence_clarify"
+            immediate.routerMs = 0
+            applyRoutingAttribution(&immediate, planProvider: .none, planRouterMs: 0)
+            return immediate
+        }
         let mode = ConversationModeClassifier.classify(userText)
         let identityDecision = faceGreetingManager.prepareTurn(
             userInput: userText,
@@ -2431,6 +2458,7 @@ final class TurnOrchestrator {
             userInput: userText,
             history: history,
             sessionSummary: sessionSummary,
+            memoryPromptBlock: localKnowledgeContext.memoryPromptBlock,
             now: now,
             faceIdentityContext: currentFaceIdentityContext
         )
@@ -2672,19 +2700,34 @@ final class TurnOrchestrator {
             )
         }
 
+        let baseTimeoutMs = RouterTimeouts.localCombinedDeadlineMs
+        let effectiveTimeoutMs: Int
+        if M2Settings.ollamaCombinedTimeoutIsUserOverridden {
+            effectiveTimeoutMs = baseTimeoutMs
+        } else if let adaptive = latencyTracker.adaptiveTimeoutMs(baseMs: baseTimeoutMs) {
+            effectiveTimeoutMs = adaptive
+            #if DEBUG
+            print("[TIMEOUT_ADAPT] new=\(adaptive) reason=latency_p95")
+            #endif
+        } else {
+            effectiveTimeoutMs = baseTimeoutMs
+        }
+        let effectiveTimeoutSeconds = Double(effectiveTimeoutMs) / 1000.0
+
         let localStartedAt = CFAbsoluteTimeGetCurrent()
         do {
-            let local = try await withTimeout(RouterTimeouts.localCombinedDeadlineSeconds) {
+            let local = try await withTimeout(effectiveTimeoutSeconds) {
                 try await self.ollamaRouter.routeCombinedWithTiming(
                     text,
                     history: history,
                     pendingSlot: pendingSlot,
                     promptContext: promptContext,
                     state: state,
-                    wireDeadlineMs: RouterTimeouts.localCombinedDeadlineMs
+                    wireDeadlineMs: effectiveTimeoutMs
                 )
             }
             let localMs = max(0, Int((CFAbsoluteTimeGetCurrent() - localStartedAt) * 1000))
+            latencyTracker.record(wireMs: local.timing.wireMs)
             let classification = IntentClassificationResult(
                 classification: local.result.classification,
                 provider: .ollama,
@@ -2696,7 +2739,7 @@ final class TurnOrchestrator {
                 localConfidence: local.result.classification.confidence,
                 openAIConfidence: nil,
                 confidenceThreshold: 0.7,
-                localTimeoutSeconds: RouterTimeouts.localCombinedDeadlineSeconds,
+                localTimeoutSeconds: effectiveTimeoutSeconds,
                 escalationReason: nil
             )
             let route = RouteDecision(
@@ -2711,7 +2754,30 @@ final class TurnOrchestrator {
             )
             #if DEBUG
             print("[ROUTE_DECISION] turn=\(turnCounter) chosen=local reason=combined_local_success local_outcome=ok local_ms=\(localMs)")
+            DebugLogStore.shared.logRouting(turnID: TurnExecutionContext.turnID, provider: "ollama", reason: "combined_local_success", localOutcome: "ok", durationMs: localMs)
             #endif
+            if shouldFallbackToOpenAIForLikelyMiss(
+                plan: local.result.plan,
+                classification: local.result.classification
+            ) {
+                #if DEBUG
+                print("[ROUTE_DECISION] turn=\(turnCounter) chosen=openai reason=combined_local_uncertain_openai_fallback local_outcome=uncertain_answer local_ms=\(localMs)")
+                DebugLogStore.shared.logRouting(turnID: TurnExecutionContext.turnID, provider: "openai", reason: "combined_local_uncertain_openai_fallback", localOutcome: "uncertain_answer", durationMs: localMs)
+                #endif
+                return await routeCombinedViaOpenAI(
+                    text: text,
+                    history: history,
+                    pendingSlot: pendingSlot,
+                    reason: reason,
+                    promptContext: promptContext,
+                    state: state,
+                    localMs: localMs,
+                    localOutcome: "uncertain_answer",
+                    localAttempted: true,
+                    escalationReason: "uncertain_answer",
+                    routeReason: "combined_local_uncertain_openai_fallback"
+                )
+            }
             return CombinedRouteDecision(
                 classification: classification,
                 route: route,
@@ -2729,6 +2795,7 @@ final class TurnOrchestrator {
                     : "combined_local_schema_fail_openai_fallback"
                 #if DEBUG
                 print("[ROUTE_DECISION] turn=\(turnCounter) chosen=openai reason=\(routeReason) local_outcome=\(failureKind.rawValue) local_ms=\(localMs)")
+                DebugLogStore.shared.logRouting(turnID: TurnExecutionContext.turnID, provider: "openai", reason: routeReason, localOutcome: failureKind.rawValue, durationMs: localMs)
                 #endif
                 return await routeCombinedViaOpenAI(
                     text: text,
@@ -2762,7 +2829,7 @@ final class TurnOrchestrator {
                 localConfidence: nil,
                 openAIConfidence: nil,
                 confidenceThreshold: 0.7,
-                localTimeoutSeconds: RouterTimeouts.localCombinedDeadlineSeconds,
+                localTimeoutSeconds: effectiveTimeoutSeconds,
                 escalationReason: failureKind.rawValue
             )
             let route = RouteDecision(
@@ -2837,7 +2904,11 @@ final class TurnOrchestrator {
                 throw OpenAIRouter.OpenAIError.requestFailed("combined intent parse failure")
             }
 
-            let selectedModel = selectOpenAIModel(for: text, reason: reason)
+            let selectedModel = selectOpenAIModel(
+                for: text,
+                reason: reason,
+                preferFallbackModel: localAttempted && M2Settings.useOllama
+            )
             let planDecision = try await openAIProvider.routePlanWithRetry(
                 OpenAIPlanRequest(
                     input: text,
@@ -2889,6 +2960,9 @@ final class TurnOrchestrator {
         } catch {
             let openAIMs = max(0, Int((CFAbsoluteTimeGetCurrent() - openAIStartedAt) * 1000))
             #if DEBUG
+            if error is CancellationError {
+                print("[OPENAI_CANCEL] turn=\(turnCounter) openai_task_cancelled ms=\(openAIMs)")
+            }
             print("[OPENAI_TASK] failed turn=\(turnCounter) ms=\(openAIMs) error=\(error.localizedDescription.prefix(80))")
             #endif
             let classification = IntentClassificationResult(
@@ -2988,8 +3062,7 @@ final class TurnOrchestrator {
     }
 
     /// Routes plans through PlanRoutePolicy.
-    /// Default policy: Ollama first, then OpenAI fallback when available.
-    /// Dev override `preferOpenAIPlans` can flip to OpenAI-first when a key is ready.
+    /// Policy: when Ollama is enabled, route local-first then fall back to OpenAI.
     private func routePlan(_ text: String, history: [ChatMessage],
                            pendingSlot: PendingSlot? = nil,
                            reason: LLMCallReason = .userChat,
@@ -3026,7 +3099,14 @@ final class TurnOrchestrator {
                 localWireMs = routed.timing.wireMs
                 localTotalMs = routed.timing.totalMs
                 routerLog(provider: "ollama", reason: reason.rawValue, ms: ms, ok: true)
-                return (routed.plan, .ollama, ms, nil, "ollama_local_first_success", localWireMs, localTotalMs, nil)
+                if shouldFallbackToOpenAIForLikelyMiss(plan: routed.plan, classification: nil) {
+                    #if DEBUG
+                    print("[OLLAMA_PLAN_FALLBACK] kind=uncertain_answer ms=\(ms)")
+                    #endif
+                    ollamaLocalFirstFailKind = "uncertain_answer"
+                } else {
+                    return (routed.plan, .ollama, ms, nil, "ollama_local_first_success", localWireMs, localTotalMs, nil)
+                }
             } catch {
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 let failInfo = classifyOllamaFailure(error)
@@ -3041,7 +3121,11 @@ final class TurnOrchestrator {
 
         if planRoutePolicy.routeOrder.contains(.openai) {
             let start = CFAbsoluteTimeGetCurrent()
-            let selectedModel = selectOpenAIModel(for: text, reason: reason)
+            let selectedModel = selectOpenAIModel(
+                for: text,
+                reason: reason,
+                preferFallbackModel: ollamaLocalFirstFailKind != nil && M2Settings.useOllama
+            )
             do {
                 let timeoutSeconds = openAIRouteTimeoutSecondsFor(input: text, reason: reason)
                 let planDecision = try await self.openAIProvider.routePlanWithRetry(
@@ -4317,6 +4401,7 @@ final class TurnOrchestrator {
                                            userInput: String,
                                            history: [ChatMessage],
                                            sessionSummary: String,
+                                           memoryPromptBlock: String,
                                            now: Date,
                                            faceIdentityContext: FaceIdentityContext) -> PromptRuntimeContext {
         let repetition = intentRepetitionTracker.countsByIntent(now: now)
@@ -4366,6 +4451,7 @@ final class TurnOrchestrator {
             sessionSummary: sessionSummary,
             interactionStateJSON: interactionStateJSON,
             identityContextLine: faceIdentityContext.identityPromptContextLine,
+            relevantMemoriesBlock: memoryPromptBlock,
             responseBudget: responseLengthBudget(for: mode, userInput: userInput, history: history)
         )
     }
@@ -5407,8 +5493,9 @@ final class TurnOrchestrator {
     }
 
     private func buildLocalKnowledgeContext(for input: String) -> LocalKnowledgeContext {
+        let semanticInjection = SemanticMemoryPipeline.shared.injectionContext(for: input)
         let memoryRows = fastMemoryHints(for: input, maxItems: 4, maxChars: 500)
-        let memoryItems = memoryRows.map { row in
+        let legacyMemoryItems = memoryRows.map { row in
             KnowledgeSourceSnippet(
                 kind: .memory,
                 id: row.shortID,
@@ -5417,7 +5504,13 @@ final class TurnOrchestrator {
                 url: nil
             )
         }
-        return LocalKnowledgeContext(items: dedupeKnowledgeSnippets(memoryItems))
+        let mergedItems = semanticInjection.snippets + legacyMemoryItems
+        return LocalKnowledgeContext(
+            items: dedupeKnowledgeSnippets(mergedItems),
+            memoryPromptBlock: semanticInjection.block,
+            memoryShouldClarify: semanticInjection.shouldClarify,
+            memoryClarificationPrompt: semanticInjection.clarificationPrompt
+        )
     }
 
     private func fastMemoryHints(for query: String, maxItems: Int, maxChars: Int) -> [MemoryRow] {
@@ -5626,7 +5719,10 @@ final class TurnOrchestrator {
         case .weather:
             candidateNames = ["get_weather", "weather"]
         case .news:
-            candidateNames = ["get_news", "news"]
+            let hasNewsToolPackage = ToolPackageStore.shared.isInstalled("news.basic")
+            let hasNewsSkill = SkillStore.shared.getPackage(id: "news.latest")?.signoff?.approved == true
+            let hasWebRead = PermissionScopeStore.shared.isApproved(PermissionScope.webRead.rawValue)
+            return hasNewsToolPackage && hasNewsSkill && hasWebRead
         case .sportsScores:
             candidateNames = ["get_scores", "sports_scores"]
         case .time:
@@ -5654,6 +5750,14 @@ final class TurnOrchestrator {
             "effective=\(effective.affect.rawValue):\(effective.clampedIntensity) " +
             "feature=\(featureEnabled) user_tone=\(userToneEnabled)"
         )
+        DebugLogStore.shared.logAffect(
+            turnID: TurnExecutionContext.turnID,
+            raw: raw.affect.rawValue,
+            effective: effective.affect.rawValue,
+            intensity: effective.clampedIntensity,
+            featureEnabled: featureEnabled,
+            userToneEnabled: userToneEnabled
+        )
         #endif
     }
 
@@ -5665,6 +5769,18 @@ final class TurnOrchestrator {
             "warmth=\(formatToneValue(profile.warmth)) humor=\(formatToneValue(profile.humor)) " +
             "curiosity=\(formatToneValue(profile.curiosity)) reassurance=\(formatToneValue(profile.reassurance)) " +
             "formality=\(formatToneValue(profile.formality)) hedging=\(formatToneValue(profile.hedging))"
+        )
+        DebugLogStore.shared.logToneProfile(
+            turnID: TurnExecutionContext.turnID,
+            reason: "\(outcome.source).\(outcome.reason)",
+            delta: outcome.deltaSummary,
+            directness: profile.directness,
+            warmth: profile.warmth,
+            humor: profile.humor,
+            curiosity: profile.curiosity,
+            reassurance: profile.reassurance,
+            formality: profile.formality,
+            hedging: profile.hedging
         )
         #endif
     }
@@ -5684,15 +5800,45 @@ final class TurnOrchestrator {
         return Set(values)
     }
 
-    private func selectOpenAIModel(for input: String, reason: LLMCallReason) -> String {
+    private func selectOpenAIModel(for input: String,
+                                   reason: LLMCallReason,
+                                   preferFallbackModel: Bool = false) -> String {
+        if preferFallbackModel {
+            return ollamaFallbackOpenAIModel
+        }
         let general = OpenAISettings.generalModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackGeneral = general.isEmpty ? "gpt-4o-mini" : general
+        let fallbackGeneral = general.isEmpty ? OpenAISettings.defaultPreferredModel : general
         let escalation = OpenAISettings.escalationModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackEscalation = escalation.isEmpty ? "gpt-4o" : escalation
+        let fallbackEscalation = escalation.isEmpty ? fallbackGeneral : escalation
         guard shouldUseEscalationModel(for: input, reason: reason) else {
             return fallbackGeneral
         }
         return fallbackEscalation
+    }
+
+    private func shouldFallbackToOpenAIForLikelyMiss(plan: Plan,
+                                                      classification: IntentClassification?) -> Bool {
+        guard M2Settings.useOllama, OpenAISettings.apiKeyStatus == .ready else { return false }
+
+        if let classification {
+            if classification.intent == .unknown { return true }
+            if classification.confidence < 0.45 { return true }
+        }
+
+        guard let line = singleTalkLine(from: plan)?.lowercased() else { return false }
+        let missMarkers = [
+            "i don't know",
+            "i dont know",
+            "not sure",
+            "cannot answer",
+            "can't answer",
+            "cannot find",
+            "can't find",
+            "rephrase that",
+            "rephrase your question",
+            "unable to answer"
+        ]
+        return missMarkers.contains(where: { line.contains($0) })
     }
 
     private func shouldUseEscalationModel(for input: String, reason: LLMCallReason) -> Bool {

@@ -175,6 +175,7 @@ final class RetryingOpenAIProvider: OpenAIProviderRouting {
             sessionSummary: context.sessionSummary,
             interactionStateJSON: context.interactionStateJSON,
             identityContextLine: context.identityContextLine,
+            relevantMemoriesBlock: context.relevantMemoriesBlock,
             responseBudget: reducedBudget
         )
     }

@@ -118,6 +118,65 @@ enum RouterTimeouts {
     static var localCombinedDeadlineSeconds: Double { Double(M2Settings.ollamaCombinedTimeoutMs) / 1000.0 }
 }
 
+struct LatencyTracker {
+    private static let bufferSize = 10
+    private static let adaptiveMinMs = 2000
+    private static let adaptiveMaxMs = 5000
+    private static let adjustmentMs = 200
+    private static let p95LowThresholdMs = 2200
+    private static let p95HighThresholdMs = 3300
+
+    private var samples: [Int] = []
+    var sampleCount: Int { samples.count }
+
+    mutating func record(wireMs: Int) {
+        samples.append(wireMs)
+        if samples.count > Self.bufferSize { samples.removeFirst() }
+    }
+
+    func p95() -> Int? {
+        guard samples.count >= 3 else { return nil }
+        let sorted = samples.sorted()
+        let index = Int(ceil(Double(sorted.count) * 0.95)) - 1
+        return sorted[min(index, sorted.count - 1)]
+    }
+
+    func adaptiveTimeoutMs(baseMs: Int) -> Int? {
+        guard let p95Val = p95() else { return nil }
+        if p95Val < Self.p95LowThresholdMs { return max(Self.adaptiveMinMs, baseMs - Self.adjustmentMs) }
+        if p95Val > Self.p95HighThresholdMs { return min(Self.adaptiveMaxMs, baseMs + Self.adjustmentMs) }
+        return nil
+    }
+
+    mutating func reset() { samples.removeAll() }
+}
+
+enum MediaTracePhase {
+    static let cameraLost = "CAMERA_LOST"
+    static let cameraRecovered = "CAMERA_RECOVERED"
+    static let audioOverload = "AUDIO_OVERLOAD"
+    static let audioRecovered = "AUDIO_RECOVERED"
+}
+
+@MainActor
+final class MediaTraceBuffer {
+    static let shared = MediaTraceBuffer()
+    private(set) var events: [TurnTraceEvent] = []
+    private let startedAt = CFAbsoluteTimeGetCurrent()
+
+    func record(_ name: String, data: String? = nil) {
+        let ms = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+        events.append(TurnTraceEvent(name: name, tMsFromStart: ms, data: data))
+        #if DEBUG
+        print("[TURN_TRACE] \(name) ms=\(ms)\(data.map { " data=\($0)" } ?? "")")
+        #endif
+    }
+
+    func drainEvents() -> [TurnTraceEvent] {
+        let drained = events; events.removeAll(); return drained
+    }
+}
+
 struct RouteDecision {
     let plan: Plan
     let provider: LLMProvider

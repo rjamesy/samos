@@ -1,6 +1,6 @@
 {
     "id": "alarm_v1",
-    "name": "Alarm",
+    "name": "Alarm (schedule_task)",
     "version": 1,
     "triggerPhrases": [
         "wake me up",

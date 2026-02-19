@@ -1,0 +1,11 @@
+{
+  "id": "news.basic",
+  "name": "News Basic",
+  "version": 1,
+  "permissions": [
+    "web.read"
+  ],
+  "tools": [
+    "news.fetch"
+  ]
+}

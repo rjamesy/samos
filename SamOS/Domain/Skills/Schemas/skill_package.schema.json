@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SkillPackage",
+  "type": "object",
+  "required": ["manifest", "plan", "spec", "tests"],
+  "properties": {
+    "manifest": {
+      "type": "object",
+      "required": ["skill_id", "name", "version", "origin", "created_at"],
+      "properties": {
+        "skill_id": { "type": "string" },
+        "name": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 },
+        "origin": { "type": "string", "enum": ["baseline", "forged"] },
+        "created_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "plan": { "$ref": "skill_plan.schema.json" },
+    "spec": { "$ref": "skill_spec.schema.json" },
+    "tests": { "type": "array", "items": { "type": "object" }, "minItems": 1 },
+    "signoff": {
+      "type": ["object", "null"],
+      "properties": {
+        "approved": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "required_changes": { "type": "array", "items": { "type": "string" } },
+        "risk_notes": { "type": "array", "items": { "type": "string" } },
+        "package_hash": { "type": "string" },
+        "model": { "type": "string" },
+        "approved_at": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

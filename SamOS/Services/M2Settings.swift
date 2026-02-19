@@ -20,6 +20,7 @@ enum M2Settings {
         static let affectMirroringEnabled = "m3_affectMirroringEnabled"
         static let useEmotionalTone = "m3_useEmotionalTone"
         static let toneLearningNoticeShown = "m3_toneLearningNoticeShown"
+        static let developerModeEnabled = "m3_developerModeEnabled"
         static let faceRecognitionEnabled = "m3_faceRecognitionEnabled"
         static let personalizedGreetingsEnabled = "m3_personalizedGreetingsEnabled"
         static let useOllama = "m3_useOllama"
@@ -31,6 +32,8 @@ enum M2Settings {
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
         static let ollamaCombinedTimeoutMs = "m3_ollamaCombinedTimeoutMs"
+        static let samGatewayURL = "sam_gatewayURL"
+        static let samSessionId = "sam_sessionId"
     }
 
     private static let defaults = UserDefaults.standard
@@ -199,6 +202,13 @@ enum M2Settings {
         set { defaults.set(newValue, forKey: Key.toneLearningNoticeShown) }
     }
 
+    /// Enables developer-only settings and diagnostics in the Settings UI.
+    /// Defaults to false.
+    static var developerModeEnabled: Bool {
+        get { defaults.bool(forKey: Key.developerModeEnabled) }
+        set { defaults.set(newValue, forKey: Key.developerModeEnabled) }
+    }
+
     static var faceRecognitionEnabled: Bool {
         get {
             if defaults.object(forKey: Key.faceRecognitionEnabled) == nil { return true }
@@ -297,6 +307,31 @@ enum M2Settings {
             return min(10000, max(500, value))
         }
         set { defaults.set(min(10000, max(500, newValue)), forKey: Key.ollamaCombinedTimeoutMs) }
+    }
+
+    static var ollamaCombinedTimeoutIsUserOverridden: Bool {
+        defaults.object(forKey: Key.ollamaCombinedTimeoutMs) != nil
+    }
+
+    // MARK: - Sam Gateway
+
+    /// Base URL for the Sam gateway (e.g. "http://localhost:8002").
+    /// When non-empty, all user input is routed to the gateway instead of
+    /// the local Ollama/OpenAI pipeline.
+    static var samGatewayURL: String {
+        get { defaults.string(forKey: Key.samGatewayURL) ?? "" }
+        set { defaults.set(newValue, forKey: Key.samGatewayURL) }
+    }
+
+    /// Persisted session ID so conversation continues across app launches.
+    static var samSessionId: String {
+        get { defaults.string(forKey: Key.samSessionId) ?? "" }
+        set { defaults.set(newValue, forKey: Key.samSessionId) }
+    }
+
+    /// True when the Sam gateway is configured and should be used.
+    static var useSamGateway: Bool {
+        !samGatewayURL.isEmpty
     }
 
     // MARK: - Validation

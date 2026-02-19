@@ -471,8 +471,18 @@ enum PromptBuilder {
             }
         }
 
-        // Keep local context deterministic and fast; runtime summary/state is injected separately.
-        let memoryHintLines = ["- memory_hint: []"]
+        // Memory hints are pre-compressed and injected from semantic memory retrieval.
+        let memoryHintLines: [String]
+        let memoryBlock = promptContext?.relevantMemoriesBlock.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if memoryBlock.isEmpty {
+            memoryHintLines = ["- memory_hint: []"]
+        } else {
+            let lines = memoryBlock
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            memoryHintLines = lines.map { "- memory_hint: \($0.replacingOccurrences(of: "\"", with: "'"))" }
+        }
         let selfLessonLines = ["- self_learning: []"]
 
         let websiteHints = gatedWebsiteLearningContext(query: input, maxItems: includeLongToolExamples ? 10 : 6, maxChars: 1200)

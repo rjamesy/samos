@@ -1,0 +1,88 @@
+{
+  "tools": [
+    {
+      "name": "news.fetch",
+      "description": "Fetch latest headlines from trusted RSS feeds with recency and dedupe.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topics": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "time_window_hours": {
+            "type": "integer",
+            "default": 24
+          },
+          "max_items": {
+            "type": "integer",
+            "default": 15
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "generated_at",
+          "items"
+        ],
+        "properties": {
+          "generated_at": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "source",
+                "url"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "published_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

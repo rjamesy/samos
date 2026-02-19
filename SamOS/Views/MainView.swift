@@ -7,11 +7,16 @@ struct MainView: View {
         VStack(spacing: 0) {
             // Two-pane split
             HSplitView {
-                // Left pane: Chat
+                #if DEBUG
+                DebugPanelView()
+                    .frame(minWidth: 220, idealWidth: 280, maxWidth: 400)
+                #endif
+
+                // Chat pane
                 ChatPaneView()
                     .frame(minWidth: 300, idealWidth: 400)
 
-                // Right pane: Output Canvas
+                // Output Canvas
                 OutputCanvasView()
                     .frame(minWidth: 300, idealWidth: 500)
             }
