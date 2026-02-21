@@ -153,4 +153,57 @@ final class ToolNormalizationTests: XCTestCase {
         XCTAssertEqual(runtime.actions.last?.args["place"], "Brisbane")
         XCTAssertNil(result.pendingSlotRequest)
     }
+
+    func testScheduleTaskTimerRewritesToTimerManage() async {
+        let runtime = RuntimeStub()
+        runtime.outputs["timer.manage"] = OutputItem(
+            kind: .markdown,
+            payload: #"{"spoken":"Timer set for 10 seconds.","formatted":"Timer set for 10 seconds."}"#
+        )
+
+        let executor = PlanExecutor(toolsRuntime: runtime, speechCoordinator: PassthroughSpeechSelector())
+
+        let plan = Plan(steps: [
+            .tool(
+                name: "schedule_task",
+                args: [
+                    "type": .string("timer"),
+                    "duration_seconds": .int(10)
+                ],
+                say: nil
+            )
+        ])
+
+        let result = await executor.execute(plan, originalInput: "set timer 10 seconds", pendingSlotName: nil)
+
+        XCTAssertEqual(runtime.actions.first?.name, "timer.manage")
+        XCTAssertEqual(runtime.actions.first?.args["action"], "start")
+        XCTAssertEqual(runtime.actions.first?.args["duration_seconds"], "10")
+        XCTAssertEqual(result.executedToolSteps.first?.name, "timer.manage")
+    }
+
+    func testScheduleTaskTimerInfersDurationFromInputWhenModelOmittedSeconds() async {
+        let runtime = RuntimeStub()
+        runtime.outputs["timer.manage"] = OutputItem(
+            kind: .markdown,
+            payload: #"{"spoken":"Timer set for 10 seconds.","formatted":"Timer set for 10 seconds."}"#
+        )
+
+        let executor = PlanExecutor(toolsRuntime: runtime, speechCoordinator: PassthroughSpeechSelector())
+
+        let plan = Plan(steps: [
+            .tool(
+                name: "schedule_task",
+                args: [
+                    "type": .string("timer")
+                ],
+                say: nil
+            )
+        ])
+
+        _ = await executor.execute(plan, originalInput: "set timer 10 seconds", pendingSlotName: nil)
+
+        XCTAssertEqual(runtime.actions.first?.name, "timer.manage")
+        XCTAssertEqual(runtime.actions.first?.args["duration_seconds"], "10")
+    }
 }

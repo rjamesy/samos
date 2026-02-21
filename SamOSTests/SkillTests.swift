@@ -210,9 +210,16 @@ final class SkillTests: XCTestCase {
     func testRuntimeBaselinePackagesExcludeDemoSkills() {
         let full = SkillStore.baselinePackages()
         let runtimeOnly = SkillStore.baselinePackages(includeDemoPackages: false)
+        let expectedRuntimeIDs = [
+            "news.latest",
+            "fishing.report",
+            "price.woolworths",
+            "price.cheapest_online",
+            "timer.named"
+        ]
 
         XCTAssertGreaterThanOrEqual(full.count, 3)
-        XCTAssertEqual(runtimeOnly.map(\.manifest.skillID), ["news.latest"])
+        XCTAssertEqual(runtimeOnly.map(\.manifest.skillID).sorted(), expectedRuntimeIDs.sorted())
     }
 
     func testSkillCapabilityLinkStoreRoundTrip() {
@@ -233,6 +240,46 @@ final class SkillTests: XCTestCase {
     func testCapabilityCatalogSearchFindsNewsCapability() {
         let results = CapabilityCatalog.shared.search("latest news", limit: 10)
         XCTAssertTrue(results.contains(where: { $0.id == "news.basic" }))
+    }
+
+    func testCapabilityCatalogSearchFindsMoviesCapability() {
+        let results = CapabilityCatalog.shared.search("springfield movie showtimes", limit: 10)
+        XCTAssertTrue(results.contains(where: { $0.id == "movies.basic" }))
+    }
+
+    func testToolPermissionCatalogMapsMoviesShowtimesToMoviesBasic() {
+        XCTAssertEqual(ToolPermissionCatalog.packageID(for: "movies.showtimes"), "movies.basic")
+        XCTAssertEqual(ToolPermissionCatalog.requiredPermissions(for: "movies.showtimes"), ["web.read"])
+    }
+
+    func testMovieShowtimesParserExtractsTitlesAndSessions() {
+        let html = """
+        <div class="movie">
+          <div><span class="movie-title">Movie One</span></div>
+          <div class="session-days"><b>Fri </b>
+            <span>4:20<span class="ampm">PM</span></span>
+            <span>6:00<span class="ampm">PM</span></span>
+          </div>
+          <div class="session-days"><b>Sat </b>
+            <span>10:05<span class="ampm">AM</span></span>
+          </div>
+        </div>
+        <div class="movie">
+          <div><span class="movie-title">Movie Two</span></div>
+          <div class="session-days"><b>Fri </b>
+            <span>8:30<span class="ampm">PM</span></span>
+          </div>
+        </div>
+        """
+
+        let all = MovieShowtimesParser.parse(html: html)
+        XCTAssertEqual(all.count, 2)
+        XCTAssertTrue(all.contains(where: { $0.title == "Movie One" && $0.sessions.contains("Fri 4:20 PM") }))
+        XCTAssertTrue(all.contains(where: { $0.title == "Movie Two" && $0.sessions.contains("Fri 8:30 PM") }))
+
+        let fridayOnly = MovieShowtimesParser.parse(html: html, dayFilter: "fri")
+        XCTAssertEqual(fridayOnly.count, 2)
+        XCTAssertFalse(fridayOnly.flatMap(\.sessions).contains(where: { $0.contains("Sat") }))
     }
 
     func testCapabilityMetadataOverridePersists() {

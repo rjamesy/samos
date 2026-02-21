@@ -1,0 +1,10 @@
+{
+  "id": "pricing.basic",
+  "name": "Price Lookup",
+  "tools": [
+    "price.lookup"
+  ],
+  "permissions": [
+    "web.read"
+  ]
+}

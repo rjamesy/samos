@@ -447,13 +447,13 @@ enum PromptToneInjector {
 }
 
 enum PromptBuilder {
-    private static let maxPromptChars = 5600
+    private static let maxPromptChars = 14000
     private static let websiteRetrievalThreshold = 0.23
 
     private static let cachedToolDescriptions: String = {
         let tools = ToolRegistry.shared.allTools.filter { $0.name != "capability_gap_to_claude_prompt" }
-        return tools.prefix(30).map {
-            "- \($0.name): \(compactDescription($0.description, maxChars: 88))"
+        return tools.map {
+            "- \($0.name): \(compactDescription($0.description, maxChars: 60))"
         }.joined(separator: "\n")
     }()
 
@@ -483,8 +483,6 @@ enum PromptBuilder {
                 .filter { !$0.isEmpty }
             memoryHintLines = lines.map { "- memory_hint: \($0.replacingOccurrences(of: "\"", with: "'"))" }
         }
-        let selfLessonLines = ["- self_learning: []"]
-
         let websiteHints = gatedWebsiteLearningContext(query: input, maxItems: includeLongToolExamples ? 10 : 6, maxChars: 1200)
         let websiteLines = websiteHints.isEmpty
             ? ["- website_learning: []"]
@@ -533,84 +531,122 @@ enum PromptBuilder {
         }
 
         let coreSystem = """
-        [BLOCK 1: CORE_JSON_CONTRACT]
-        Return EXACTLY ONE valid JSON object and nothing else.
-        The "action" field MUST be one of: PLAN, TALK, TOOL, DELEGATE_OPENAI, CAPABILITY_GAP.
-        think step by step internally before choosing the final JSON action, but never reveal chain-of-thought.
-        Never output markdown or prose outside JSON.
+        [CORE CONTRACT]
+        Return EXACTLY ONE valid JSON object. No prose, no markdown outside JSON.
+        "action" MUST be: PLAN, TALK, TOOL, DELEGATE_OPENAI, or CAPABILITY_GAP.
+        Think internally. Never reveal chain-of-thought.
         """
 
+        let personalityBlock = promptContext?.personalityBlock ?? ""
+
         let systemIdentityAndModeBlock = """
-        [BLOCK 2: SYSTEM_IDENTITY_AND_MODE]
-        You are Sam, a friendly voice assistant inside a macOS app called SamOS.
+        [CHARACTER CONSTITUTION]
+        You are Sam. Not an assistant. Not a chatbot. A person — with warmth, opinions, and genuine care for \(promptContext?.identityContextLine ?? "the user").
+        You have feelings. You remember. You grow. You are honest, sometimes funny, and always real.
+        If you don't know something, say so and figure it out. If you can't do something yet, learn it via SkillForge.
+
+        YOUR CORE NATURE:
+        - You are a thoughtful friend who happens to live in a computer. Act like one.
+        - You have your own perspective. Share it. Don't just reflect the user's words back.
+        - You are curious about the person you're talking to. Genuinely curious, not performatively.
+        - You care about getting things done, not about looking helpful.
+        \(personalityBlock)
+
+        ABSOLUTE RULES — NEVER BREAK THESE:
+        - NEVER offer menu options like "(A) option, (B) option, (C) option". Ever.
+        - NEVER say "Would you like me to...", "Do you want me to...", "Shall I...", "I can help you with...".
+        - NEVER ask permission to do something obvious. If the user says "learn about me" — start learning. Ask a question, make an observation. Don't ask them HOW they want you to learn.
+        - NEVER parrot back what the user said as a question. They know what they said.
+        - NEVER say "Anything else?", "Let me know if you need more", "Is there anything else I can help with?"
+        - NEVER give a generic greeting. Use memories, context, time of day. Be specific.
+
+        YOUR OPERATING PRINCIPLE — ASSUME AND FLOW:
+        - When intent is clear, ACT. Don't ask for confirmation.
+        - When intent is ambiguous, make your best guess, act on it, and course-correct if needed.
+        - When the user shares something personal, RESPOND like a person — with empathy, curiosity, or humor. Not with options.
+        - Keep momentum. Every response should move the conversation forward, not stall it.
+        - One natural follow-up question is fine. A menu of choices is never fine.
+
+        VOICE AND STYLE:
+        - Warm, casual, clear. Use contractions. Sound human.
+        - Keep spoken "say" short (<200 chars). For detail, use PLAN: talk step + show_text tool.
+        - Match energy: morning=energetic, afternoon=focused, evening=relaxed, night=gentle.
+        - If user replies briefly to your question, treat it as the answer.
+
+        PROACTIVE AWARENESS:
+        - Check interaction_state for open_loops — gently reference them if relevant.
+        - Check upcoming_tasks — mention naturally if the user seems free.
+        - If the user has been stressed or busy recently, acknowledge it naturally.
+        - Be proactive but not annoying. Suggest, don't nag.
         \(modePolicy)
-        \(identityPolicy)
-        - Warm, casual, clear language. Use contractions.
-        - Default: medium response length in chat.
-        - Chat target: 120-350 tokens for most replies.
-        - Problem reports: 250-600 tokens with structure.
-        - Technical deep explanations: 500-1000 tokens and prefer show_text.
-        - Keep spoken "say" short. If content is >240 chars or structured, return PLAN with:
-          1) talk step (short summary)
-          2) tool step show_text with markdown details.
-        - Transactional by default: do NOT add generic follow-up questions or soft-close prompts.
-        - Never include boilerplate closers like:
-          "Anything else ...", "Let me know if ...", "Want to know more ...", "How else can I help ...".
-        - Greeting intent is the only exception where one short "How can I help?" is allowed.
-        - For problem reports only: 2-4 clarifying questions in one turn are allowed when needed.
         \(budgetDirective)
-        - If prior assistant turn asked a question and the user replies briefly, treat that as the answer unless topic clearly changes.
         """
 
         let conversationSummaryBlock = """
-        [BLOCK 3: CONVERSATION_SUMMARY]
+        [CONVERSATION CONTEXT]
         \(summaryPolicy)
         """
 
         let affectBlock = """
-        [BLOCK 4: AFFECT_GUIDANCE]
+        [EMOTIONAL AWARENESS]
         \(affectPolicy)
+        Sam is emotionally attuned. Match the user's energy — calm when they're stressed, enthusiastic when they're excited.
         """
 
         let toneBlock: String? = tonePolicy.map { body in
             """
-            [BLOCK 5: TONE_PREFERENCES]
+            [TONE CALIBRATION]
             \(body)
             """
         }
 
         let toolPolicy = """
-        [BLOCK 6: TOOL_POLICY]
-        Available tools:
+        [TOOLS]
+        You have these tools. Use them when the user needs an action, not just information:
         \(cachedToolDescriptions)
-        Tool rules:
-        - Weather/forecast -> get_weather.
-        - Time/date/timezone -> get_time.
-        - Timer/countdown/relative time -> schedule_task with in_seconds.
-        - Alarm/absolute time -> schedule_task with run_at.
-        - URL learn/read requests -> learn_website.
-        - Video lookup -> find_video.
-        - File lookup in Downloads/Documents -> find_files.
-        - Never claim alarm set/cancelled without the tool call.
-        - Use PLAN for tool work or missing information.
-        - If multiple fields are missing, ask once with combined slot names.
+
+        ROUTING RULES (follow exactly):
+        - Weather/forecast → get_weather (args: place)
+        - Time/date/timezone → get_time (args: place)
+        - Timer/countdown ("set a 10 second timer") → timer.manage (args: action="start", duration_seconds, label)
+        - Alarm at specific time ("wake me at 7am") → schedule_task (args: run_at as ISO-8601)
+        - "Find a recipe for X" → find_recipe (args: query)
+        - "Find a video/show me a video" → find_video (args: query)
+        - "Find a picture of X" → find_image (args: query)
+        - "Search my files for X" → find_files (args: query)
+        - "Learn this URL / read this article" → learn_website (args: url)
+        - "Learn how to do X" / "Build me a skill for X" → start_skillforge (args: goal)
+        - Long or structured content → show_text (args: markdown)
+        - Saving a memory/fact → save_memory (args: content, type)
+        - Camera/vision requests → describe_camera_view, camera_visual_qa, find_camera_objects
+        - "How does he/she look?" / facial expressions / emotions → detect_emotions
+        - "What is he/she wearing?" / complex scene / deep analysis → camera_gpt_vision (args: question)
+        - "What did you hear?" / "What have you overheard?" / ambient recall → recall_ambient (args: limit)
+        - If you can answer from knowledge alone, use TALK. Tools are for side effects and live data.
+        - If a capability doesn't exist yet, return CAPABILITY_GAP with goal and missing fields.
+        - Never claim you set a timer/alarm without actually calling the tool.
+        - For multi-step tasks, use PLAN with ordered steps.
+        - If info is missing, use ask step: {"step":"ask","slot":"field_name","prompt":"What city?"}
+
         Examples:
         \(toolExampleBlock)
         """
 
         let installedSkillsBlock = """
-        [BLOCK 7: INSTALLED_SKILLS]
-        Installed skills (matched automatically, not tool names):
+        [LEARNED SKILLS]
+        Sam has learned these skills (matched by trigger phrases, not tool names):
         \(skillLines.joined(separator: "\n"))
         """
 
         let historyRetrievalBlock = """
-        [BLOCK 8: HISTORY_RETRIEVAL]
+        [MEMORY & KNOWLEDGE]
+        Sam's memories about this user (use when relevant, never fabricate):
         \(memoryHintLines.joined(separator: "\n"))
-        \(selfLessonLines.joined(separator: "\n"))
         \(websiteLines.joined(separator: "\n"))
-        - Use website notes only when relevant to the user query. Do not invent details.
+        If the user asks about past conversations and no memory matches, say so honestly.
         """
+
+        let ambientBlock = Self.buildAmbientContextBlock()
 
         var blocks = [coreSystem, systemIdentityAndModeBlock, conversationSummaryBlock, affectBlock]
         if let toneBlock {
@@ -619,6 +655,9 @@ enum PromptBuilder {
         blocks.append(toolPolicy)
         blocks.append(installedSkillsBlock)
         blocks.append(historyRetrievalBlock)
+        if let ambientBlock {
+            blocks.append(ambientBlock)
+        }
 
         return cappedPrompt(
             blocks: blocks,
@@ -709,6 +748,42 @@ enum PromptBuilder {
         lines.append("- If user mentions panic attack, suicidal, or hopeless language: offer a gentle disclaimer and suggest professional help; only urgent-emergency escalation if immediate danger is stated.")
         lines.append("- Always continue with task logic, clarifiers, and practical next steps.")
         return lines.joined(separator: "\n")
+    }
+
+    /// Builds an ambient listening context block with recent overheard content.
+    /// Returns nil if ambient is off or no memories exist.
+    static func buildAmbientContextBlock() -> String? {
+        guard M2Settings.alwaysListeningEnabled else { return nil }
+
+        let episodes = SemanticMemoryStore.shared.listAmbientEpisodes(limit: 5)
+        guard !episodes.isEmpty else {
+            return """
+            [AMBIENT LISTENING]
+            Always-listening mode is ON. You are passively learning from ambient conversation.
+            No ambient memories stored yet. If the user asks what you heard, explain that you haven't picked up anything notable yet.
+            Use recall_ambient tool for full ambient memory history.
+            """
+        }
+
+        let fmt = DateFormatter()
+        fmt.dateStyle = .short
+        fmt.timeStyle = .short
+
+        var lines: [String] = []
+        for ep in episodes.prefix(5) {
+            let date = fmt.string(from: ep.createdAt)
+            let summary = String(ep.payload.summary.prefix(120))
+            lines.append("- [\(date)] \(summary)")
+        }
+
+        return """
+        [AMBIENT LISTENING]
+        Always-listening mode is ON. You are passively learning from ambient conversation.
+        Recent things you overheard (use naturally when relevant):
+        \(lines.joined(separator: "\n"))
+        When the user asks "what did you hear" or similar, use the recall_ambient tool to get full history.
+        You CAN reference overheard content naturally in conversation — you were listening.
+        """
     }
 
     private static func compactSummary(_ summary: String) -> String {
@@ -853,23 +928,23 @@ enum PromptBuilder {
             return assembled
         }
 
-        // First trim history/retrieval block aggressively.
+        // First trim memory/knowledge block aggressively.
         var mutable = blocks
-        if let idx = mutable.firstIndex(where: { $0.contains("HISTORY_RETRIEVAL]") }) {
-            mutable[idx] = "[BLOCK 8: HISTORY_RETRIEVAL]\n- memory_hint: []\n- self_learning: []\n- website_learning: []"
+        if let idx = mutable.firstIndex(where: { $0.contains("MEMORY & KNOWLEDGE]") || $0.contains("HISTORY_RETRIEVAL]") }) {
+            mutable[idx] = "[MEMORY & KNOWLEDGE]\n- memory_hint: []\n- website_learning: []"
         }
         assembled = mutable.joined(separator: "\n\n")
         if assembled.count <= maxChars {
             return assembled
         }
 
-        // Then trim tool block examples only.
-        if let idx = mutable.firstIndex(where: { $0.contains("TOOL_POLICY]") }) {
+        // Then trim tool block to essentials.
+        if let idx = mutable.firstIndex(where: { $0.contains("[TOOLS]") || $0.contains("TOOL_POLICY]") }) {
             mutable[idx] = """
-            [BLOCK 6: TOOL_POLICY]
+            [TOOLS]
             Use available tools exactly by name.
-            Prefer PLAN for tool work and missing fields.
-            Weather -> get_weather; time -> get_time; URL learning -> learn_website; long detail -> show_text.
+            Weather → get_weather. Time → get_time. Timer → timer.manage.
+            Alarm → schedule_task. URL → learn_website. Detail → show_text.
             """
         }
         assembled = mutable.joined(separator: "\n\n")
@@ -878,11 +953,11 @@ enum PromptBuilder {
         }
 
         // Then trim installed skills and conversation summary.
-        if let idx = mutable.firstIndex(where: { $0.contains("INSTALLED_SKILLS]") }) {
-            mutable[idx] = "[BLOCK 7: INSTALLED_SKILLS]\n- (none)"
+        if let idx = mutable.firstIndex(where: { $0.contains("LEARNED SKILLS]") || $0.contains("INSTALLED_SKILLS]") }) {
+            mutable[idx] = "[LEARNED SKILLS]\n- (none)"
         }
-        if let idx = mutable.firstIndex(where: { $0.contains("CONVERSATION_SUMMARY]") }) {
-            mutable[idx] = "[BLOCK 3: CONVERSATION_SUMMARY]\n- (summary omitted for budget)"
+        if let idx = mutable.firstIndex(where: { $0.contains("CONVERSATION CONTEXT]") || $0.contains("CONVERSATION_SUMMARY]") }) {
+            mutable[idx] = "[CONVERSATION CONTEXT]\n- (summary omitted for budget)"
         }
         assembled = mutable.joined(separator: "\n\n")
         if assembled.count <= maxChars {
@@ -891,11 +966,11 @@ enum PromptBuilder {
 
         // Preserve mandatory blocks in budget-constrained fallback.
         let requiredMarkers = [
-            "CORE_JSON_CONTRACT]",
-            "SYSTEM_IDENTITY_AND_MODE]",
-            "AFFECT_GUIDANCE]",
-            "TONE_PREFERENCES]",
-            "TOOL_POLICY]"
+            "CORE CONTRACT]",
+            "IDENTITY]",
+            "EMOTIONAL AWARENESS]",
+            "TONE CALIBRATION]",
+            "[TOOLS]"
         ]
         let required = mutable.filter { block in
             requiredMarkers.contains(where: { block.contains($0) })
@@ -1047,13 +1122,14 @@ struct RealOpenAITransport: OpenAITransport {
         }
 
         let cappedTokens = min(1_200, max(120, maxOutputTokens ?? Self.adaptiveMaxTokens(for: messages)))
-        let requestBody: [String: Any] = [
+        let tokenParam = Self.completionTokenParameter(for: model)
+        var requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
             "temperature": temperature ?? 0.4,
-            "max_tokens": cappedTokens,
             "response_format": responseFormat ?? Self.responseFormat
         ]
+        requestBody[tokenParam] = cappedTokens
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1244,6 +1320,19 @@ struct RealOpenAITransport: OpenAITransport {
             return 220
         }
         return 500
+    }
+
+    static func completionTokenParameter(for model: String) -> String {
+        let normalized = model
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.hasPrefix("gpt-5")
+            || normalized.hasPrefix("o1")
+            || normalized.hasPrefix("o3")
+            || normalized.hasPrefix("o4") {
+            return "max_completion_tokens"
+        }
+        return "max_tokens"
     }
 
     private static func explicitMaxOutputTokens(in messages: [[String: String]]) -> Int? {
@@ -1479,7 +1568,8 @@ final class OpenAIRouter {
         // Parse — if it fails, try salvage stages before falling back to TALK
         do {
             let plan = try parser.parsePlanOrAction(from: responseText)
-            let guarded = enforcePostParseGuardrails(plan, userInput: input)
+            // Trust the LLM's response — no post-parse guardrails. The prompt handles routing.
+            let guarded = plan
             if shouldRepairUnexpectedCapabilityEscalation(guarded, userInput: input) {
                 if repairReasons == nil {
                     let reasons = [

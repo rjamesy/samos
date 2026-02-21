@@ -143,6 +143,33 @@ struct SkillManifest: Codable, Equatable {
 struct SkillToolRequirement: Codable, Equatable {
     var name: String
     var permissions: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case permissions
+    }
+
+    private enum DecodingKeys: String, CodingKey {
+        case name
+        case permissions
+        case tool
+        case id
+    }
+
+    init(name: String, permissions: [String]) {
+        self.name = name
+        self.permissions = permissions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DecodingKeys.self)
+        let resolvedName = try container.decodeIfPresent(String.self, forKey: .name)
+            ?? container.decodeIfPresent(String.self, forKey: .tool)
+            ?? container.decodeIfPresent(String.self, forKey: .id)
+            ?? "unknown_tool"
+        self.name = resolvedName
+        self.permissions = try container.decodeIfPresent([String].self, forKey: .permissions) ?? []
+    }
 }
 
 struct SkillConversationPolicy: Codable, Equatable {
@@ -152,6 +179,17 @@ struct SkillConversationPolicy: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case tone
         case safetyConstraints = "safety_constraints"
+    }
+
+    init(tone: String, safetyConstraints: [String]) {
+        self.tone = tone
+        self.safetyConstraints = safetyConstraints
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.tone = try container.decodeIfPresent(String.self, forKey: .tone) ?? "neutral"
+        self.safetyConstraints = try container.decodeIfPresent([String].self, forKey: .safetyConstraints) ?? []
     }
 }
 
@@ -196,6 +234,24 @@ final class SkillJSONSchemaProperty: Codable, Equatable {
         self.additionalProperties = additionalProperties
     }
 
+    required convenience init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decodeIfPresent(SkillJSONScalarType.self, forKey: .type) ?? .object
+        let required = try container.decodeIfPresent([String].self, forKey: .required) ?? []
+        let properties = try container.decodeIfPresent([String: SkillJSONSchemaProperty].self, forKey: .properties) ?? [:]
+        let items = try container.decodeIfPresent(SkillJSONSchemaProperty.self, forKey: .items)
+        let enumValues = try container.decodeIfPresent([String].self, forKey: .enumValues)
+        let additionalProperties = try container.decodeIfPresent(Bool.self, forKey: .additionalProperties) ?? false
+        self.init(
+            type: type,
+            required: required,
+            properties: properties,
+            items: items,
+            enumValues: enumValues,
+            additionalProperties: additionalProperties
+        )
+    }
+
     static func == (lhs: SkillJSONSchemaProperty, rhs: SkillJSONSchemaProperty) -> Bool {
         lhs.type == rhs.type &&
             lhs.required == rhs.required &&
@@ -227,6 +283,17 @@ struct SkillTestCase: Codable, Equatable {
         case shouldFail = "should_fail"
     }
 
+    private enum DecodingKeys: String, CodingKey {
+        case name
+        case inputText = "input_text"
+        case input
+        case expected
+        case mustCallTools = "must_call_tools"
+        case mustNotCallTools = "must_not_call_tools"
+        case maxSteps = "max_steps"
+        case shouldFail = "should_fail"
+    }
+
     init(name: String,
          inputText: String,
          expected: [String: SkillJSONValue] = [:],
@@ -242,6 +309,19 @@ struct SkillTestCase: Codable, Equatable {
         self.maxSteps = maxSteps
         self.shouldFail = shouldFail
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DecodingKeys.self)
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? "case"
+        self.inputText = try container.decodeIfPresent(String.self, forKey: .inputText)
+            ?? container.decodeIfPresent(String.self, forKey: .input)
+            ?? ""
+        self.expected = try container.decodeIfPresent([String: SkillJSONValue].self, forKey: .expected) ?? [:]
+        self.mustCallTools = try container.decodeIfPresent([String].self, forKey: .mustCallTools) ?? []
+        self.mustNotCallTools = try container.decodeIfPresent([String].self, forKey: .mustNotCallTools) ?? []
+        self.maxSteps = try container.decodeIfPresent(Int.self, forKey: .maxSteps)
+        self.shouldFail = try container.decodeIfPresent(Bool.self, forKey: .shouldFail) ?? false
+    }
 }
 
 struct SkillPlan: Codable, Equatable {
@@ -255,6 +335,26 @@ struct SkillPlan: Codable, Equatable {
     var conversationPolicy: SkillConversationPolicy
     var testCases: [SkillTestCase]
 
+    init(skillID: String,
+         name: String,
+         version: Int,
+         intentPatterns: [String],
+         inputsSchema: SkillJSONSchema,
+         outputsSchema: SkillJSONSchema,
+         toolRequirements: [SkillToolRequirement],
+         conversationPolicy: SkillConversationPolicy,
+         testCases: [SkillTestCase]) {
+        self.skillID = skillID
+        self.name = name
+        self.version = version
+        self.intentPatterns = intentPatterns
+        self.inputsSchema = inputsSchema
+        self.outputsSchema = outputsSchema
+        self.toolRequirements = toolRequirements
+        self.conversationPolicy = conversationPolicy
+        self.testCases = testCases
+    }
+
     enum CodingKeys: String, CodingKey {
         case skillID = "skill_id"
         case name
@@ -265,6 +365,90 @@ struct SkillPlan: Codable, Equatable {
         case toolRequirements = "tool_requirements"
         case conversationPolicy = "conversation_policy"
         case testCases = "test_cases"
+    }
+
+    private enum DecodingKeys: String, CodingKey {
+        case skillID = "skill_id"
+        case id
+        case name
+        case title
+        case version
+        case intentPatterns = "intent_patterns"
+        case triggerPhrases = "trigger_phrases"
+        case inputsSchema = "inputs_schema"
+        case inputSchema = "input_schema"
+        case outputsSchema = "outputs_schema"
+        case outputSchema = "output_schema"
+        case toolRequirements = "tool_requirements"
+        case tools
+        case conversationPolicy = "conversation_policy"
+        case testCases = "test_cases"
+        case tests
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DecodingKeys.self)
+        let rawName = try container.decodeIfPresent(String.self, forKey: .name)
+            ?? container.decodeIfPresent(String.self, forKey: .title)
+            ?? "Skill"
+        let rawID = try container.decodeIfPresent(String.self, forKey: .skillID)
+            ?? container.decodeIfPresent(String.self, forKey: .id)
+            ?? rawName
+        self.skillID = SkillPlan.normalizedSkillID(rawID)
+        self.name = rawName
+        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        self.intentPatterns = try container.decodeIfPresent([String].self, forKey: .intentPatterns)
+            ?? container.decodeIfPresent([String].self, forKey: .triggerPhrases)
+            ?? []
+        self.inputsSchema = try container.decodeIfPresent(SkillJSONSchema.self, forKey: .inputsSchema)
+            ?? container.decodeIfPresent(SkillJSONSchema.self, forKey: .inputSchema)
+            ?? SkillPlan.defaultInputSchema()
+        self.outputsSchema = try container.decodeIfPresent(SkillJSONSchema.self, forKey: .outputsSchema)
+            ?? container.decodeIfPresent(SkillJSONSchema.self, forKey: .outputSchema)
+            ?? SkillPlan.defaultOutputSchema()
+        if let toolRequirements = try container.decodeIfPresent([SkillToolRequirement].self, forKey: .toolRequirements) {
+            self.toolRequirements = toolRequirements
+        } else if let toolRequirements = try container.decodeIfPresent([SkillToolRequirement].self, forKey: .tools) {
+            self.toolRequirements = toolRequirements
+        } else if let toolNames = try container.decodeIfPresent([String].self, forKey: .tools) {
+            self.toolRequirements = toolNames.map { SkillToolRequirement(name: $0, permissions: []) }
+        } else {
+            self.toolRequirements = []
+        }
+        self.conversationPolicy = try container.decodeIfPresent(SkillConversationPolicy.self, forKey: .conversationPolicy)
+            ?? SkillConversationPolicy(tone: "neutral", safetyConstraints: [])
+        self.testCases = try container.decodeIfPresent([SkillTestCase].self, forKey: .testCases)
+            ?? container.decodeIfPresent([SkillTestCase].self, forKey: .tests)
+            ?? []
+    }
+
+    private static func defaultInputSchema() -> SkillJSONSchema {
+        SkillJSONSchema(
+            type: .object,
+            required: ["text"],
+            properties: [
+                "text": SkillJSONSchema(type: .string)
+            ],
+            additionalProperties: false
+        )
+    }
+
+    private static func defaultOutputSchema() -> SkillJSONSchema {
+        SkillJSONSchema(
+            type: .object,
+            required: ["text"],
+            properties: [
+                "text": SkillJSONSchema(type: .string)
+            ],
+            additionalProperties: false
+        )
+    }
+
+    private static func normalizedSkillID(_ raw: String) -> String {
+        let lowered = raw.lowercased()
+        let pieces = lowered.components(separatedBy: CharacterSet.alphanumerics.inverted)
+        let joined = pieces.filter { !$0.isEmpty }.joined(separator: "_")
+        return joined.isEmpty ? "skill_generated" : joined
     }
 }
 

@@ -210,7 +210,7 @@ final class TurnRouterTests: XCTestCase {
         XCTAssertEqual(name, "get_weather")
     }
 
-    func testNeedsWebWithoutAllowedToolReturnsDeterministicSourceAsk() async {
+    func testNeedsWebWithoutAllowedToolDelegatesToCapabilityGapLearning() async {
         let router = makeRouter(
             classify: { _, _, _ in Self.makeClassification(.webRequest, needsWeb: true) },
             route: { _ in
@@ -244,12 +244,13 @@ final class TurnRouterTests: XCTestCase {
             )
         )
 
-        guard case .ask(let slot, let prompt) = decision.plan.steps.first else {
-            return XCTFail("Expected deterministic clarifying ask")
+        guard case .delegate(let task, let context, let say) = decision.plan.steps.first else {
+            return XCTFail("Expected capability-gap delegate")
         }
-        XCTAssertEqual(slot, "source_url_or_site")
-        XCTAssertTrue(prompt.lowercased().contains("url"))
-        XCTAssertEqual(decision.routeReason, "needs_web_missing_tool_requires_source")
+        XCTAssertTrue(task.lowercased().hasPrefix("capability_gap:"))
+        XCTAssertTrue((context ?? "").contains("auto_source_discovery_via_gpt=true"))
+        XCTAssertEqual(say, "I can learn this via GPT and discover trusted sources automatically.")
+        XCTAssertEqual(decision.routeReason, "needs_web_capability_gap_gpt_discovery")
     }
 
     func testNeedsWebWithoutAllowedToolAndNativeToolReturnsDetailClarifier() async {
@@ -405,13 +406,13 @@ final class TurnRouterTests: XCTestCase {
         XCTAssertTrue(memoryContent.contains("Cinema listings source"))
     }
 
-    func testResolvePendingCapabilityInputAsksThenDropsWithoutURL() {
+    func testResolvePendingCapabilityInputDropsToGPTDiscoveryWithoutURL() {
         let router = makeRouter(
             classify: { _, _, _ in Self.makeClassification(.generalQnA) },
             route: { _ in fatalError("unused") }
         )
 
-        let first = router.resolvePendingCapabilityInput(
+        let resolution = router.resolvePendingCapabilityInput(
             PendingCapabilityInput(
                 pendingRequest: Self.makeExternalRequest(reminderCount: 0),
                 text: "not sure yet",
@@ -419,22 +420,10 @@ final class TurnRouterTests: XCTestCase {
             )
         )
 
-        guard case .askForSource(_, _, let updatedRequest) = first else {
-            return XCTFail("Expected askForSource")
-        }
-        XCTAssertEqual(updatedRequest.reminderCount, 1)
-
-        let second = router.resolvePendingCapabilityInput(
-            PendingCapabilityInput(
-                pendingRequest: updatedRequest,
-                text: "still no link",
-                now: Date(timeIntervalSince1970: 300)
-            )
-        )
-
-        guard case .drop(let message) = second else {
+        guard case .drop(let message) = resolution else {
             return XCTFail("Expected drop")
         }
-        XCTAssertTrue(message.contains("exact URL"))
+        XCTAssertTrue(message.lowercased().contains("without a url"))
+        XCTAssertTrue(message.lowercased().contains("gpt"))
     }
 }

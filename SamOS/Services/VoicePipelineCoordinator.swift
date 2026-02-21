@@ -254,6 +254,12 @@ final class VoicePipelineCoordinator {
             self?.handleWakeWord()
         }
 
+        // Wire ambient listening (audio piggybacked from wake word tap)
+        wakeWord.onAudioBuffer = { [weak self] buffer in
+            guard let self, M2Settings.alwaysListeningEnabled else { return }
+            AmbientListeningService.shared.processAudioBuffer(buffer)
+        }
+
         capture.onSessionComplete = { [weak self] url in
             Task { @MainActor in
                 self?.handleCaptureComplete(wavURL: url)
@@ -272,6 +278,11 @@ final class VoicePipelineCoordinator {
 
         try wakeWord.start()
         setStatus(.listeningForWakeWord)
+
+        // Start ambient listening if enabled
+        if M2Settings.alwaysListeningEnabled {
+            AmbientListeningService.shared.start()
+        }
     }
 
     /// Immediate, idempotent stop. Cancels all in-flight work.
@@ -293,6 +304,9 @@ final class VoicePipelineCoordinator {
 
         // Stop wake word
         wakeWord.stop()
+
+        // Stop ambient listening
+        AmbientListeningService.shared.stop()
 
         setStatus(.off)
     }
@@ -336,6 +350,9 @@ final class VoicePipelineCoordinator {
 
         // Stop Porcupine's audio engine before we start capture
         wakeWord.stop()
+
+        // Stop ambient listening during active conversation
+        AmbientListeningService.shared.stop()
 
         setStatus(.capturingAudio)
         SoundCuePlayer.shared.playCaptureBeep()
@@ -404,6 +421,10 @@ final class VoicePipelineCoordinator {
         do {
             try wakeWord.start()
             setStatus(.listeningForWakeWord)
+            // Resume ambient listening if enabled
+            if M2Settings.alwaysListeningEnabled {
+                AmbientListeningService.shared.start()
+            }
         } catch {
             handleError(error)
         }
@@ -458,6 +479,7 @@ final class VoicePipelineCoordinator {
             releaseSTTLease()
         }
         wakeWord.stop()
+        AmbientListeningService.shared.stop()
         if listeningEnabled {
             setStatus(.listeningForWakeWord)
         }

@@ -14,6 +14,9 @@ enum DebugEntryCategory: String, CaseIterable, Identifiable {
     case tool
     case tts
     case stt
+    case memory
+    case intent
+    case engine
     case error
     case system
 
@@ -30,6 +33,9 @@ enum DebugEntryCategory: String, CaseIterable, Identifiable {
         case .tool:        return "wrench"
         case .tts:         return "speaker.wave.2"
         case .stt:         return "waveform"
+        case .memory:      return "brain.head.profile"
+        case .intent:      return "target"
+        case .engine:      return "cpu"
         case .error:       return "exclamationmark.triangle"
         case .system:      return "gearshape"
         }
@@ -46,6 +52,9 @@ enum DebugEntryCategory: String, CaseIterable, Identifiable {
         case .tool:        return .indigo
         case .tts:         return .green
         case .stt:         return .mint
+        case .memory:      return .yellow
+        case .intent:      return .brown
+        case .engine:      return Color(red: 0.6, green: 0.4, blue: 0.8)
         case .error:       return .red
         case .system:      return .gray
         }
@@ -62,6 +71,9 @@ enum DebugEntryCategory: String, CaseIterable, Identifiable {
         case .tool:        return "Tool"
         case .tts:         return "TTS"
         case .stt:         return "STT"
+        case .memory:      return "Memory"
+        case .intent:      return "Intent"
+        case .engine:      return "Engine"
         case .error:       return "Error"
         case .system:      return "System"
         }
@@ -263,6 +275,42 @@ final class DebugLogStore: ObservableObject {
             summary: String(message.prefix(120)),
             detail: detail ?? message,
             turnID: turnID
+        ))
+    }
+
+    func logMemory(turnID: String?, action: String, summary: String, detail: String? = nil) {
+        append(DebugEntry(
+            category: .memory,
+            title: "Memory: \(action)",
+            summary: summary,
+            detail: detail,
+            turnID: turnID
+        ))
+    }
+
+    func logIntent(turnID: String?, intent: String, confidence: Double? = nil,
+                   provider: String? = nil, durationMs: Int? = nil) {
+        let confStr = confidence.map { String(format: " (%.0f%%)", $0 * 100) } ?? ""
+        append(DebugEntry(
+            category: .intent,
+            title: "Intent: \(intent)",
+            summary: "\(intent)\(confStr)",
+            detail: "intent=\(intent)\(confStr)\(provider.map { " provider=\($0)" } ?? "")",
+            turnID: turnID,
+            provider: provider,
+            durationMs: durationMs
+        ))
+    }
+
+    func logEngine(turnID: String?, name: String, event: String,
+                   detail: String? = nil, durationMs: Int? = nil) {
+        append(DebugEntry(
+            category: .engine,
+            title: "\(name)",
+            summary: event,
+            detail: detail,
+            turnID: turnID,
+            durationMs: durationMs
         ))
     }
 

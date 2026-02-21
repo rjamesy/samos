@@ -191,34 +191,65 @@ final class PlanExecutor {
                 appendSpeech(say, source: .talk)
 
             case .tool(let name, _, let say):
+                // Trust the LLM's tool choice — no rewriting. The prompt handles timer vs alarm routing.
+                let resolvedToolName = name
+                let resolvedToolArgs = step.toolArgsAsStrings
+
                 // Hard gate: unknown tools must never execute
-                if !toolsRuntime.toolExists(name) {
+                if !toolsRuntime.toolExists(resolvedToolName) {
                     #if DEBUG
-                    print("[PlanExecutor] Unknown tool '\(name)' — routing to capability gap")
+                    print("[PlanExecutor] Unknown tool '\(resolvedToolName)' — routing to capability gap")
                     #endif
-                    let gapMessage = "I don't have a \"\(name)\" tool yet. Can you share the source URL or rephrase what you need?"
-                    result.chatMessages.append(ChatMessage(role: .assistant, text: gapMessage))
-                    appendSpeech(gapMessage, source: .tool)
-                    toolProducedUserFacingOutput = true
-                    result.executedToolSteps.append((name: "capability_gap", args: ["unknown_tool": name]))
+                    result.executedToolSteps.append((name: "capability_gap", args: ["unknown_tool": resolvedToolName]))
+
+                    let goal = originalInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let forgeArgs: [String: String] = [
+                        "goal": goal.isEmpty ? "build capability for \(resolvedToolName)" : goal,
+                        "constraints": "missing tool: \(resolvedToolName); auto_source_discovery_via_gpt=true"
+                    ]
+                    let forgeAction = ToolAction(name: "start_skillforge", args: forgeArgs, say: nil)
+                    let forgeStartedAt = CFAbsoluteTimeGetCurrent()
+                    let forgeOutput = toolsRuntime.execute(forgeAction)
+                    let forgeElapsedMs = Int((CFAbsoluteTimeGetCurrent() - forgeStartedAt) * 1000)
+                    result.toolMsTotal += max(0, forgeElapsedMs)
+                    result.executedToolSteps.append((name: forgeAction.name, args: forgeAction.args))
+
+                    let defaultMessage = "I don't have the \(resolvedToolName) tool yet. I'll use GPT to build this skill and then ask you for approval."
+                    if let forgeOutput, let structured = parseStructuredPayload(forgeOutput.payload) {
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: structured.spoken))
+                        appendSpeech(structured.spoken, source: .tool)
+                        toolProducedUserFacingOutput = true
+                        result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
+                    } else {
+                        result.chatMessages.append(ChatMessage(role: .assistant, text: defaultMessage))
+                        appendSpeech(defaultMessage, source: .tool)
+                        toolProducedUserFacingOutput = true
+                    }
                     return finalizedResult()
                 }
 
-                let toolAction = ToolAction(name: name, args: step.toolArgsAsStrings, say: say)
+                let toolAction = ToolAction(name: resolvedToolName, args: resolvedToolArgs, say: say)
+                #if DEBUG
+                DebugLogStore.shared.logTool(
+                    turnID: turnCorrelationID,
+                    name: resolvedToolName,
+                    args: resolvedToolArgs.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+                )
+                #endif
                 let toolStartedAt = CFAbsoluteTimeGetCurrent()
                 let output = toolsRuntime.execute(toolAction)
                 let toolElapsedMs = Int((CFAbsoluteTimeGetCurrent() - toolStartedAt) * 1000)
                 result.toolMsTotal += max(0, toolElapsedMs)
 
-                result.executedToolSteps.append((name: name, args: step.toolArgsAsStrings))
+                result.executedToolSteps.append((name: resolvedToolName, args: resolvedToolArgs))
 
                 #if DEBUG
-                print("[PlanExecutor] Tool \(name) returned: kind=\(output?.kind.rawValue ?? "nil")")
+                print("[PlanExecutor] Tool \(resolvedToolName) returned: kind=\(output?.kind.rawValue ?? "nil")")
                 #endif
 
                 if let output = output {
                     #if DEBUG
-                    print("[TOOL_OUTPUT_RAW] turn=\(turnCorrelationID) tool=\(name) kind=\(output.kind.rawValue) payload=\(output.payload)")
+                    print("[TOOL_OUTPUT_RAW] turn=\(turnCorrelationID) tool=\(resolvedToolName) kind=\(output.kind.rawValue) payload=\(output.payload)")
                     #endif
                     // Check for structured prompt payload (tool requesting info)
                     if let promptPayload = parsePromptPayload(output.payload) {
@@ -227,7 +258,7 @@ final class PlanExecutor {
                         appendSpeech(promptText, source: .tool)
                         toolProducedUserFacingOutput = true
                         #if DEBUG
-                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(promptText)")
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(resolvedToolName) text=\(promptText)")
                         #endif
                         result.pendingSlotRequest = (slot: promptPayload.slot, prompt: promptPayload.spoken)
                         result.triggerFollowUpCapture = true
@@ -235,7 +266,7 @@ final class PlanExecutor {
                     }
 
                     // Image probe: verify URLs are live before displaying
-                    if name == "show_image" && output.kind == .image {
+                    if resolvedToolName == "show_image" && output.kind == .image {
                         let probeResult = await probeImageOutput(output)
                         if let probeResult = probeResult {
                             // Probe failed — return as prompt payload for auto-repair
@@ -257,11 +288,11 @@ final class PlanExecutor {
                         appendSpeech(promptText, source: .tool)
                         toolProducedUserFacingOutput = true
                         #if DEBUG
-                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(promptText)")
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(resolvedToolName) text=\(promptText)")
                         #endif
 
                         if output.payload.hasPrefix("I need") {
-                            result.pendingSlotRequest = (slot: name, prompt: output.payload)
+                            result.pendingSlotRequest = (slot: resolvedToolName, prompt: output.payload)
                             result.triggerFollowUpCapture = true
                         }
                         return finalizedResult() // Stop further steps
@@ -271,7 +302,7 @@ final class PlanExecutor {
                         appendSpeech(spoken, source: .tool)
                         toolProducedUserFacingOutput = true
                         #if DEBUG
-                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(spoken)")
+                        print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(resolvedToolName) text=\(spoken)")
                         #endif
                         // Tool window must display raw markdown exactly as provided.
                         result.outputItems.append(OutputItem(kind: .markdown, payload: structured.formatted))
@@ -281,7 +312,7 @@ final class PlanExecutor {
                             appendSpeech(spoken, source: .tool)
                             toolProducedUserFacingOutput = true
                             #if DEBUG
-                            print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(name) text=\(spoken)")
+                            print("[TOOL_OUTPUT_TEXT] turn=\(turnCorrelationID) tool=\(resolvedToolName) text=\(spoken)")
                             #endif
                         }
                         result.outputItems.append(output)
@@ -449,6 +480,89 @@ final class PlanExecutor {
         value = value.replacingOccurrences(of: #"[*_>#]+"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func rewriteTimerToolIfNeeded(name: String,
+                                          args: [String: String],
+                                          originalInput: String) -> (name: String, args: [String: String]) {
+        guard name == "schedule_task" else { return (name, args) }
+
+        var normalized = args
+        if nonEmpty(normalized["text"]) == nil,
+           nonEmpty(normalized["input"]) == nil,
+           nonEmpty(normalized["query"]) == nil {
+            normalized["text"] = originalInput
+        }
+
+        let typeHint = nonEmpty(normalized["type"] ?? normalized["kind"])?.lowercased()
+        let timerIntent = typeHint == "timer" || looksLikeTimerIntent(originalInput)
+        guard timerIntent else { return (name, normalized) }
+
+        let hasAbsoluteTime = nonEmpty(normalized["run_at"]) != nil || nonEmpty(normalized["datetime_iso"]) != nil
+        if hasAbsoluteTime {
+            return (name, normalized)
+        }
+
+        let providedSeconds = parsePositiveSeconds(normalized["in_seconds"])
+            ?? parsePositiveSeconds(normalized["duration_seconds"])
+            ?? parsePositiveSeconds(normalized["seconds"])
+            ?? extractDurationSeconds(from: originalInput)
+
+        var timerArgs: [String: String] = [
+            "action": "start",
+            "text": nonEmpty(normalized["text"]) ?? originalInput
+        ]
+
+        if let seconds = providedSeconds {
+            timerArgs["duration_seconds"] = String(Int(seconds.rounded()))
+        }
+        if let label = nonEmpty(normalized["label"] ?? normalized["name"] ?? normalized["timer_name"]) {
+            timerArgs["label"] = label
+        }
+        return ("timer.manage", timerArgs)
+    }
+
+    private func looksLikeTimerIntent(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.contains("timer") || lower.contains("countdown") {
+            return true
+        }
+        return extractDurationSeconds(from: lower) != nil
+    }
+
+    private func extractDurationSeconds(from text: String) -> Double? {
+        let pattern = #"\b(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges > 2,
+              let valueRange = Range(match.range(at: 1), in: text),
+              let unitRange = Range(match.range(at: 2), in: text),
+              let value = Double(text[valueRange]) else {
+            return nil
+        }
+        let unit = text[unitRange].lowercased()
+        if unit.hasPrefix("h") {
+            return value * 3600
+        }
+        if unit.hasPrefix("m") {
+            return value * 60
+        }
+        return value
+    }
+
+    private func parsePositiveSeconds(_ raw: String?) -> Double? {
+        guard let token = nonEmpty(raw), let seconds = Double(token), seconds > 0 else {
+            return nil
+        }
+        return seconds
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Returns plan-level say when this is a single-tool plan (legacy TOOL action shape).

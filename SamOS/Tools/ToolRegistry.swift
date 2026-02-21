@@ -48,10 +48,47 @@ final class ToolRegistry: ToolNameNormalizing {
         "learnwebsite": "learn_website",
         "learn_website": "learn_website",
 
+        "recallambient": "recall_ambient",
+        "recall_ambient": "recall_ambient",
+        "whatdidyouhear": "recall_ambient",
+        "ambient_memories": "recall_ambient",
+
+        "detectemotions": "detect_emotions",
+        "detect_emotions": "detect_emotions",
+        "facial_emotions": "detect_emotions",
+        "read_emotions": "detect_emotions",
+        "howdotheylook": "detect_emotions",
+
+        "cameragptvision": "camera_gpt_vision",
+        "camera_gpt_vision": "camera_gpt_vision",
+        "gpt_vision": "camera_gpt_vision",
+        "deepvision": "camera_gpt_vision",
+        "analyze_scene": "camera_gpt_vision",
+
         "getnews": "news.fetch",
         "get_news": "news.fetch",
         "newsfetch": "news.fetch",
         "news_fetch": "news.fetch",
+
+        "movieshowtimes": "movies.showtimes",
+        "movie_showtimes": "movies.showtimes",
+        "movie_times": "movies.showtimes",
+        "movietimes": "movies.showtimes",
+        "showtimes": "movies.showtimes",
+
+        "fishingreport": "fishing.report",
+        "fishing_report": "fishing.report",
+        "getfishingreport": "fishing.report",
+
+        "pricelookup": "price.lookup",
+        "price_lookup": "price.lookup",
+        "pricecheck": "price.lookup",
+
+        "timermanage": "timer.manage",
+        "timer_manage": "timer.manage",
+        "settimer": "timer.manage",
+        "canceltimer": "timer.manage",
+        "listtimers": "timer.manage",
 
         // Kept for clean rejection when no canonical browser tool exists.
         "web": "browse_web",
@@ -1812,16 +1849,17 @@ struct FindRecipeTool: Tool {
         - No prose, no markdown, only JSON.
         """
         let user = "Dish query: \(query)"
-        let requestBody: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: OpenAISettings.generalModel)
+        var requestBody: [String: Any] = [
             "model": OpenAISettings.generalModel,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user]
             ],
             "temperature": 0.1,
-            "max_tokens": 220,
             "response_format": ["type": "json_object"]
         ]
+        requestBody[tokenKey] = 220
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1921,16 +1959,17 @@ struct FindRecipeTool: Tool {
         - If unsure, return your best common version of the dish.
         """
         let user = "Dish request: \(query)"
-        let requestBody: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: OpenAISettings.generalModel)
+        var requestBody: [String: Any] = [
             "model": OpenAISettings.generalModel,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user]
             ],
             "temperature": 0.2,
-            "max_tokens": 520,
             "response_format": ["type": "json_object"]
         ]
+        requestBody[tokenKey] = 520
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -2928,6 +2967,262 @@ private let cameraTokenStopwords: Set<String> = [
     "through", "camera", "frame", "view"
 ]
 
+// MARK: - Facial Emotion Detection Tool
+
+struct DetectEmotionsTool: Tool {
+    let name = "detect_emotions"
+    let description = "Detects facial expressions and emotions from the camera. Returns emotion readings for each face detected (happy, sad, angry, surprised, neutral, confused). Also reports recognized person names."
+
+    private let camera: CameraVisionProviding
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first to detect emotions.")
+        }
+        guard let snapshot = camera.detectFacialEmotions() else {
+            return OutputItem(kind: .markdown, payload: "Camera is on but I don't have a frame yet. Try again in a second.")
+        }
+
+        if snapshot.readings.isEmpty {
+            return cameraStructuredPayload(
+                kind: "detect_emotions",
+                spoken: "I don't see any faces in the camera right now.",
+                formatted: "# Emotion Detection\n\nNo faces detected in current frame."
+            )
+        }
+
+        var lines: [String] = [
+            "# Emotion Detection",
+            "",
+            "- Faces detected: \(snapshot.readings.count)",
+            "- Captured: \(DateFormatter.localizedString(from: snapshot.capturedAt, dateStyle: .none, timeStyle: .medium))",
+            ""
+        ]
+
+        for reading in snapshot.readings {
+            let who = reading.personName ?? "Person \(reading.faceIndex + 1)"
+            lines.append("## \(who)")
+            lines.append("- Expression: \(reading.emotion.rawValue) \(reading.emotion.emoji)")
+            lines.append("- Confidence: \(Int(reading.confidence * 100))%")
+            lines.append("")
+        }
+
+        return cameraStructuredPayload(
+            kind: "detect_emotions",
+            spoken: snapshot.summary,
+            formatted: lines.joined(separator: "\n")
+        )
+    }
+}
+
+// MARK: - GPT Vision Analysis Tool
+
+struct GPTVisionAnalysisTool: Tool {
+    let name = "camera_gpt_vision"
+    let description = "Sends the current camera frame to GPT-5.2 for deep visual analysis. Use for complex questions about clothing, scene context, activities, relationships, or anything beyond basic object detection. Args: 'question' (required)."
+
+    private let camera: CameraVisionProviding
+    private static let visionTimeoutSeconds: TimeInterval = 15
+
+    init(camera: CameraVisionProviding = CameraVisionService.shared) {
+        self.camera = camera
+    }
+
+    func execute(args: [String: String]) -> OutputItem {
+        let question = (args["question"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else {
+            return cameraPromptPayload(
+                slot: "question",
+                spoken: "What would you like me to analyze in the camera view?",
+                formatted: "Ask a detailed question about what you see."
+            )
+        }
+
+        guard OpenAISettings.isConfigured else {
+            return cameraStructuredPayload(
+                kind: "camera_gpt_vision",
+                spoken: "I can't do deep visual analysis right now — OpenAI isn't configured.",
+                formatted: "GPT vision requires an OpenAI API key. Configure it in Settings."
+            )
+        }
+
+        guard camera.isRunning else {
+            return OutputItem(kind: .markdown, payload: "Camera is off. Turn it on first for GPT vision analysis.")
+        }
+        guard let jpegData = camera.captureFrameAsJPEG(quality: 0.7) else {
+            return OutputItem(kind: .markdown, payload: "Camera is on but I don't have a frame yet. Try again.")
+        }
+
+        // Build local context for enrichment
+        let localContext: String
+        if let scene = camera.describeCurrentScene() {
+            localContext = scene.summary
+        } else {
+            localContext = "No local analysis available."
+        }
+
+        let base64 = jpegData.base64EncodedString()
+
+        // Make the actual GPT-5.2 vision API call (sync bridge via semaphore)
+        let semaphore = DispatchSemaphore(value: 0)
+        var gptResponse: String?
+        var gptError: String?
+
+        Task.detached {
+            do {
+                let result = try await Self.callGPTVision(
+                    base64Image: base64,
+                    question: question,
+                    localContext: localContext
+                )
+                gptResponse = result
+            } catch {
+                gptError = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+
+        let waitResult = semaphore.wait(timeout: .now() + Self.visionTimeoutSeconds)
+
+        if waitResult == .timedOut {
+            #if DEBUG
+            print("[GPTVision] API call timed out after \(Self.visionTimeoutSeconds)s")
+            #endif
+            return cameraStructuredPayload(
+                kind: "camera_gpt_vision",
+                spoken: "The visual analysis took too long. Here's what I can see locally: \(localContext)",
+                formatted: "**GPT Vision timeout.** Local analysis:\n\n\(localContext)"
+            )
+        }
+
+        if let error = gptError {
+            #if DEBUG
+            print("[GPTVision] API error: \(error)")
+            #endif
+            return cameraStructuredPayload(
+                kind: "camera_gpt_vision",
+                spoken: "I had trouble with deep visual analysis. Here's what I can see locally: \(localContext)",
+                formatted: "**GPT Vision error:** \(error)\n\nLocal analysis:\n\n\(localContext)"
+            )
+        }
+
+        guard let analysis = gptResponse, !analysis.isEmpty else {
+            return cameraStructuredPayload(
+                kind: "camera_gpt_vision",
+                spoken: "I couldn't get a detailed analysis. Here's what I see locally: \(localContext)",
+                formatted: "**GPT Vision returned empty.** Local analysis:\n\n\(localContext)"
+            )
+        }
+
+        #if DEBUG
+        print("[GPTVision] Success: \(analysis.prefix(200))")
+        #endif
+
+        return cameraStructuredPayload(
+            kind: "camera_gpt_vision",
+            spoken: analysis,
+            formatted: "## Visual Analysis\n\n\(analysis)\n\n---\n_Local context: \(localContext)_"
+        )
+    }
+
+    // MARK: - GPT Vision API Call
+
+    private static func callGPTVision(base64Image: String,
+                                      question: String,
+                                      localContext: String) async throws -> String {
+        OpenAISettings.preloadAPIKey()
+        let apiKey = OpenAISettings.apiKey
+        guard !apiKey.isEmpty else {
+            throw GPTVisionError.noAPIKey
+        }
+
+        let model = OpenAISettings.generalModel
+        let dataURI = "data:image/jpeg;base64,\(base64Image)"
+
+        let systemPrompt = """
+            You are a vision assistant for a macOS AI called Sam. \
+            Describe what you see concisely and conversationally — as if you're telling a friend. \
+            Focus on answering the user's specific question. \
+            Keep your answer to 2-3 sentences unless more detail is needed. \
+            Local Vision analysis for context: \(localContext)
+            """
+
+        let messages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt],
+            [
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": question],
+                    ["type": "image_url", "image_url": ["url": dataURI, "detail": "low"]]
+                ] as [[String: Any]]
+            ]
+        ]
+
+        let requestBody: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": 300,
+            "temperature": 0.4
+        ]
+
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            throw GPTVisionError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = Self.visionTimeoutSeconds - 1
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 {
+                OpenAISettings.markAPIKeyRejected(statusCode: http.statusCode)
+                throw GPTVisionError.authFailed(http.statusCode)
+            }
+            guard (200...299).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "no body"
+                throw GPTVisionError.httpError(http.statusCode, body)
+            }
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw GPTVisionError.invalidResponse
+        }
+
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum GPTVisionError: LocalizedError {
+        case noAPIKey
+        case invalidURL
+        case authFailed(Int)
+        case httpError(Int, String)
+        case invalidResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .noAPIKey: return "No OpenAI API key configured"
+            case .invalidURL: return "Invalid API URL"
+            case .authFailed(let code): return "API authentication failed (HTTP \(code))"
+            case .httpError(let code, let body): return "API error HTTP \(code): \(body.prefix(200))"
+            case .invalidResponse: return "Could not parse GPT vision response"
+            }
+        }
+    }
+}
+
 struct CapabilityGapToClaudePromptTool: Tool {
     let name = "capability_gap_to_claude_prompt"
     let description = "Generates a Claude-ready build prompt for a missing capability"
@@ -3877,6 +4172,717 @@ private extension Array {
     subscript(safe index: Int) -> Element? {
         guard indices.contains(index) else { return nil }
         return self[index]
+    }
+}
+
+// MARK: - GPT-Assisted Web Capability Tools
+
+private struct WebSearchItem {
+    let title: String
+    let url: String
+    let snippet: String
+    let source: String
+}
+
+private enum WebSearchToolkit {
+    static func fetchHTML(url: URL, userAgent: String) -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseText: String?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data else { return }
+            responseText = String(data: data, encoding: .utf8)
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 12)
+        return responseText
+    }
+
+    static func searchDuckDuckGo(query: String, maxItems: Int) -> [WebSearchItem] {
+        guard var components = URLComponents(string: "https://duckduckgo.com/html/") else { return [] }
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+        guard let url = components.url,
+              let html = fetchHTML(url: url, userAgent: "SamOS/1.0 (web.search)") else {
+            return []
+        }
+        return parseDuckDuckGo(html: html, maxItems: maxItems)
+    }
+
+    static func parseDuckDuckGo(html: String, maxItems: Int) -> [WebSearchItem] {
+        guard maxItems > 0 else { return [] }
+        let anchorPattern = #"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#
+        guard let anchorRegex = try? NSRegularExpression(pattern: anchorPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return []
+        }
+
+        let snippetPattern = #"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>|<div[^>]*class="result__snippet"[^>]*>(.*?)</div>"#
+        let snippetRegex = try? NSRegularExpression(pattern: snippetPattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+
+        let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+        let anchorMatches = anchorRegex.matches(in: html, options: [], range: nsRange)
+        let snippetMatches = snippetRegex?.matches(in: html, options: [], range: nsRange) ?? []
+
+        var items: [WebSearchItem] = []
+        var seenURLs = Set<String>()
+        for (idx, match) in anchorMatches.enumerated() {
+            guard match.numberOfRanges > 2,
+                  let hrefRange = Range(match.range(at: 1), in: html),
+                  let titleRange = Range(match.range(at: 2), in: html) else {
+                continue
+            }
+            let rawHref = String(html[hrefRange])
+            let title = cleanHTMLText(String(html[titleRange]))
+            let resolvedURL = resolveDuckDuckGoRedirect(rawHref)
+            guard let normalizedURL = normalizeURL(resolvedURL), !normalizedURL.isEmpty else { continue }
+            guard !seenURLs.contains(normalizedURL) else { continue }
+            seenURLs.insert(normalizedURL)
+
+            let snippet = extractSnippet(snippetMatches: snippetMatches, index: idx, html: html)
+            let source = URL(string: normalizedURL)?.host?.replacingOccurrences(of: "www.", with: "") ?? "unknown"
+            let item = WebSearchItem(
+                title: title.isEmpty ? normalizedURL : title,
+                url: normalizedURL,
+                snippet: snippet,
+                source: source
+            )
+            items.append(item)
+            if items.count >= maxItems { break }
+        }
+        return items
+    }
+
+    static func cleanHTMLText(_ raw: String) -> String {
+        let withoutTags = raw
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return withoutTags
+    }
+
+    static func resolveDuckDuckGoRedirect(_ raw: String) -> String {
+        guard raw.contains("duckduckgo.com/l/?") || raw.contains("/l/?") else {
+            return raw
+        }
+        guard let components = URLComponents(string: raw),
+              let encoded = components.queryItems?.first(where: { $0.name == "uddg" })?.value,
+              let decoded = encoded.removingPercentEncoding else {
+            return raw
+        }
+        return decoded
+    }
+
+    static func normalizeURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func extractSnippet(snippetMatches: [NSTextCheckingResult], index: Int, html: String) -> String {
+        guard index < snippetMatches.count else { return "" }
+        let match = snippetMatches[index]
+        var snippet = ""
+        if match.numberOfRanges > 1,
+           let range1 = Range(match.range(at: 1), in: html),
+           !range1.isEmpty {
+            snippet = String(html[range1])
+        } else if match.numberOfRanges > 2,
+                  let range2 = Range(match.range(at: 2), in: html),
+                  !range2.isEmpty {
+            snippet = String(html[range2])
+        }
+        return cleanHTMLText(snippet)
+    }
+}
+
+struct MovieShowtimesItem: Equatable {
+    let title: String
+    let sessions: [String]
+}
+
+enum MovieShowtimesParser {
+    static func parse(html: String, dayFilter: String? = nil) -> [MovieShowtimesItem] {
+        let lines = html.components(separatedBy: .newlines)
+        let timeRegex = try? NSRegularExpression(
+            pattern: #"([0-9]{1,2}:[0-9]{2})\s*<span class="ampm">(AM|PM)</span>"#,
+            options: [.caseInsensitive]
+        )
+        let dayRegex = try? NSRegularExpression(pattern: #"<b>\s*([^<]+?)\s*</b>"#, options: [.caseInsensitive])
+
+        var titleOrder: [String] = []
+        var titleToSessions: [String: Set<String>] = [:]
+        var currentTitle: String?
+        var currentDay = ""
+
+        let effectiveDayFilter = dayFilter?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        func flushTitle(_ rawTitle: String?) {
+            guard let rawTitle else { return }
+            let normalized = normalizeTitle(rawTitle)
+            guard !normalized.isEmpty else { return }
+            if titleToSessions[normalized] == nil {
+                titleOrder.append(normalized)
+                titleToSessions[normalized] = []
+            }
+        }
+
+        for line in lines {
+            if let title = extractMovieTitle(from: line) {
+                flushTitle(currentTitle)
+                currentTitle = title
+                currentDay = ""
+                continue
+            }
+
+            if let day = captureGroup(in: line, regex: dayRegex, group: 1) {
+                currentDay = cleanText(day)
+                continue
+            }
+
+            guard let activeTitle = currentTitle,
+                  let regex = timeRegex else { continue }
+            let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            let matches = regex.matches(in: line, options: [], range: nsRange)
+            guard !matches.isEmpty else { continue }
+
+            for match in matches {
+                guard match.numberOfRanges > 2,
+                      let timeRange = Range(match.range(at: 1), in: line),
+                      let ampmRange = Range(match.range(at: 2), in: line) else { continue }
+                let timeValue = String(line[timeRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let ampmValue = String(line[ampmRange]).uppercased()
+                var combined = "\(timeValue) \(ampmValue)"
+                if !currentDay.isEmpty {
+                    combined = "\(currentDay) \(combined)"
+                }
+                combined = cleanText(combined)
+                if let filter = effectiveDayFilter,
+                   !filter.isEmpty,
+                   !combined.lowercased().contains(filter) {
+                    continue
+                }
+                flushTitle(activeTitle)
+                titleToSessions[normalizeTitle(activeTitle), default: []].insert(combined)
+            }
+        }
+        flushTitle(currentTitle)
+
+        return titleOrder.compactMap { title in
+            guard let sessions = titleToSessions[title], !sessions.isEmpty else { return nil }
+            let sortedSessions = sessions.sorted { lhs, rhs in
+                if lhs.count == rhs.count {
+                    return lhs < rhs
+                }
+                return lhs.count < rhs.count
+            }
+            return MovieShowtimesItem(title: title, sessions: sortedSessions)
+        }
+    }
+
+    static func inferDayFilter(from text: String) -> String? {
+        let lower = text.lowercased()
+        let days = [
+            "monday": "mon",
+            "tuesday": "tue",
+            "wednesday": "wed",
+            "thursday": "thu",
+            "friday": "fri",
+            "saturday": "sat",
+            "sunday": "sun",
+            "mon": "mon",
+            "tue": "tue",
+            "wed": "wed",
+            "thu": "thu",
+            "fri": "fri",
+            "sat": "sat",
+            "sun": "sun",
+            "today": ""
+        ]
+        for (token, canonical) in days where lower.contains(token) {
+            return canonical
+        }
+        return nil
+    }
+
+    private static func extractMovieTitle(from line: String) -> String? {
+        guard line.contains("movie-title"),
+              let start = line.range(of: "<span class=\"movie-title\">"),
+              let end = line.range(of: "</span>", range: start.upperBound..<line.endIndex) else {
+            return nil
+        }
+        let raw = String(line[start.upperBound..<end.lowerBound])
+        let decoded = decodeHTML(raw)
+        let cleaned = cleanText(decoded)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private static func captureGroup(in line: String,
+                                     regex: NSRegularExpression?,
+                                     group: Int) -> String? {
+        guard let regex else { return nil }
+        let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+        guard let match = regex.firstMatch(in: line, options: [], range: nsRange),
+              match.numberOfRanges > group,
+              let range = Range(match.range(at: group), in: line) else {
+            return nil
+        }
+        return String(line[range])
+    }
+
+    private static func normalizeTitle(_ value: String) -> String {
+        cleanText(decodeHTML(value))
+    }
+
+    private static func decodeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#x27;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&#x2B;", with: "+")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+    }
+
+    private static func cleanText(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct MovieShowtimesTool: Tool, PermissionScopedTool {
+    let name = "movies.showtimes"
+    let description = "Get live movie showtimes. Currently optimized for Event Cinemas Springfield QLD. Args: location/cinema/text/day (optional)."
+    let requiredPermissions = [PermissionScope.webRead.rawValue]
+
+    func execute(args: [String: String]) -> OutputItem {
+        guard ToolPackageStore.shared.isInstalled("movies.basic") else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "Tool package `movies.basic` is not installed. Approve `web.read` and install movie capability first."
+            )
+        }
+        guard PermissionScopeStore.shared.isApproved(PermissionScope.webRead.rawValue) else {
+            return OutputItem(kind: .markdown, payload: "Permission `web.read` is required for movies.showtimes.")
+        }
+
+        let text = (args["text"] ?? args["query"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = inferLocation(args: args, text: text)
+        guard location.lowercased().contains("springfield") else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "I currently fetch live sessions for Event Cinemas Springfield QLD. Ask for Springfield showtimes, or ask me to learn another cinema."
+            )
+        }
+        let sourceURL = URL(string: "https://www.eventcinemas.com.au/Cinema/Print/Springfield")!
+        guard let html = fetchHTML(url: sourceURL) else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "I couldn't fetch the Springfield cinema sessions page right now. Please try again shortly."
+            )
+        }
+
+        let dayHintRaw = args["day"] ?? MovieShowtimesParser.inferDayFilter(from: text)
+        let dayHint = dayHintRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsed = MovieShowtimesParser.parse(html: html, dayFilter: dayHint)
+        guard !parsed.isEmpty else {
+            return OutputItem(
+                kind: .markdown,
+                payload: "I fetched the Springfield sessions page but couldn't parse current showtimes."
+            )
+        }
+
+        let top = Array(parsed.prefix(14))
+        let fetchedAt = ISO8601DateFormatter().string(from: Date())
+        var lines: [String] = [
+            "## Movie Showtimes — Event Cinemas Springfield (QLD)",
+            "",
+            "Source: [Event Cinemas Springfield Sessions](\(sourceURL.absoluteString))",
+            "Fetched: \(fetchedAt)",
+            ""
+        ]
+        for item in top {
+            let sessionsPreview = item.sessions.prefix(8).joined(separator: ", ")
+            lines.append("- **\(item.title)**: \(sessionsPreview)")
+        }
+        let formatted = lines.joined(separator: "\n")
+        let spoken = "Here are live movie showtimes for Event Cinemas Springfield."
+        let payload: [String: Any] = [
+            "kind": "movie_showtimes",
+            "spoken": spoken,
+            "formatted": formatted,
+            "location": location,
+            "source_url": sourceURL.absoluteString,
+            "day_filter": dayHint ?? "",
+            "items": top.map { item in
+                [
+                    "title": item.title,
+                    "sessions": item.sessions
+                ] as [String: Any]
+            }
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func inferLocation(args: [String: String], text: String) -> String {
+        let direct = (args["location"] ?? args["cinema"] ?? args["place"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty {
+            return direct
+        }
+        if text.lowercased().contains("springfield") {
+            return "Springfield QLD"
+        }
+        return "Springfield QLD"
+    }
+
+    private func fetchHTML(url: URL) -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue("SamOS/1.0 (movies.showtimes)", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseText: String?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data else { return }
+            responseText = String(data: data, encoding: .utf8)
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 14)
+        return responseText
+    }
+}
+
+struct FishingReportTool: Tool, PermissionScopedTool {
+    let name = "fishing.report"
+    let description = "Get a live fishing report with source links. Args: location (optional), text/query (optional)."
+    let requiredPermissions = [PermissionScope.webRead.rawValue]
+
+    func execute(args: [String: String]) -> OutputItem {
+        guard PermissionScopeStore.shared.isApproved(PermissionScope.webRead.rawValue) else {
+            return OutputItem(kind: .markdown, payload: "Permission `web.read` is required for fishing reports.")
+        }
+
+        let text = (args["text"] ?? args["query"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = inferLocation(args: args, text: text) ?? "Moreton Bay, QLD, Australia"
+        let query = "\(location) fishing report"
+        let sources = WebSearchToolkit.searchDuckDuckGo(query: query, maxItems: 8)
+
+        let headline = "## Fishing Report: \(location)"
+        let lines: [String]
+        if sources.isEmpty {
+            lines = [
+                headline,
+                "",
+                "- No live report sources were found right now.",
+                "- Try again shortly or refine with a tighter location."
+            ]
+        } else {
+            let bullets = sources.prefix(6).map { source in
+                let snippet = source.snippet.isEmpty ? "" : " — \(source.snippet)"
+                return "- [\(source.title)](\(source.url)) (\(source.source))\(snippet)"
+            }
+            lines = [headline, ""] + bullets
+        }
+
+        let spoken = sources.isEmpty
+            ? "I couldn't find live fishing report sources for \(location) right now."
+            : "Here are live fishing report sources for \(location)."
+        let formatted = lines.joined(separator: "\n")
+        let payload: [String: Any] = [
+            "kind": "fishing_report",
+            "spoken": spoken,
+            "formatted": formatted,
+            "location": location,
+            "sources": sources.map { ["title": $0.title, "url": $0.url, "source": $0.source, "snippet": $0.snippet] }
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func inferLocation(args: [String: String], text: String) -> String? {
+        let explicit = (args["location"] ?? args["place"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !explicit.isEmpty { return explicit }
+        guard !text.isEmpty else { return nil }
+        let patterns = [
+            #"(?i)\b(?:for|in)\s+([A-Za-z][A-Za-z\s'\-]{2,60})"#,
+            #"(?i)\bfishing report\s+([A-Za-z][A-Za-z\s'\-]{2,60})"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: nsRange),
+                  match.numberOfRanges > 1,
+                  let capture = Range(match.range(at: 1), in: text) else { continue }
+            let value = String(text[capture]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        return nil
+    }
+}
+
+private struct PriceCandidate: Equatable {
+    let title: String
+    let store: String
+    let price: Double
+    let url: String
+    let snippet: String
+}
+
+struct PriceLookupTool: Tool, PermissionScopedTool {
+    let name = "price.lookup"
+    let description = "Find product prices at Woolworths or compare cheapest online. Args: item/text (required), optional store, optional mode=cheapest."
+    let requiredPermissions = [PermissionScope.webRead.rawValue]
+
+    func execute(args: [String: String]) -> OutputItem {
+        guard PermissionScopeStore.shared.isApproved(PermissionScope.webRead.rawValue) else {
+            return OutputItem(kind: .markdown, payload: "Permission `web.read` is required for price lookup.")
+        }
+
+        let text = (args["text"] ?? args["query"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let item = inferItem(args: args, text: text)
+        guard !item.isEmpty else {
+            return OutputItem(kind: .markdown, payload: "I need an item name to look up prices.")
+        }
+
+        let store = (args["store"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let mode = (args["mode"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let inferredWoolworths = store.contains("woolworths") || text.lowercased().contains("woolworths")
+        let inferredCheapest = mode == "cheapest" || text.lowercased().contains("cheapest")
+
+        var candidates: [PriceCandidate] = []
+        candidates.append(contentsOf: fetchWoolworthsPrices(item: item, maxItems: 10))
+
+        if inferredCheapest || !inferredWoolworths {
+            candidates.append(contentsOf: searchOnlinePriceCandidates(item: item, maxItems: 12))
+        }
+
+        candidates = dedupe(candidates).sorted { lhs, rhs in
+            if lhs.price == rhs.price {
+                return lhs.store < rhs.store
+            }
+            return lhs.price < rhs.price
+        }
+
+        let scoped: [PriceCandidate]
+        if inferredWoolworths {
+            scoped = candidates.filter { $0.store.localizedCaseInsensitiveContains("woolworths") }
+        } else {
+            scoped = candidates
+        }
+        let top = Array(scoped.prefix(10))
+
+        if top.isEmpty {
+            return OutputItem(kind: .markdown, payload: "I couldn't find current price data for `\(item)` right now.")
+        }
+
+        let header: String
+        if inferredWoolworths {
+            header = "## Woolworths Price: \(item)"
+        } else if inferredCheapest {
+            header = "## Cheapest Online Prices: \(item)"
+        } else {
+            header = "## Price Results: \(item)"
+        }
+
+        let rows = top.map { candidate in
+            let snippet = candidate.snippet.isEmpty ? "" : " — \(candidate.snippet)"
+            return String(format: "- **$%.2f** — %@ ([link](%@))%@", candidate.price, candidate.store, candidate.url, snippet)
+        }
+        let formatted = ([header, ""] + rows).joined(separator: "\n")
+        let cheapest = top.first
+        let spoken: String
+        if let cheapest {
+            spoken = String(format: "Best current price I found for %@ is $%.2f at %@.", item, cheapest.price, cheapest.store)
+        } else {
+            spoken = "I found price results for \(item)."
+        }
+
+        let payload: [String: Any] = [
+            "kind": "price_lookup",
+            "spoken": spoken,
+            "formatted": formatted,
+            "item": item,
+            "results": top.map {
+                [
+                    "title": $0.title,
+                    "store": $0.store,
+                    "price": $0.price,
+                    "url": $0.url,
+                    "snippet": $0.snippet
+                ]
+            }
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            return OutputItem(kind: .markdown, payload: json)
+        }
+        return OutputItem(kind: .markdown, payload: formatted)
+    }
+
+    private func inferItem(args: [String: String], text: String) -> String {
+        let direct = (args["item"] ?? args["product"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty { return direct }
+        if text.isEmpty { return "" }
+        var query = text
+        let patterns = [
+            #"(?i)\bwhat\s+is\s+the\s+price\s+of\s+"#,
+            #"(?i)\bfind\s+the\s+cheapest\s+price\s+for\s+"#,
+            #"(?i)\bprice\s+of\s+"#,
+            #"(?i)\bcheapest\s+price\s+for\s+"#,
+            #"(?i)\bat\s+woolworths\b"#,
+            #"(?i)\bonline\b"#
+        ]
+        for pattern in patterns {
+            query = query.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        query = query.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return query
+    }
+
+    private func fetchWoolworthsPrices(item: String, maxItems: Int) -> [PriceCandidate] {
+        guard maxItems > 0 else { return [] }
+        guard let encodedItem = item.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.woolworths.com.au/apis/ui/Search/products?searchTerm=\(encodedItem)&pageNumber=1&sortType=TraderRelevance&url=%2Fshop%2Fsearch%2Fproducts%3FsearchTerm%3D\(encodedItem)") else {
+            return []
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) SamOS/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var dataOut: Data?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data else { return }
+            dataOut = data
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 12)
+        guard let dataOut else { return [] }
+        return Self.extractWoolworthsCandidates(from: dataOut, fallbackItem: item, maxItems: maxItems)
+    }
+
+    private static func extractWoolworthsCandidates(from data: Data, fallbackItem: String, maxItems: Int) -> [PriceCandidate] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let productSections = root["Products"] as? [[String: Any]] else {
+            return []
+        }
+        var candidates: [PriceCandidate] = []
+        for section in productSections {
+            guard let products = section["Products"] as? [[String: Any]] else { continue }
+            for product in products {
+                guard let price = product["Price"] as? Double,
+                      price > 0 else { continue }
+                let title = (product["DisplayName"] as? String)
+                    ?? (product["Name"] as? String)
+                    ?? fallbackItem
+                let slug = (product["UrlFriendlyName"] as? String) ?? ""
+                let stockCode = product["Stockcode"] as? Int
+                let url: String
+                if let stockCode {
+                    url = "https://www.woolworths.com.au/shop/productdetails/\(stockCode)/\(slug)"
+                } else {
+                    url = "https://www.woolworths.com.au/shop/search/products?searchTerm=\(fallbackItem.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? fallbackItem)"
+                }
+                candidates.append(
+                    PriceCandidate(
+                        title: title,
+                        store: "Woolworths",
+                        price: price,
+                        url: url,
+                        snippet: ""
+                    )
+                )
+                if candidates.count >= maxItems { return candidates }
+            }
+        }
+        return candidates
+    }
+
+    private func searchOnlinePriceCandidates(item: String, maxItems: Int) -> [PriceCandidate] {
+        guard maxItems > 0 else { return [] }
+        let query = "\(item) price australia buy online"
+        let results = WebSearchToolkit.searchDuckDuckGo(query: query, maxItems: maxItems)
+        var candidates: [PriceCandidate] = []
+        for result in results {
+            let text = "\(result.title) \(result.snippet)"
+            guard let price = extractPrice(from: text) else { continue }
+            let store = cleanStoreName(host: URL(string: result.url)?.host ?? result.source)
+            candidates.append(
+                PriceCandidate(
+                    title: result.title,
+                    store: store,
+                    price: price,
+                    url: result.url,
+                    snippet: result.snippet
+                )
+            )
+        }
+        return candidates
+    }
+
+    private func extractPrice(from text: String) -> Double? {
+        let pattern = #"\$\s*([0-9]+(?:\.[0-9]{1,2})?)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              match.numberOfRanges > 1,
+              let capture = Range(match.range(at: 1), in: text),
+              let value = Double(text[capture]) else {
+            return nil
+        }
+        return value
+    }
+
+    private func cleanStoreName(host: String) -> String {
+        var value = host.lowercased()
+        value = value.replacingOccurrences(of: "www.", with: "")
+        let parts = value.split(separator: ".")
+        guard let first = parts.first else { return host }
+        return first.capitalized
+    }
+
+    private func dedupe(_ candidates: [PriceCandidate]) -> [PriceCandidate] {
+        var seen = Set<String>()
+        var output: [PriceCandidate] = []
+        for candidate in candidates {
+            let key = "\(candidate.store.lowercased())|\(candidate.title.lowercased())|\(String(format: "%.2f", candidate.price))"
+            if seen.insert(key).inserted {
+                output.append(candidate)
+            }
+        }
+        return output
     }
 }
 

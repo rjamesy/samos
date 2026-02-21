@@ -15,7 +15,13 @@ final class SkillStore {
 
     /// Hard cap on installed skills to prevent prompt bloat.
     static let maxInstalledSkills = 50
-    private static let runtimeBaselinePackageIDs: Set<String> = ["news.latest"]
+    private static let runtimeBaselinePackageIDs: Set<String> = [
+        "news.latest",
+        "fishing.report",
+        "price.woolworths",
+        "price.cheapest_online",
+        "timer.named"
+    ]
     private static let bundledSkillDisplayNames: [String: String] = [
         "alarm_v1": "Alarm (schedule_task)",
         "file_system_access_v1": "File Search (find_files)"
@@ -825,6 +831,509 @@ final class SkillStore {
             )
         )
 
+        let fishingPlan = SkillPlan(
+            skillID: "fishing.report",
+            name: "Fishing Report (fishing.basic)",
+            version: 1,
+            intentPatterns: [
+                "get fishing report for moreton bay",
+                "fishing report for",
+                "fishing report"
+            ],
+            inputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["text"],
+                properties: [
+                    "text": SkillJSONSchema(type: .string)
+                ]
+            ),
+            outputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["formatted", "spoken"],
+                properties: [
+                    "formatted": SkillJSONSchema(type: .string),
+                    "spoken": SkillJSONSchema(type: .string)
+                ]
+            ),
+            toolRequirements: [
+                SkillToolRequirement(name: "fishing.report", permissions: [PermissionScope.webRead.rawValue])
+            ],
+            conversationPolicy: SkillConversationPolicy(
+                tone: "neutral",
+                safetyConstraints: ["Cite source links in the report output."]
+            ),
+            testCases: [
+                SkillTestCase(
+                    name: "moreton bay fishing report",
+                    inputText: "get fishing report for moreton bay",
+                    expected: [
+                        "formatted": .string("Fishing Report"),
+                        "spoken": .string("fishing report")
+                    ],
+                    mustCallTools: ["fishing.report"],
+                    maxSteps: 10
+                )
+            ]
+        )
+        let fishingSpec = SkillSpecV2(
+            steps: [
+                SkillPackageStep(
+                    id: "extract_location",
+                    type: .extract,
+                    extract: SkillExtractStep(
+                        source: "input.text",
+                        pattern: "(?i)(?:for|in)\\s+([A-Za-z][A-Za-z\\s'\\-]{2,60})",
+                        outputVar: "location"
+                    ),
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "fetch_report",
+                    type: .toolCall,
+                    extract: nil,
+                    format: nil,
+                    toolCall: SkillToolCallStep(
+                        name: "fishing.report",
+                        args: [
+                            "location": "{{location}}",
+                            "text": "{{input.text}}"
+                        ],
+                        outputVar: "fishing_payload"
+                    ),
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "format_report",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: "fishing_payload",
+                        mode: "tool_formatted",
+                        outputVar: "formatted"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "return",
+                    type: .return,
+                    extract: nil,
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: SkillReturnStep(
+                        output: [
+                            "formatted": "{{formatted}}",
+                            "spoken": "Here is your fishing report."
+                        ]
+                    )
+                )
+            ],
+            prompts: [:],
+            failureModes: [
+                SkillFailureMode(code: "FISHING_REPORT_FAILED", message: "Unable to fetch fishing report.", action: "fail")
+            ],
+            limits: SkillLimits(maxOutputChars: 5_000, maxOutputTokens: 512, timeoutMs: 8_000)
+        )
+        let fishingPackage = SkillPackage(
+            manifest: SkillManifest(
+                skillID: fishingPlan.skillID,
+                name: fishingPlan.name,
+                version: fishingPlan.version,
+                origin: .baseline,
+                createdAtISO8601: nowISO
+            ),
+            plan: fishingPlan,
+            spec: fishingSpec,
+            tests: fishingPlan.testCases,
+            signoff: SkillSignoff(
+                approved: true,
+                reason: "Bundled baseline skill",
+                requiredChanges: [],
+                riskNotes: [],
+                packageHash: "",
+                model: "baseline",
+                approvedAtISO8601: nowISO
+            )
+        )
+
+        let woolworthsPricePlan = SkillPlan(
+            skillID: "price.woolworths",
+            name: "Woolworths Price (pricing.basic)",
+            version: 1,
+            intentPatterns: [
+                "what is the price of",
+                "price at woolworths",
+                "woolworths price"
+            ],
+            inputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["text"],
+                properties: [
+                    "text": SkillJSONSchema(type: .string)
+                ]
+            ),
+            outputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["formatted", "spoken"],
+                properties: [
+                    "formatted": SkillJSONSchema(type: .string),
+                    "spoken": SkillJSONSchema(type: .string)
+                ]
+            ),
+            toolRequirements: [
+                SkillToolRequirement(name: "price.lookup", permissions: [PermissionScope.webRead.rawValue])
+            ],
+            conversationPolicy: SkillConversationPolicy(
+                tone: "neutral",
+                safetyConstraints: ["Return live price results with links."]
+            ),
+            testCases: [
+                SkillTestCase(
+                    name: "woolworths price lookup",
+                    inputText: "what is the price of milk at woolworths",
+                    expected: [
+                        "formatted": .string("Price"),
+                        "spoken": .string("price")
+                    ],
+                    mustCallTools: ["price.lookup"],
+                    maxSteps: 10
+                )
+            ]
+        )
+        let woolworthsPriceSpec = SkillSpecV2(
+            steps: [
+                SkillPackageStep(
+                    id: "lookup_price",
+                    type: .toolCall,
+                    extract: nil,
+                    format: nil,
+                    toolCall: SkillToolCallStep(
+                        name: "price.lookup",
+                        args: [
+                            "text": "{{input.text}}",
+                            "store": "woolworths"
+                        ],
+                        outputVar: "price_payload"
+                    ),
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "format_price",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: "price_payload",
+                        mode: "tool_formatted",
+                        outputVar: "formatted"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "return",
+                    type: .return,
+                    extract: nil,
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: SkillReturnStep(
+                        output: [
+                            "formatted": "{{formatted}}",
+                            "spoken": "Here is the Woolworths price result."
+                        ]
+                    )
+                )
+            ],
+            prompts: [:],
+            failureModes: [
+                SkillFailureMode(code: "PRICE_LOOKUP_FAILED", message: "Unable to fetch price.", action: "fail")
+            ],
+            limits: SkillLimits(maxOutputChars: 5_000, maxOutputTokens: 512, timeoutMs: 8_000)
+        )
+        let woolworthsPricePackage = SkillPackage(
+            manifest: SkillManifest(
+                skillID: woolworthsPricePlan.skillID,
+                name: woolworthsPricePlan.name,
+                version: woolworthsPricePlan.version,
+                origin: .baseline,
+                createdAtISO8601: nowISO
+            ),
+            plan: woolworthsPricePlan,
+            spec: woolworthsPriceSpec,
+            tests: woolworthsPricePlan.testCases,
+            signoff: SkillSignoff(
+                approved: true,
+                reason: "Bundled baseline skill",
+                requiredChanges: [],
+                riskNotes: [],
+                packageHash: "",
+                model: "baseline",
+                approvedAtISO8601: nowISO
+            )
+        )
+
+        let cheapestPricePlan = SkillPlan(
+            skillID: "price.cheapest_online",
+            name: "Cheapest Price Online (pricing.basic)",
+            version: 1,
+            intentPatterns: [
+                "find the cheapest price for",
+                "cheapest price online",
+                "best price online"
+            ],
+            inputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["text"],
+                properties: [
+                    "text": SkillJSONSchema(type: .string)
+                ]
+            ),
+            outputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["formatted", "spoken"],
+                properties: [
+                    "formatted": SkillJSONSchema(type: .string),
+                    "spoken": SkillJSONSchema(type: .string)
+                ]
+            ),
+            toolRequirements: [
+                SkillToolRequirement(name: "price.lookup", permissions: [PermissionScope.webRead.rawValue])
+            ],
+            conversationPolicy: SkillConversationPolicy(
+                tone: "neutral",
+                safetyConstraints: ["Return online price comparison with links and prices."]
+            ),
+            testCases: [
+                SkillTestCase(
+                    name: "cheapest online price",
+                    inputText: "find the cheapest price for olive oil online",
+                    expected: [
+                        "formatted": .string("Cheapest"),
+                        "spoken": .string("price")
+                    ],
+                    mustCallTools: ["price.lookup"],
+                    maxSteps: 10
+                )
+            ]
+        )
+        let cheapestPriceSpec = SkillSpecV2(
+            steps: [
+                SkillPackageStep(
+                    id: "lookup_cheapest",
+                    type: .toolCall,
+                    extract: nil,
+                    format: nil,
+                    toolCall: SkillToolCallStep(
+                        name: "price.lookup",
+                        args: [
+                            "text": "{{input.text}}",
+                            "mode": "cheapest"
+                        ],
+                        outputVar: "price_payload"
+                    ),
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "format_price",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: "price_payload",
+                        mode: "tool_formatted",
+                        outputVar: "formatted"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "return",
+                    type: .return,
+                    extract: nil,
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: SkillReturnStep(
+                        output: [
+                            "formatted": "{{formatted}}",
+                            "spoken": "Here are the cheapest online price results."
+                        ]
+                    )
+                )
+            ],
+            prompts: [:],
+            failureModes: [
+                SkillFailureMode(code: "PRICE_COMPARE_FAILED", message: "Unable to compare prices.", action: "fail")
+            ],
+            limits: SkillLimits(maxOutputChars: 5_000, maxOutputTokens: 512, timeoutMs: 8_000)
+        )
+        let cheapestPricePackage = SkillPackage(
+            manifest: SkillManifest(
+                skillID: cheapestPricePlan.skillID,
+                name: cheapestPricePlan.name,
+                version: cheapestPricePlan.version,
+                origin: .baseline,
+                createdAtISO8601: nowISO
+            ),
+            plan: cheapestPricePlan,
+            spec: cheapestPriceSpec,
+            tests: cheapestPricePlan.testCases,
+            signoff: SkillSignoff(
+                approved: true,
+                reason: "Bundled baseline skill",
+                requiredChanges: [],
+                riskNotes: [],
+                packageHash: "",
+                model: "baseline",
+                approvedAtISO8601: nowISO
+            )
+        )
+
+        let timerPlan = SkillPlan(
+            skillID: "timer.named",
+            name: "Named Timers (timer.basic)",
+            version: 1,
+            intentPatterns: [
+                "set a timer for",
+                "cancel a timer by",
+                "list timers by",
+                "cancel timer",
+                "list timers"
+            ],
+            inputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["text"],
+                properties: [
+                    "text": SkillJSONSchema(type: .string)
+                ]
+            ),
+            outputsSchema: SkillJSONSchema(
+                type: .object,
+                required: ["formatted", "spoken"],
+                properties: [
+                    "formatted": SkillJSONSchema(type: .string),
+                    "spoken": SkillJSONSchema(type: .string)
+                ]
+            ),
+            toolRequirements: [
+                SkillToolRequirement(name: "timer.manage", permissions: [])
+            ],
+            conversationPolicy: SkillConversationPolicy(
+                tone: "neutral",
+                safetyConstraints: ["Timers must be named before final scheduling."]
+            ),
+            testCases: [
+                SkillTestCase(
+                    name: "set timer asks for name when missing",
+                    inputText: "set a timer for 10 minutes",
+                    expected: [
+                        "formatted": .string("timer"),
+                        "spoken": .string("timer")
+                    ],
+                    mustCallTools: ["timer.manage"],
+                    maxSteps: 10
+                )
+            ]
+        )
+        let timerSpec = SkillSpecV2(
+            steps: [
+                SkillPackageStep(
+                    id: "manage_timer",
+                    type: .toolCall,
+                    extract: nil,
+                    format: nil,
+                    toolCall: SkillToolCallStep(
+                        name: "timer.manage",
+                        args: [
+                            "text": "{{input.text}}"
+                        ],
+                        outputVar: "timer_payload"
+                    ),
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "format_timer",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: "timer_payload",
+                        mode: "tool_formatted",
+                        outputVar: "formatted"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                ),
+                SkillPackageStep(
+                    id: "return",
+                    type: .return,
+                    extract: nil,
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: SkillReturnStep(
+                        output: [
+                            "formatted": "{{formatted}}",
+                            "spoken": "Timer update ready."
+                        ]
+                    )
+                )
+            ],
+            prompts: [:],
+            failureModes: [
+                SkillFailureMode(code: "TIMER_MANAGE_FAILED", message: "Unable to manage timer.", action: "fail")
+            ],
+            limits: SkillLimits(maxOutputChars: 4_000, maxOutputTokens: 256, timeoutMs: 6_000)
+        )
+        let timerPackage = SkillPackage(
+            manifest: SkillManifest(
+                skillID: timerPlan.skillID,
+                name: timerPlan.name,
+                version: timerPlan.version,
+                origin: .baseline,
+                createdAtISO8601: nowISO
+            ),
+            plan: timerPlan,
+            spec: timerSpec,
+            tests: timerPlan.testCases,
+            signoff: SkillSignoff(
+                approved: true,
+                reason: "Bundled baseline skill",
+                requiredChanges: [],
+                riskNotes: [],
+                packageHash: "",
+                model: "baseline",
+                approvedAtISO8601: nowISO
+            )
+        )
+
         let hasher = { (package: SkillPackage) -> SkillPackage in
             var mutable = package
             let hash = SkillForgePipelineV2.packageHash(mutable)
@@ -835,7 +1344,15 @@ final class SkillStore {
             return mutable
         }
 
-        let all = [hasher(echoPackage), hasher(minutesPackage), hasher(newsPackage)]
+        let all = [
+            hasher(echoPackage),
+            hasher(minutesPackage),
+            hasher(newsPackage),
+            hasher(fishingPackage),
+            hasher(woolworthsPricePackage),
+            hasher(cheapestPricePackage),
+            hasher(timerPackage)
+        ]
         guard includeDemoPackages else {
             return all.filter { runtimeBaselinePackageIDs.contains($0.manifest.skillID) }
         }

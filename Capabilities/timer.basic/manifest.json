@@ -1,0 +1,11 @@
+{
+  "id": "timer.basic",
+  "name": "Named Timers",
+  "tools": [
+    "timer.manage",
+    "schedule_task",
+    "cancel_task",
+    "list_tasks"
+  ],
+  "permissions": []
+}

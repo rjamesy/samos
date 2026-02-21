@@ -1884,6 +1884,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    func requestLearnSkillChanges(_ notes: String = "Please revise sources and output formatting before install.") {
+        let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let args = trimmed.isEmpty ? [:] : ["notes": trimmed]
+        if let output = ToolsRuntime.shared.execute(
+            ToolAction(name: "skills.learn.request_changes", args: args, say: nil)
+        ) {
+            appendOutputItem(output, source: "learn_skill_request_changes")
+        }
+    }
+
+    func cancelLearnSkill() {
+        if let output = ToolsRuntime.shared.execute(
+            ToolAction(name: "skills.learn.cancel", args: [:], say: nil)
+        ) {
+            appendOutputItem(output, source: "learn_skill_cancel")
+        }
+    }
+
     private func handleAutonomousLearningCompletion(_ report: AutonomousLearningReport) {
         refreshWebsiteLearningDebug()
         refreshAutonomousLearningDebug()

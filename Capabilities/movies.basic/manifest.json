@@ -1,0 +1,10 @@
+{
+  "id": "movies.basic",
+  "name": "Movie Showtimes",
+  "tools": [
+    "movies.showtimes"
+  ],
+  "permissions": [
+    "web.read"
+  ]
+}

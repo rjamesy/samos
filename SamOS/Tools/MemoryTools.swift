@@ -204,6 +204,37 @@ struct ListMemoriesTool: Tool {
     }
 }
 
+// MARK: - Recall Ambient Tool
+
+struct RecallAmbientTool: Tool {
+    let name = "recall_ambient"
+    let description = "Recall what Sam has overheard via always-listening mode. Returns recent ambient memories."
+
+    func execute(args: [String: String]) -> OutputItem {
+        let limit = Int(args["limit"] ?? "10") ?? 10
+        let episodes = SemanticMemoryStore.shared.listAmbientEpisodes(limit: limit)
+
+        if episodes.isEmpty {
+            return OutputItem(kind: .markdown, payload: "No ambient memories yet. Enable Always Listening in Settings to start passively learning from conversations.")
+        }
+
+        let fmt = DateFormatter()
+        fmt.dateStyle = .short
+        fmt.timeStyle = .short
+
+        var md = "# Ambient Memories\n\n"
+        for ep in episodes {
+            let date = fmt.string(from: ep.createdAt)
+            let summary = ep.payload.summary.prefix(200)
+            let importance = String(format: "%.0f%%", ep.payload.importance * 100)
+            md += "**[\(date)]** (\(importance)) \(summary)\n\n"
+        }
+        md += "*\(episodes.count) ambient memor\(episodes.count == 1 ? "y" : "ies").*"
+
+        return OutputItem(kind: .markdown, payload: md)
+    }
+}
+
 // MARK: - Delete Memory Tool
 
 struct DeleteMemoryTool: Tool {

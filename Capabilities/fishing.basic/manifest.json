@@ -1,0 +1,10 @@
+{
+  "id": "fishing.basic",
+  "name": "Fishing Reports",
+  "tools": [
+    "fishing.report"
+  ],
+  "permissions": [
+    "web.read"
+  ]
+}

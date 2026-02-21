@@ -1064,6 +1064,10 @@ final class IdentityTestCamera: CameraVisionProviding {
         enrollCalls.removeAll()
         return true
     }
+
+    var health: CameraHealth { CameraHealth(lastGoodFrameAt: nil, lastFrameErrorAt: nil, consecutiveErrors: 0, isHealthy: true) }
+    func detectFacialEmotions() -> CameraEmotionSnapshot? { nil }
+    func captureFrameAsJPEG(quality: CGFloat) -> Data? { nil }
 }
 
 // MARK: - Router Pipeline Tests
@@ -1342,6 +1346,7 @@ final class RouterPipelineTests: XCTestCase {
             summary: summary,
             labels: ["desk (95%)", "person (90%)"],
             recognizedText: [],
+            emotions: [],
             capturedAt: Date()
         )
     }
@@ -3031,6 +3036,81 @@ final class RouterPipelineTests: XCTestCase {
         XCTAssertEqual(fakeOllama.chatCallCount, 0, "No Ollama hop when OpenAI configured")
         XCTAssertEqual(result.llmProvider, .openai)
         XCTAssertTrue(result.appendedChat.contains { $0.text.lowercased().contains("openai") })
+    }
+
+    @MainActor
+    func testOpenAIFailTimerRequestFallsBackToTimerManageTool() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [.failure(OpenAIRouter.OpenAIError.badResponse(400))]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-timer-fallback"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-timer-fallback"
+        M2Settings.useOllama = false
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("set timer 10 seconds", history: [])
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 1)
+        XCTAssertTrue(result.executedToolSteps.contains(where: { $0.name == "timer.manage" }))
+        XCTAssertTrue(
+            result.appendedChat.contains(where: {
+                $0.role == .assistant && $0.text.lowercased().contains("what should i call this timer")
+            }),
+            "Expected timer naming prompt from timer.manage fallback."
+        )
+        XCTAssertTrue(result.triggerFollowUpCapture)
+    }
+
+    @MainActor
+    func testOpenAIFailTimerNameFollowUpSchedulesViaFallback() async {
+        let fakeOpenAI = FakeOpenAITransport()
+        fakeOpenAI.queuedResponses = [
+            .failure(OpenAIRouter.OpenAIError.badResponse(400)),
+            .failure(OpenAIRouter.OpenAIError.badResponse(400))
+        ]
+
+        let fakeOllama = FakeOllamaTransportForPipeline()
+
+        OpenAISettings.apiKey = "test-key-timer-followup-fallback"
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = "test-key-timer-followup-fallback"
+        M2Settings.useOllama = false
+
+        let existingTaskIDs = Set(TaskScheduler.shared.listPending().map(\.id))
+        defer {
+            let created = TaskScheduler.shared.listPending().filter { !existingTaskIDs.contains($0.id) }
+            for task in created {
+                _ = TaskScheduler.shared.cancel(id: task.id.uuidString)
+            }
+        }
+
+        let ollamaRouter = OllamaRouter(transport: fakeOllama)
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter, transport: fakeOpenAI)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let first = await orchestrator.processTurn("set timer 10 seconds", history: [])
+        var history: [ChatMessage] = [ChatMessage(role: .user, text: "set timer 10 seconds")]
+        history.append(contentsOf: first.appendedChat)
+
+        let second = await orchestrator.processTurn("pasta", history: history)
+
+        XCTAssertEqual(fakeOpenAI.chatCallCount, 2)
+        XCTAssertTrue(second.executedToolSteps.contains(where: { $0.name == "timer.manage" }))
+        XCTAssertTrue(
+            second.appendedChat.contains(where: {
+                $0.role == .assistant && $0.text.lowercased().contains("timer set for")
+            }),
+            "Expected timer to be scheduled after timer-name follow-up."
+        )
+
+        let created = TaskScheduler.shared.listPending().filter { !existingTaskIDs.contains($0.id) }
+        XCTAssertFalse(created.isEmpty, "Expected a newly scheduled timer task.")
     }
 
     @MainActor
@@ -4785,6 +4865,53 @@ final class RouterPipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveOpenAITimerSmoke() async throws {
+        let shouldRun = ProcessInfo.processInfo.environment["RUN_LIVE_OPENAI_SMOKE"] == "1"
+            || FileManager.default.fileExists(atPath: "/tmp/run_live_openai_smoke")
+        guard shouldRun else {
+            throw XCTSkip("Set RUN_LIVE_OPENAI_SMOKE=1 to run live OpenAI smoke tests")
+        }
+
+        let productionKey = KeychainStore.get(forKey: "apiKey", service: "com.samos.openai")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !productionKey.isEmpty else {
+            throw XCTSkip("No production OpenAI key found in Keychain")
+        }
+
+        OpenAISettings.apiKey = productionKey
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = productionKey
+
+        let originalUseOllama = M2Settings.useOllama
+        defer { M2Settings.useOllama = originalUseOllama }
+        // Keep local-first enabled in live mode so this covers the real ollama->openai path.
+        M2Settings.useOllama = true
+
+        let ollamaRouter = OllamaRouter()
+        let openAIRouter = OpenAIRouter(parser: ollamaRouter)
+        let orchestrator = TurnOrchestrator(ollamaRouter: ollamaRouter, openAIRouter: openAIRouter)
+
+        let result = await orchestrator.processTurn("set timer 10 seconds", history: [])
+        let assistantText = result.appendedChat
+            .first(where: { $0.role == .assistant })?
+            .text
+            .lowercased() ?? ""
+
+        XCTAssertFalse(
+            assistantText.contains("what time should i set it for"),
+            "Timer countdown requests must not be treated as alarm-time prompts."
+        )
+        XCTAssertFalse(
+            assistantText.contains("i need the timer request text"),
+            "timer.manage must accept structured args from model plans."
+        )
+        XCTAssertTrue(
+            result.executedToolSteps.contains(where: { $0.name == "timer.manage" }),
+            "Live timer turn must execute timer.manage for countdown handling."
+        )
+    }
+
+    @MainActor
     func testLiveOpenAICinemaCapabilityGapSourceAsk() async throws {
         let shouldRun = ProcessInfo.processInfo.environment["ENABLE_LIVE_TESTS"] == "1"
             || ProcessInfo.processInfo.environment["RUN_LIVE_OPENAI_SMOKE"] == "1"
@@ -4926,6 +5053,7 @@ final class StabilityRegressionTests: XCTestCase {
             summary: "I can see a desk and a laptop.",
             labels: ["desk (95%)", "laptop (90%)"],
             recognizedText: [],
+            emotions: [],
             capturedAt: Date()
         )
 
@@ -4950,6 +5078,7 @@ final class StabilityRegressionTests: XCTestCase {
             summary: "A desk with a notebook.",
             labels: ["desk (94%)", "notebook (88%)"],
             recognizedText: [],
+            emotions: [],
             capturedAt: Date()
         )
 
@@ -5539,6 +5668,7 @@ final class StabilityRegressionTests: XCTestCase {
             summary: "A desk with a notebook.",
             labels: ["desk (94%)", "notebook (88%)"],
             recognizedText: [],
+            emotions: [],
             capturedAt: Date()
         )
 
@@ -5761,7 +5891,7 @@ final class StabilityRegressionTests: XCTestCase {
             ]
             let fakeOllama = FakeOllamaTransportForPipeline()
             let camera = makeHealthyCamera()
-            camera.sceneDescription = CameraSceneDescription(summary: "A desk with a monitor.", labels: [], recognizedText: [], capturedAt: Date())
+            camera.sceneDescription = CameraSceneDescription(summary: "A desk with a monitor.", labels: [], recognizedText: [], emotions: [], capturedAt: Date())
 
             let orchestrator = makeOrchestrator(fakeOpenAI: fakeOpenAI, fakeOllama: fakeOllama, camera: camera)
             let result = await orchestrator.processTurn("What's around me?", history: [])
@@ -5795,7 +5925,7 @@ final class StabilityRegressionTests: XCTestCase {
             ]
             let fakeOllama = FakeOllamaTransportForPipeline()
             let camera = makeHealthyCamera()
-            camera.sceneDescription = CameraSceneDescription(summary: "A desk and a monitor.", labels: [], recognizedText: [], capturedAt: Date())
+            camera.sceneDescription = CameraSceneDescription(summary: "A desk and a monitor.", labels: [], recognizedText: [], emotions: [], capturedAt: Date())
 
             configureOpenAIForTests()
 

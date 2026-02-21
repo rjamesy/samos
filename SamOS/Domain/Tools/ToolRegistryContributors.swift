@@ -21,6 +21,8 @@ struct CameraToolsRegistryContributor: ToolRegistryContributor {
         registry.register(CameraVisualQATool())
         registry.register(CameraInventorySnapshotTool())
         registry.register(SaveCameraMemoryNoteTool())
+        registry.register(DetectEmotionsTool())
+        registry.register(GPTVisionAnalysisTool())
     }
 }
 
@@ -30,6 +32,7 @@ struct MemoryToolsRegistryContributor: ToolRegistryContributor {
         registry.register(ListMemoriesTool())
         registry.register(DeleteMemoryTool())
         registry.register(ClearMemoriesTool())
+        registry.register(RecallAmbientTool())
     }
 }
 
@@ -38,6 +41,7 @@ struct SchedulingToolsRegistryContributor: ToolRegistryContributor {
         registry.register(ScheduleTaskTool())
         registry.register(CancelTaskTool())
         registry.register(ListTasksTool())
+        registry.register(TimerManageTool())
         registry.register(GetWeatherTool())
         registry.register(GetTimeTool())
     }
@@ -53,6 +57,9 @@ struct LearningToolsRegistryContributor: ToolRegistryContributor {
 
 struct WebToolsRegistryContributor: ToolRegistryContributor {
     func register(into registry: ToolRegistry) {
+        registry.register(MovieShowtimesTool())
+        registry.register(FishingReportTool())
+        registry.register(PriceLookupTool())
         registry.register(NewsFetchTool())
     }
 }
@@ -66,6 +73,7 @@ struct SkillsToolsRegistryContributor: ToolRegistryContributor {
         registry.register(SkillsLearnStatusTool())
         registry.register(SkillsLearnCancelTool())
         registry.register(SkillsLearnApprovePermissionsTool())
+        registry.register(SkillsLearnRequestChangesTool())
         registry.register(SkillsLearnInstallTool())
         registry.register(SkillsListTool())
         registry.register(SkillsRunSimTool())

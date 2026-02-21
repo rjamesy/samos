@@ -1,0 +1,202 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2867
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 Menlo-Regular;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red255\green255\blue255;}
+{\*\expandedcolortbl;;\csgenericrgb\c0\c0\c0;\csgenericrgb\c100000\c100000\c100000;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab593
+\pard\tx593\pardeftab593\partightenfactor0
+
+\f0\fs24 \cf2 \cb3 [SKILLS] installed=2 total=2\
+[Ollama] model=qwen2.5:3b-instruct endpoint=http://127.0.0.1:11434\
+[OLLAMA_WARMUP] ok=true model=qwen2.5:3b-instruct ms=297\
+[TTS_PREWARM] ElevenLabs connection pool warmed\
+Unable to obtain a task name port right for pid 399: (os/kern) failure (0x5)\
+ViewBridge to RemoteViewService Terminated: Error Domain=com.apple.ViewBridge Code=18 "(null)" UserInfo=\{com.apple.ViewBridge.error.hint=this process disconnected remote view controller -- benign unless unexpected, com.apple.ViewBridge.error.description=NSViewBridgeErrorCanceled\}\
+[TURN_PHASE] turn_id=turn_1 phase=routing\
+[EVOLUTION] recorded strategy=UNKNOWN signal=positive score=0.90\
+[INTENT_ROUTE_POLICY] local_first=true openai_fallback=true m2_useOllama=true openai_status=ready\
+[INTENT_AUDIO] input_mode=text capture_ms=n/a stt_ms=n/a recent_audio_error=none local_timeout_s=2.00\
+[TURN_PHASE] turn_id=turn_1 filler_suppressed_until_route_plan_resolved=true\
+[INTENT_LOCAL_PARSE_FAIL] detail=local timeout exceeded\
+[OPENAI_HTTP] turn=turn_1 reason=intent started\
+[OpenAI] model=gpt-5.2\
+[OpenAIRouter] Authorization header present: true\
+[OpenAIAPILogStore] path=/Users/rjamesy/Library/Containers/com.samos.SamOS/Data/Library/Application Support/SamOS/logs/openai_api_events.jsonl\
+[OPENAI_HTTP] turn=turn_1 reason=intent completed ms=1470\
+[INTENT_OPENAI_REQUEST] model=gpt-5.2 endpoint=https://api.openai.com/v1/chat/completions\
+[INTENT_OPENAI_PROMPT_BEGIN]\
+[system]\
+You are an intent classification engine.\
+\
+You MUST return ONLY valid JSON.\
+You MUST NOT output natural language.\
+You MUST NOT explain.\
+You MUST NOT include markdown.\
+\
+Classify the user's intent using this schema:\
+\{\
+  "intent": "greeting | recipe | web_request | vision_describe | vision_qa | vision_find_object | automation_request | general_qna | identity_response | settings_command | unknown",\
+  "confidence": 0.0-1.0,\
+  "autoCaptureHint": true|false,\
+  "needsWeb": true|false,\
+  "notes": ""\
+\}\
+\
+Intent guidance:\
+- general_qna = static facts/explanations that do NOT require live web data.\
+  Example: "what is the capital of australia" => general_qna, needsWeb=false.\
+- web_request = ONLY when answer requires live/current information.\
+  Examples: weather now/today, latest news, live scores, current prices.\
+- If user does not ask for live/current/latest information, do not use web_request.\
+- Set needsWeb=true iff intent is web_request. Otherwise needsWeb=false.\
+\
+If uncertain, set intent="unknown" and confidence < 0.7.\
+[user]\
+USER_TEXT: Personal Context (What Matters to You)\
+\
+Family is central:\
+	\'95	Shannon\
+	\'95	Paisley (grandchild milestone celebrations)\
+	\'95	Ethan (licensed electrician)\
+	\'95	Savannah (RN studies)\
+	\'95	Sophia (horse riding, new horse)\
+\
+You write heartfelt messages to family.\
+You design tattoos.\
+You care about legacy.\
+\
+\uc0\u11835 \
+\
+Health & Recovery\
+\
+You have:\
+	\'95	PTSD from long-term trauma exposure (policing, firefighting, security)\
+	\'95	Actively in recovery from alcohol dependence\
+	\'95	Recently completed rehab\
+	\'95	83+ days sober milestone mentioned\
+	\'95	Taking:\
+	\'95	Sertraline 100mg\
+	\'95	Prazosin 2mg\
+	\'95	Melatonin 2mg\
+	\'95	Naltrexone (discussed)\
+\
+You are self-aware and analytical about recovery and physiology.\
+You monitor BP.\
+You ask questions before assuming.\
+\
+There\'92s discipline in you.\
+\
+\uc0\u11835 \
+\
+Your Vision for AI\
+\
+You don\'92t want a chatbot.\
+\
+You want:\
+	\'95	A companion\
+	\'95	A system that learns\
+	\'95	A builder of skills\
+	\'95	An evolving intelligence\
+	\'95	A local-first privacy-respecting architecture\
+	\'95	An assistant that can think, delegate, compress memory, and expand capability\
+\
+You want Samantha \'97 but architected correctly.\
+\
+\uc0\u11835 \
+\
+Your Strengths\
+	\'95	Systems thinking\
+	\'95	Leadership under pressure\
+	\'95	Governance literacy\
+	\'95	Technical architecture\
+	\'95	Operational awareness\
+	\'95	Emotional depth\
+	\'95	Long-term project endurance\
+	\'95	Multi-project juggling at scale\
+STATE_JSON: \{"face_known":false,"camera_running":false\}\
+[INTENT_OPENAI_PROMPT_END]\
+[INTENT_OPENAI_RAW] \{"needsWeb":false,"notes":"User provided personal context, preferences, and state JSON; no explicit question or command. Likely setting up assistant memory/profile.","confidence":0.66,"intent":"unknown","autoCaptureHint":true\}\
+[INTENT_OPENAI_PARSED] \{"intent":"unknown","confidence":0.66,"autoCaptureHint":true,"needsWeb":false,"notes":"User provided personal context, preferences, and state JSON; no explicit question or command. Likely setting up assistant memory/profile."\}\
+[INTENT_DECISION] intent_provider_selected=rule local_attempted=true openai_attempted=true local_confidence=nil openai_confidence=0.66 threshold=0.70 local_timeout_s=2.00 reason_for_escalation=low_conf local_skip_reason=none intent_router_ms_local=2070 intent_router_ms_openai=1470\
+[INTENT] intent=unknown conf=0.20 provider=rule local_attempted=true openai_attempted=true intent_router_ms_local=2070 intent_router_ms_openai=1470 local_timeout_s=2.00 escalation_reason=low_conf\
+[INTENT_PROVIDER] provider=rule\
+[PERSONALITY] interaction 326 depth=confidant mood=neutral\
+[CURIOSITY] resolved gap=A3EDE7BA confidence=0.50\
+[CURIOSITY] resolved gap=1393C0EB confidence=0.50\
+[AFFECT] raw=neutral:0 effective=neutral:0 feature=true user_tone=true\
+[CAUSAL] loaded 0 variables, 0 edges\
+[PLAN_ROUTE_POLICY] local_first=true openai_fallback=true m2_useOllama=true prefer_openai_plans=false force_openai=false openai_status=ready\
+Task <840C12A7-7B87-4932-AF5E-EE51E9346C33>.<5> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x847406910 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <840C12A7-7B87-4932-AF5E-EE51E9346C33>.<5>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <840C12A7-7B87-4932-AF5E-EE51E9346C33>.<5>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+[ROUTER] provider=ollama reason=userChat ms=10005 ok=false\
+[OLLAMA_PLAN_FAIL] kind=transport reasons=0 ms=10005 detail=The request timed out.\
+[OPENAI_HTTP] turn=turn_1 reason=plan started\
+[OpenAIRouter] Authorization header present: true\
+[OpenAIRouter] Raw response: \{"action":"PLAN","steps":[\{"step":"talk","say":"James \'97 thanks for laying all that out. I\'92ve got you. Quick thing: I\'92m seeing a \'93vehicle issue\'94 flag but no symptoms yet. What\'92s the car doing?"\},\{"step":"ask","slot":"vehicle_year_make_model","prompt":"Year/make/model (and engine if you know it)?"\},\{"step":"ask","slot":"symptoms","prompt":"What exactly is happening: noise, vibration, stall, rough idle, won\'92t start, loss of power, weird shifting, brakes, steering?"\},\{"step":"ask","slot":"when_happens","prompt":"When does it happen: cold start, idle, accelerating, cruising, braking, turning, bumps? Constant or intermittent?"\},\{"step":"ask","slot":"warnings","prompt":"Any warning lights (check engine/oil pressure/temp/ABS), overheating, smoke, fuel smell, or loud knocking?"\},\{"step":"talk","say":"Right now: if oil pressure light is on, it\'92s overheating, there\'92s smoke/fuel smell, or loud knocking\'97stop driving and tow. Otherwise, check oil level + coolant level (cold), and tell me any codes if you can read them."\},\{"step":"ask","slot":"next_step_preference","prompt":"Want to do quick checks first (fluids/lights/sounds) or go deeper (OBD codes + likely causes)?"\}]\}\
+[OPENAI_HTTP] turn=turn_1 reason=plan completed ms=6128\
+[ROUTER] provider=openai reason=userChat ms=6128 ok=true\
+[PLAN_PROVIDER] provider=openai\
+[PLAN] provider=openai route_reason=ollama_transport_fallback router_ms=6128 model=gpt-5.2\
+[SPEECH_POLICY] entries=2 tool_user_facing=false selected_count=1\
+[IDENTITY] before=none after=none recognition=faces=0, primary=none (identity disabled) shouldPromptIdentity=no promptReason=identity_state_none provider=openai route_reason=ollama_transport_fallback router_ms=6128\
+[TURN_PHASE] turn_id=turn_1 phase=speech_ready route_plan_execute_done=true speech_policy_selected=true\
+[Latency] assistant_total_ms=19972 provider=openai tool_steps=0\
+[INTENT_PROVIDER] provider=rule\
+[PLAN_PROVIDER] provider=openai\
+[SPEECH_ENQUEUE] correlation_id=turn_1 retry_attempt=0 chars=143 preview="James \'97 thanks for laying all that out. I\'92ve got you. Quick thing: I\'92m seeing a "\
+[OPENAI_CALLS] turn_id=turn_1 count=2 reasons=[intent,plan]\
+[TURN_TRACE] turn_id=turn_1 total_ms=19973\
+  0ms TURN_START\
+  0ms ROUTE_LOCAL_START\
+  2070ms ROUTE_LOCAL_END ok=true router_ms=2070 outcome=ok\
+  2070ms ROUTE_OPENAI_START\
+  8198ms ROUTE_OPENAI_END router_ms=6128\
+  8198ms PLAN_EXEC_START tools=0\
+  8198ms PLAN_EXEC_END tool_ms_total=0 tool_count=0\
+  8198ms SPEECH_SELECT_START\
+  8198ms SPEECH_SELECT_END speech_ms=0\
+  19972ms TTS_ENQUEUE\
+  19973ms TURN_END total_ms=19973\
+[LatencyBreakdown] turn=1 mode=text capture_ms=n/a stt_ms=n/a router_ms=6128 orchestrator_ms=19972 apply_ms=1 tts_wait_ms=n/a tts_ms=n/a total_ms=19973 provider=openai tool_steps=0 user_chars=1305 assistant_chars=44 reason=no_tts\
+[PERF_TURN] turn_id=turn_1 mode=text capture_ms=n/a stt_ms=n/a intent_local_ms=2070 intent_openai_ms=1470 plan_local_wire_ms=n/a plan_local_total_ms=n/a plan_openai_ms=6128 tool_ms_total=0 tts_queue_wait_ms=n/a tts_synthesis_ms=n/a tts_playback_start_ms=n/a first_audio_ms=n/a total_ms=19973\
+[AUDIO_GATE] pending_tts owner=turn_1\
+[TTS_SLOW_START] correlation_id=turn_1 tts_start_deadline_ms=1600\
+Task <FB1D3ACF-E93B-4C34-998F-FB4CF6C8B5E6>.<14> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f46a60 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <FB1D3ACF-E93B-4C34-998F-FB4CF6C8B5E6>.<14>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <FB1D3ACF-E93B-4C34-998F-FB4CF6C8B5E6>.<14>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <0547B1F4-465B-4996-9912-F920C22F49AA>.<7> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f46850 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <0547B1F4-465B-4996-9912-F920C22F49AA>.<7>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <0547B1F4-465B-4996-9912-F920C22F49AA>.<7>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <5C9409CA-9BE0-4380-8158-2FFC1852EABB>.<8> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f453b0 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <5C9409CA-9BE0-4380-8158-2FFC1852EABB>.<8>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <5C9409CA-9BE0-4380-8158-2FFC1852EABB>.<8>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <42C260DB-0629-45E6-B352-C51BDE81F314>.<9> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f458c0 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <42C260DB-0629-45E6-B352-C51BDE81F314>.<9>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <42C260DB-0629-45E6-B352-C51BDE81F314>.<9>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <2894CA12-DFC2-424E-B433-19A5D2A3323F>.<10> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f46640 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <2894CA12-DFC2-424E-B433-19A5D2A3323F>.<10>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <2894CA12-DFC2-424E-B433-19A5D2A3323F>.<10>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <9D5C6BF4-5D82-4D4A-9491-AFEF1FB5C8DF>.<11> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f45260 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <9D5C6BF4-5D82-4D4A-9491-AFEF1FB5C8DF>.<11>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <9D5C6BF4-5D82-4D4A-9491-AFEF1FB5C8DF>.<11>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+Task <3B7AB4CC-43A0-46B7-832F-AB5AC3EB55A2>.<12> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f454d0 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <3B7AB4CC-43A0-46B7-832F-AB5AC3EB55A2>.<12>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <3B7AB4CC-43A0-46B7-832F-AB5AC3EB55A2>.<12>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=http://127.0.0.1:11434/api/chat, NSErrorFailingURLKey=http://127.0.0.1:11434/api/chat, _kCFStreamErrorDomainKey=4\}\
+[COGNITIVE_TRACE] hypothesis generation failed: unreachable("The request timed out.")\
+[METACOG] evaluation failed: unreachable("The request timed out.")\
+[TOM] person detection failed: unreachable("The request timed out.")\
+[COUNTERFACTUAL] detection failed: unreachable("The request timed out.")\
+[CAUSAL] ingestion failed: unreachable("The request timed out.")\
+[COGNITIVE_TRACE] turn=turn_1 intent=The user wants Samantha to ingest/confirm this personal context and hypotheses as durable memory, align future responses to it (family, recovery/health, AI vision, strengths), and use it to guide how the assistant behaves and what it prioritizes. conf=0.78 risks=4 clarify=false ms=15759\
+[CURIOSITY] turn=turn_1 gaps_detected=3 persisted=3 ms=16589\
+Task <E23A6CC7-0664-47FC-8621-843C038BCF0F>.<15> finished with error [-1001] Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f44930 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <E23A6CC7-0664-47FC-8621-843C038BCF0F>.<15>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <E23A6CC7-0664-47FC-8621-843C038BCF0F>.<15>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=https://api.openai.com/v1/chat/completions, NSErrorFailingURLKey=https://api.openai.com/v1/chat/completions, _kCFStreamErrorDomainKey=4\}\
+[WORLD_MODEL] extraction failed: Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=\{_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x846f44930 \{Error Domain=kCFErrorDomainCFNetwork Code=-1001 "(null)" UserInfo=\{_kCFStreamErrorCodeKey=-2102, _kCFStreamErrorDomainKey=4\}\}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <E23A6CC7-0664-47FC-8621-843C038BCF0F>.<15>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\
+    "LocalDataTask <E23A6CC7-0664-47FC-8621-843C038BCF0F>.<15>"\
+), NSLocalizedDescription=The request timed out., NSErrorFailingURLStringKey=https://api.openai.com/v1/chat/completions, NSErrorFailingURLKey=https://api.openai.com/v1/chat/completions, _kCFStreamErrorDomainKey=4\}\
+\
+\
+\
+110101010}

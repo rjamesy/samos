@@ -4,6 +4,7 @@ import SQLite3
 enum SemanticMemoryRole: String, Codable {
     case user
     case assistant
+    case ambient
 }
 
 enum SemanticMemoryType: String {
@@ -216,15 +217,16 @@ struct HybridSemanticMemoryLLMClient: SemanticMemoryLLMClient {
         let preferred = OpenAISettings.generalModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = preferred.isEmpty ? OpenAISettings.defaultPreferredModel : preferred
 
-        let payload: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: model)
+        var payload: [String: Any] = [
             "model": model,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userPrompt]
             ],
-            "temperature": 0.0,
-            "max_tokens": 900
+            "temperature": 0.0
         ]
+        payload[tokenKey] = 900
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -520,6 +522,30 @@ final class SemanticMemoryStore {
     func episodes(onLocalDate date: String) -> [SemanticEpisodeRecord] {
         let episodes = listEpisodes(limit: 400)
         return episodes.filter { Self.localDayString($0.createdAt) == date }
+    }
+
+    func listAmbientEpisodes(limit: Int = 20) -> [SemanticEpisodeRecord] {
+        syncOnQueue {
+            guard let db else { return [] }
+            let sql = """
+            SELECT id, created_ts, updated_ts, session_id, title, summary, entities_json, facts_json, decisions_json, actions_json, tags_json, importance, confidence, source_span_json
+            FROM episodes
+            WHERE tags_json LIKE '%ambient%'
+            ORDER BY updated_ts DESC
+            LIMIT ?
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(max(1, limit)))
+            var rows: [SemanticEpisodeRecord] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let row = decodeEpisodeRow(stmt) {
+                    rows.append(row)
+                }
+            }
+            return rows
+        }
     }
 
     func upsertEpisode(id: String?,
@@ -1073,6 +1099,17 @@ final class MemoryCaptureService {
                                                    metaJSON: metaJSON) {
                 state.pendingMessageIDs.append(messageID)
                 state.pendingUserTurns += 1
+                #if DEBUG
+                let userPreview = String(trimmedUser.prefix(80))
+                let debugTurnID = turnID
+                Task { @MainActor in
+                    DebugLogStore.shared.logMemory(
+                        turnID: debugTurnID,
+                        action: "save user",
+                        summary: userPreview
+                    )
+                }
+                #endif
             }
         }
 
@@ -1085,6 +1122,17 @@ final class MemoryCaptureService {
                                                   turnID: turnID,
                                                   metaJSON: nil) {
                 state.pendingMessageIDs.append(messageID)
+                #if DEBUG
+                let assistPreview = String(trimmedAssistant.prefix(80))
+                let debugTurnID2 = turnID
+                Task { @MainActor in
+                    DebugLogStore.shared.logMemory(
+                        turnID: debugTurnID2,
+                        action: "save assistant",
+                        summary: assistPreview
+                    )
+                }
+                #endif
             }
         }
 
@@ -1370,6 +1418,16 @@ struct MemoryMerger {
                 "episode_id": row.id,
                 "session_id": sessionID
             ])
+            #if DEBUG
+            let episodeSummary = payload.summary.prefix(80).description
+            Task { @MainActor in
+                DebugLogStore.shared.logMemory(
+                    turnID: nil,
+                    action: "episode created",
+                    summary: episodeSummary
+                )
+            }
+            #endif
         }
         return row
     }

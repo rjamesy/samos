@@ -338,6 +338,7 @@ struct CameraSceneDescription {
     let summary: String
     let labels: [String]
     let recognizedText: [String]
+    let emotions: [CameraEmotionReading]
     let capturedAt: Date
 
     func markdown() -> String {
@@ -356,6 +357,15 @@ struct CameraSceneDescription {
             lines.append("## Detected Labels")
             for label in labels {
                 lines.append("- \(label)")
+            }
+        }
+
+        if !emotions.isEmpty {
+            lines.append("")
+            lines.append("## Facial Expressions")
+            for reading in emotions {
+                let who = reading.personName ?? "Person \(reading.faceIndex + 1)"
+                lines.append("- \(who): \(reading.emotion.rawValue) \(reading.emotion.emoji) (\(Int(reading.confidence * 100))%)")
             }
         }
 
@@ -418,6 +428,48 @@ struct CameraFrameAnalysis {
     let capturedAt: Date
 }
 
+// MARK: - Facial Emotion Detection
+
+enum CameraFacialEmotion: String, CaseIterable {
+    case happy
+    case sad
+    case angry
+    case surprised
+    case neutral
+    case confused
+
+    var emoji: String {
+        switch self {
+        case .happy: return "😊"
+        case .sad: return "😢"
+        case .angry: return "😠"
+        case .surprised: return "😲"
+        case .neutral: return "😐"
+        case .confused: return "🤔"
+        }
+    }
+}
+
+struct CameraEmotionReading {
+    let emotion: CameraFacialEmotion
+    let confidence: Float
+    let faceIndex: Int
+    let personName: String? // if face is recognized
+}
+
+struct CameraEmotionSnapshot {
+    let readings: [CameraEmotionReading]
+    let capturedAt: Date
+
+    var summary: String {
+        if readings.isEmpty { return "No faces detected." }
+        return readings.map { reading in
+            let who = reading.personName ?? "Person \(reading.faceIndex + 1)"
+            return "\(who) appears \(reading.emotion.rawValue) (\(Int(reading.confidence * 100))%)"
+        }.joined(separator: ". ") + "."
+    }
+}
+
 struct CameraHealth: Equatable {
     let lastGoodFrameAt: Date?
     let lastFrameErrorAt: Date?
@@ -464,6 +516,8 @@ protocol CameraVisionProviding: AnyObject {
     func recognizeKnownFaces() -> CameraFaceRecognitionResult?
     func knownFaceNames() -> [String]
     func clearKnownFaces() -> Bool
+    func detectFacialEmotions() -> CameraEmotionSnapshot?
+    func captureFrameAsJPEG(quality: CGFloat) -> Data?
 }
 
 enum CameraVisionHealthPolicy {
@@ -627,16 +681,26 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
             .map { "\($0.label) (\(Int(($0.confidence * 100).rounded()))%)" }
         let visibleText = analysis.recognizedText.prefix(3).map { $0 }
 
+        // Detect facial emotions if faces are present
+        let emotions: [CameraEmotionReading]
+        if analysis.faces.count > 0, let emotionSnapshot = detectFacialEmotions() {
+            emotions = emotionSnapshot.readings
+        } else {
+            emotions = []
+        }
+
         let summary = buildSummary(
             labels: Array(labels),
             visibleText: Array(visibleText),
             faceCount: analysis.faces.count,
+            emotions: emotions,
             capturedAt: analysis.capturedAt
         )
         return CameraSceneDescription(
             summary: summary,
             labels: Array(labels),
             recognizedText: Array(visibleText),
+            emotions: emotions,
             capturedAt: analysis.capturedAt
         )
     }
@@ -1170,7 +1234,201 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
         try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: data)
     }
 
-    private func buildSummary(labels: [String], visibleText: [String], faceCount: Int, capturedAt: Date) -> String {
+    // MARK: - Facial Emotion Detection
+
+    func detectFacialEmotions() -> CameraEmotionSnapshot? {
+        guard let snapshot = latestFrameSnapshot() else { return nil }
+        let image = snapshot.image
+
+        // Detect faces with landmarks
+        let landmarkRequest = VNDetectFaceLandmarksRequest()
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([landmarkRequest])
+        } catch {
+            return CameraEmotionSnapshot(readings: [], capturedAt: snapshot.capturedAt)
+        }
+
+        let faces = landmarkRequest.results ?? []
+        guard !faces.isEmpty else {
+            return CameraEmotionSnapshot(readings: [], capturedAt: snapshot.capturedAt)
+        }
+
+        // Get face recognition results to match names
+        let recognition = recognizeKnownFaces()
+
+        var readings: [CameraEmotionReading] = []
+        for (index, face) in faces.enumerated() {
+            let emotion = classifyEmotion(from: face)
+
+            // Try to match this face to a known person by bounding box proximity
+            var personName: String?
+            if let matches = recognition?.matches {
+                // Simple: assign names in order of face size (largest first)
+                if index < matches.count {
+                    personName = matches[index].name
+                }
+            }
+
+            readings.append(CameraEmotionReading(
+                emotion: emotion.0,
+                confidence: emotion.1,
+                faceIndex: index,
+                personName: personName
+            ))
+        }
+
+        return CameraEmotionSnapshot(readings: readings, capturedAt: snapshot.capturedAt)
+    }
+
+    /// Classify emotion from face landmarks using geometric heuristics.
+    /// Analyzes mouth curvature, eye openness, eyebrow position relative to eyes.
+    private func classifyEmotion(from face: VNFaceObservation) -> (CameraFacialEmotion, Float) {
+        guard let landmarks = face.landmarks else {
+            return (.neutral, 0.3)
+        }
+
+        // Extract key landmark regions
+        let outerLips = landmarks.outerLips
+        let innerLips = landmarks.innerLips
+        let leftEye = landmarks.leftEye
+        let rightEye = landmarks.rightEye
+        let leftEyebrow = landmarks.leftEyebrow
+        let rightEyebrow = landmarks.rightEyebrow
+
+        // Calculate mouth metrics
+        var mouthOpenness: Float = 0 // 0 = closed, higher = more open
+        var mouthCurvature: Float = 0 // positive = smile, negative = frown
+
+        if let outer = outerLips, let inner = innerLips {
+            let outerPoints = landmarkPoints(outer)
+            let innerPoints = landmarkPoints(inner)
+
+            if outerPoints.count >= 6 {
+                // Mouth width vs height ratio
+                let leftCorner = outerPoints[0]
+                let rightCorner = outerPoints[outerPoints.count / 2]
+                let mouthWidth = abs(rightCorner.x - leftCorner.x)
+
+                // Top and bottom of outer lips for openness
+                let topIdx = outerPoints.count / 4
+                let bottomIdx = (outerPoints.count * 3) / 4
+                let topPoint = outerPoints[min(topIdx, outerPoints.count - 1)]
+                let bottomPoint = outerPoints[min(bottomIdx, outerPoints.count - 1)]
+                let mouthHeight = abs(topPoint.y - bottomPoint.y)
+
+                if mouthWidth > 0 {
+                    mouthOpenness = Float(mouthHeight / mouthWidth)
+                }
+
+                // Curvature: compare corner Y positions to center lip Y
+                let cornerAvgY = (leftCorner.y + rightCorner.y) / 2
+                let centerY = topPoint.y
+                mouthCurvature = Float(cornerAvgY - centerY) // positive = corners up = smile
+            }
+
+            // Inner lip gap for open mouth
+            if innerPoints.count >= 4 {
+                let innerTop = innerPoints[innerPoints.count / 4]
+                let innerBottom = innerPoints[(innerPoints.count * 3) / 4]
+                let innerGap = Float(abs(innerTop.y - innerBottom.y))
+                mouthOpenness = max(mouthOpenness, innerGap * 3)
+            }
+        }
+
+        // Eye openness
+        var eyeOpenness: Float = 0.5
+        if let le = leftEye, let re = rightEye {
+            let leftPoints = landmarkPoints(le)
+            let rightPoints = landmarkPoints(re)
+            let leftOpen = eyeOpenRatio(leftPoints)
+            let rightOpen = eyeOpenRatio(rightPoints)
+            eyeOpenness = (leftOpen + rightOpen) / 2
+        }
+
+        // Eyebrow raise
+        var eyebrowRaise: Float = 0
+        if let lb = leftEyebrow, let rb = rightEyebrow, let le = leftEye, let re = rightEye {
+            let lbPoints = landmarkPoints(lb)
+            let rbPoints = landmarkPoints(rb)
+            let lePoints = landmarkPoints(le)
+            let rePoints = landmarkPoints(re)
+
+            let lbCenter = averageY(lbPoints)
+            let rbCenter = averageY(rbPoints)
+            let leCenter = averageY(lePoints)
+            let reCenter = averageY(rePoints)
+
+            // In Vision coordinates, Y increases upward
+            let leftRaise = lbCenter - leCenter
+            let rightRaise = rbCenter - reCenter
+            eyebrowRaise = (leftRaise + rightRaise) / 2
+        }
+
+        // Classify based on feature combinations
+        // Happy: smile (positive curvature) + moderate eye openness
+        if mouthCurvature > 0.02 && mouthOpenness > 0.15 {
+            return (.happy, min(0.9, 0.5 + mouthCurvature * 5))
+        }
+
+        // Surprised: wide eyes + open mouth + raised eyebrows
+        if eyeOpenness > 0.6 && mouthOpenness > 0.4 && eyebrowRaise > 0.05 {
+            return (.surprised, min(0.9, 0.4 + mouthOpenness))
+        }
+
+        // Sad: frown (negative curvature) + low eyebrows
+        if mouthCurvature < -0.01 && eyebrowRaise < 0.02 {
+            return (.sad, min(0.8, 0.4 + abs(mouthCurvature) * 5))
+        }
+
+        // Angry: low eyebrows + narrow eyes + closed/tight mouth
+        if eyebrowRaise < 0.01 && eyeOpenness < 0.35 && mouthOpenness < 0.15 {
+            return (.angry, 0.5)
+        }
+
+        // Confused: asymmetric eyebrows or tilted head
+        if abs(eyebrowRaise) < 0.01 && mouthCurvature < 0 && eyeOpenness > 0.4 {
+            return (.confused, 0.4)
+        }
+
+        // Default: neutral
+        return (.neutral, 0.6)
+    }
+
+    private func landmarkPoints(_ region: VNFaceLandmarkRegion2D) -> [CGPoint] {
+        let count = region.pointCount
+        let buffer = region.normalizedPoints
+        return (0..<count).map { CGPoint(x: CGFloat(buffer[$0].x), y: CGFloat(buffer[$0].y)) }
+    }
+
+    private func eyeOpenRatio(_ points: [CGPoint]) -> Float {
+        guard points.count >= 4 else { return 0.5 }
+        // Approximate eye height/width ratio
+        let minY = points.map(\.y).min() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+        let minX = points.map(\.x).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let width = maxX - minX
+        guard width > 0 else { return 0.5 }
+        return Float((maxY - minY) / width)
+    }
+
+    private func averageY(_ points: [CGPoint]) -> Float {
+        guard !points.isEmpty else { return 0 }
+        return Float(points.map(\.y).reduce(0, +) / CGFloat(points.count))
+    }
+
+    // MARK: - Frame Capture for GPT Vision
+
+    func captureFrameAsJPEG(quality: CGFloat = 0.7) -> Data? {
+        guard let snapshot = latestFrameSnapshot() else { return nil }
+        let nsImage = NSImage(cgImage: snapshot.image, size: NSSize(width: snapshot.image.width, height: snapshot.image.height))
+        guard let tiffData = nsImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
+        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
+    }
+
+    private func buildSummary(labels: [String], visibleText: [String], faceCount: Int, emotions: [CameraEmotionReading] = [], capturedAt: Date) -> String {
         var parts: [String] = []
         if !labels.isEmpty {
             let top = labels.prefix(3).joined(separator: ", ")
@@ -1179,6 +1437,13 @@ final class CameraVisionService: NSObject, CameraVisionProviding, AVCaptureVideo
         if faceCount > 0 {
             let noun = faceCount == 1 ? "face" : "faces"
             parts.append("I can detect \(faceCount) \(noun).")
+        }
+        if !emotions.isEmpty {
+            let emotionDescs = emotions.map { reading in
+                let who = reading.personName ?? "person \(reading.faceIndex + 1)"
+                return "\(who) looks \(reading.emotion.rawValue)"
+            }
+            parts.append(emotionDescs.joined(separator: ", ") + ".")
         }
         if !visibleText.isEmpty {
             parts.append("Visible text includes \"\(visibleText.joined(separator: "\", \""))\".")

@@ -56,6 +56,42 @@ final class SchedulerToolExtTests: XCTestCase {
         XCTAssertEqual(dict["status"] as? String, "scheduled")
     }
 
+    func testScheduleTaskWithDurationSecondsAndTypeTimer() {
+        let tool = ScheduleTaskTool()
+        let result = tool.execute(args: [
+            "type": "timer",
+            "duration_seconds": "10",
+            "label": "Quick timer"
+        ])
+
+        guard let data = result.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let spoken = dict["spoken"] as? String else {
+            return XCTFail("Should return structured JSON with spoken field")
+        }
+
+        XCTAssertTrue(spoken.contains("Timer"), "Spoken should say 'Timer', got: \(spoken)")
+        XCTAssertFalse(spoken.contains("Alarm"), "Spoken should NOT say 'Alarm', got: \(spoken)")
+        XCTAssertEqual(dict["status"] as? String, "scheduled")
+    }
+
+    func testTimerManageStructuredStartSchedules() {
+        let tool = TimerManageTool()
+        let result = tool.execute(args: [
+            "action": "start",
+            "duration_seconds": "10",
+            "label": "kitchen"
+        ])
+
+        guard let data = result.payload.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return XCTFail("Expected structured JSON result, got: \(result.payload)")
+        }
+
+        XCTAssertEqual(dict["status"] as? String, "scheduled")
+        XCTAssertTrue((dict["spoken"] as? String)?.lowercased().contains("timer set for 10 seconds") == true)
+    }
+
     // MARK: - ActionValidator
 
     func testActionValidatorAcceptsInSeconds() {
@@ -74,6 +110,16 @@ final class SchedulerToolExtTests: XCTestCase {
         ]))
         let failure = ActionValidator.validate(action)
         XCTAssertNil(failure, "schedule_task with run_at should pass validation")
+    }
+
+    func testActionValidatorAcceptsDurationSecondsForTimer() {
+        let action = Action.tool(ToolAction(name: "schedule_task", args: [
+            "type": "timer",
+            "duration_seconds": "10",
+            "label": "Quick timer"
+        ]))
+        let failure = ActionValidator.validate(action)
+        XCTAssertNil(failure, "schedule_task with duration_seconds should pass validation")
     }
 
     func testActionValidatorRejectsMissingBothArgs() {

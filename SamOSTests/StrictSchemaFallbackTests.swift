@@ -105,6 +105,13 @@ final class StrictSchemaFallbackTests: XCTestCase {
         func latestPreviewImage() -> NSImage? { nil }
         func describeCurrentScene() -> CameraSceneDescription? { nil }
         func currentAnalysis() -> CameraFrameAnalysis? { nil }
+        var health: CameraHealth { CameraHealth(lastGoodFrameAt: nil, lastFrameErrorAt: nil, consecutiveErrors: 0, isHealthy: true) }
+        func enrollFace(name: String) -> CameraFaceEnrollmentResult { .init(status: .unsupported, enrolledName: nil, samplesForName: 0, totalKnownNames: 0, capturedAt: nil) }
+        func recognizeKnownFaces() -> CameraFaceRecognitionResult? { nil }
+        func knownFaceNames() -> [String] { [] }
+        func clearKnownFaces() -> Bool { false }
+        func detectFacialEmotions() -> CameraEmotionSnapshot? { nil }
+        func captureFrameAsJPEG(quality: CGFloat) -> Data? { nil }
     }
 
     private var savedUseOllama = false

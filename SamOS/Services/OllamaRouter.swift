@@ -46,9 +46,9 @@ protocol OllamaWireTimedTransport {
 /// Real transport that hits the Ollama /api/chat endpoint.
 struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
     static let inferenceOptions: [String: Any] = [
-        "temperature": 0.1,
+        "temperature": 0.4,
         "top_p": 0.9,
-        "num_predict": 256
+        "num_predict": 512
     ]
 
     private static var didLogStartup = false
@@ -76,14 +76,14 @@ struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
         }
 
         let adaptive = Self.adaptiveNumPredict(for: messages)
-        let numPredict = min(1200, max(120, maxOutputTokens ?? adaptive))
+        let numPredict = min(2000, max(200, maxOutputTokens ?? adaptive))
         let requestBody: [String: Any] = [
             "model": resolvedModel,
             "messages": messages,
             "stream": false,
             "format": "json",
             "options": [
-                "temperature": 0.1,
+                "temperature": 0.4,
                 "top_p": 0.9,
                 "num_predict": numPredict
             ]
@@ -92,7 +92,7 @@ struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
+        request.timeoutInterval = 10
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let data: Data
@@ -128,11 +128,11 @@ struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
 
     private static func adaptiveNumPredict(for messages: [[String: String]]) -> Int {
         if let forced = explicitMaxOutputTokens(in: messages) {
-            return max(120, min(1200, forced))
+            return max(200, min(2000, forced))
         }
         let userText = messages.last(where: { ($0["role"] ?? "").lowercased() == "user" })?["content"] ?? ""
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return 512 }
+        guard !trimmed.isEmpty else { return 600 }
 
         let lower = trimmed.lowercased()
         let wordCount = lower.split(whereSeparator: \.isWhitespace).count
@@ -145,15 +145,15 @@ struct RealOllamaTransport: OllamaTransport, OllamaWireTimedTransport {
             partial + (lower.contains(marker) ? 1 : 0)
         }
         if lower.contains("\n") || lower.contains("```") {
-            return 1200
+            return 2000
         }
         if trimmed.count > 260 || wordCount > 45 || markerHits >= 2 || sentenceCount >= 4 {
-            return 900
+            return 1400
         }
         if trimmed.count < 50 && wordCount <= 8 {
-            return 220
+            return 400
         }
-        return 420
+        return 600
     }
 
     private static func explicitMaxOutputTokens(in messages: [[String: String]]) -> Int? {
@@ -619,7 +619,7 @@ final class OllamaRouter {
             ["role": "system", "content": systemPrompt]
         ]
 
-        let historyWindow = 10
+        let historyWindow = 20
         let nonSystem = history.filter { $0.role != .system }
         if nonSystem.count > historyWindow {
             let older = Array(nonSystem.dropLast(historyWindow))
@@ -743,18 +743,18 @@ final class OllamaRouter {
 
     private func summarizeConversation(_ messages: [ChatMessage]) -> String {
         guard !messages.isEmpty else { return "" }
-        let clipped = messages.suffix(40)
+        let clipped = messages.suffix(60)
         var lines: [String] = []
-        lines.reserveCapacity(6)
+        lines.reserveCapacity(12)
 
         for message in clipped {
-            guard lines.count < 6 else { break }
+            guard lines.count < 12 else { break }
             let text = message.text
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             let prefix = message.role == .user ? "User:" : "Sam:"
-            let snippet = text.count > 120 ? String(text.prefix(117)) + "..." : text
+            let snippet = text.count > 200 ? String(text.prefix(197)) + "..." : text
             lines.append("- \(prefix) \(snippet)")
         }
 

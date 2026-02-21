@@ -371,6 +371,11 @@ private final class FakeCameraVisionProvider: CameraVisionProviding {
     }
     func recognizeKnownFaces() -> CameraFaceRecognitionResult? { recognitionResult }
     func knownFaceNames() -> [String] { faceNames }
+    func clearKnownFaces() -> Bool { false }
+
+    var health: CameraHealth { CameraHealth(lastGoodFrameAt: nil, lastFrameErrorAt: nil, consecutiveErrors: 0, isHealthy: true) }
+    func detectFacialEmotions() -> CameraEmotionSnapshot? { nil }
+    func captureFrameAsJPEG(quality: CGFloat) -> Data? { nil }
 }
 
 final class CameraVisionToolBehaviorTests: XCTestCase {
@@ -405,6 +410,7 @@ final class CameraVisionToolBehaviorTests: XCTestCase {
             summary: "I can see a desk and a monitor.",
             labels: ["desk (91%)", "monitor (88%)"],
             recognizedText: ["hello world"],
+            emotions: [],
             capturedAt: Date()
         )
         let tool = DescribeCameraViewTool(camera: fake)
@@ -545,6 +551,7 @@ final class CameraVisionToolBehaviorTests: XCTestCase {
             summary: "I can see a desk setup.",
             labels: ["desk (91%)"],
             recognizedText: ["build notes"],
+            emotions: [],
             capturedAt: Date()
         )
         fake.analysis = CameraFrameAnalysis(
@@ -684,12 +691,16 @@ private final class ScriptedSkillForgeGPTClient: SkillForgeGPTClient {
         let approval: SkillApproverResponse
     }
 
+    let authorityProvider: SkillForgeAuthorityProvider
     let modelName: String
     private let scripts: [IterationScript]
     private(set) var currentIteration: Int = 0
     private(set) var capturedFeedback: [SkillForgeFeedback] = []
 
-    init(modelName: String = "gpt-5.2-test", scripts: [IterationScript]) {
+    init(modelName: String = "gpt-5.2-test",
+         scripts: [IterationScript],
+         authorityProvider: SkillForgeAuthorityProvider = .openAI) {
+        self.authorityProvider = authorityProvider
         self.modelName = modelName
         self.scripts = scripts
     }
@@ -851,6 +862,200 @@ final class SkillForgePipelinePhase4Tests: XCTestCase {
         let persisted = store.getPackage(id: installed.manifest.skillID)
         XCTAssertNotNil(persisted, "Package should only be persisted after approval")
     }
+
+    func testPipelineBlocksWhenProviderIsNotOpenAI() async {
+        let store = makeStore()
+        let fakeGPT = ScriptedSkillForgeGPTClient(
+            scripts: [],
+            authorityProvider: .unknown
+        )
+        let pipeline = SkillForgePipelineV2(
+            gptClient: fakeGPT,
+            store: store,
+            maxIterations: 5
+        )
+        var logs: [String] = []
+        let outcome = await pipeline.run(requirements: makeRequirements(), onLog: { logs.append($0) })
+
+        XCTAssertFalse(outcome.approved)
+        XCTAssertEqual(outcome.iterations, 0)
+        XCTAssertTrue((outcome.blockedReason ?? "").contains("requires OpenAI GPT authority"))
+        XCTAssertTrue(logs.contains(where: { $0.contains("[Blocked]") }))
+    }
+
+    func testPipelineBlocksWhenModelIsNotGPT() async {
+        let store = makeStore()
+        let fakeGPT = ScriptedSkillForgeGPTClient(
+            modelName: "o3-mini",
+            scripts: [],
+            authorityProvider: .openAI
+        )
+        let pipeline = SkillForgePipelineV2(
+            gptClient: fakeGPT,
+            store: store,
+            maxIterations: 5
+        )
+        var logs: [String] = []
+        let outcome = await pipeline.run(requirements: makeRequirements(), onLog: { logs.append($0) })
+
+        XCTAssertFalse(outcome.approved)
+        XCTAssertEqual(outcome.iterations, 0)
+        XCTAssertTrue((outcome.blockedReason ?? "").contains("requires a GPT model"))
+        XCTAssertTrue(logs.contains(where: { $0.contains("[Blocked]") }))
+    }
+
+    func testLiveOpenAIPipelineCreatesApprovedPackageWhenEnabled() async {
+        let envKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = (envKey?.isEmpty == false ? envKey : readSamOSDevAPIKeyFromPlist())
+
+        guard let apiKey, !apiKey.isEmpty else {
+            XCTFail("Live OpenAI API key is required to run skill creation test.")
+            return
+        }
+
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = apiKey
+        OpenAISettings.generalModel = OpenAISettings.defaultPreferredModel
+
+        let store = makeStore()
+        let pipeline = SkillForgePipelineV2(
+            gptClient: OpenAISkillArchitectClient(),
+            store: store,
+            maxIterations: 8
+        )
+
+        let requirements = SkillForgeRequirements(
+            goal: "Create a concise formatter skill that rewrites user input into bullet points.",
+            missing: "No dedicated bullet formatting skill is installed.",
+            constraints: [
+                "Use only existing tools.",
+                "Must be deterministic.",
+                "No external URLs required."
+            ]
+        )
+
+        var logs: [String] = []
+        let outcome = await pipeline.run(
+            requirements: requirements,
+            onLog: { logs.append($0) },
+            installOnApproval: false
+        )
+
+        XCTAssertTrue(logs.contains(where: { $0.contains("[DraftPlan]") }), "Expected live pipeline to draft a plan.")
+        XCTAssertTrue(
+            outcome.approved,
+            """
+            Live skill forge did not reach approval.
+            blockedReason=\(outcome.blockedReason ?? "none")
+            lastCritique=\(outcome.lastCritique ?? "none")
+            requiredChanges=\(outcome.requiredChanges.joined(separator: " | "))
+            recentLogs=\(logs.suffix(10).joined(separator: " || "))
+            """
+        )
+        XCTAssertNotNil(outcome.installedPackage)
+        XCTAssertEqual(outcome.installedPackage?.signoff?.approved, true)
+        XCTAssertEqual(outcome.installedPackage?.signoff?.model, OpenAISkillArchitectClient().modelName)
+    }
+
+    func testLiveOpenAIPipelineBuildsMovieShowtimesSkillWhenEnabled() async {
+        let envKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = (envKey?.isEmpty == false ? envKey : readSamOSDevAPIKeyFromPlist())
+
+        guard let apiKey, !apiKey.isEmpty else {
+            XCTFail("Live OpenAI API key is required to run movie showtimes skill creation test.")
+            return
+        }
+
+        OpenAISettings._resetCacheForTesting()
+        OpenAISettings.apiKey = apiKey
+        OpenAISettings.generalModel = OpenAISettings.defaultPreferredModel
+
+        let store = makeStore()
+        let pipeline = SkillForgePipelineV2(
+            gptClient: OpenAISkillArchitectClient(),
+            store: store,
+            maxIterations: 10
+        )
+
+        let requirements = SkillForgeRequirements(
+            goal: "Build a skill to get movie showtimes at cinemas in Springfield QLD Australia.",
+            missing: "No dedicated movie showtimes skill for Springfield is installed.",
+            constraints: [
+                "Use only existing tools.",
+                "Must call tool movies.showtimes.",
+                "Ask one clarifying question only when location is missing.",
+                "Return a concise list with cinema, movie, and session times."
+            ]
+        )
+
+        var logs: [String] = []
+        let outcome = await pipeline.run(
+            requirements: requirements,
+            onLog: { logs.append($0) },
+            installOnApproval: false
+        )
+
+        XCTAssertTrue(logs.contains(where: { $0.contains("[DraftPlan]") }), "Expected live pipeline to draft a plan.")
+        XCTAssertTrue(
+            outcome.approved,
+            """
+            Live movie skill forge did not reach approval.
+            blockedReason=\(outcome.blockedReason ?? "none")
+            lastCritique=\(outcome.lastCritique ?? "none")
+            requiredChanges=\(outcome.requiredChanges.joined(separator: " | "))
+            recentLogs=\(logs.suffix(12).joined(separator: " || "))
+            """
+        )
+
+        guard let package = outcome.installedPackage else {
+            return XCTFail("Expected a generated movie showtimes package")
+        }
+
+        let requiredTools = Set(package.plan.toolRequirements.map(\.name))
+        let stepTools = Set(package.spec.steps.compactMap { $0.toolCall?.name })
+        XCTAssertTrue(requiredTools.contains("movies.showtimes"), "Plan must require movies.showtimes")
+        XCTAssertTrue(stepTools.contains("movies.showtimes"), "Spec steps must call movies.showtimes")
+        XCTAssertEqual(package.signoff?.approved, true)
+        XCTAssertEqual(package.signoff?.model, OpenAISkillArchitectClient().modelName)
+    }
+
+    private func readSamOSDevAPIKeyFromPlist() -> String? {
+        func normalizedKey(_ raw: String?) -> String? {
+            let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard trimmed.hasPrefix("sk-") else { return nil }
+            return trimmed
+        }
+
+        let directDefaults = normalizedKey(UserDefaults.standard.string(forKey: "dev.openai.apiKey"))
+        if let directDefaults { return directDefaults }
+
+        if let domain = UserDefaults.standard.persistentDomain(forName: "com.samos.SamOS"),
+           let domainKey = normalizedKey(domain["dev.openai.apiKey"] as? String) {
+            return domainKey
+        }
+
+        let openAISettingsKey = normalizedKey(OpenAISettings.apiKey)
+        if let openAISettingsKey { return openAISettingsKey }
+
+        let plistPaths = [
+            NSHomeDirectory() + "/Library/Containers/com.samos.SamOS/Data/Library/Preferences/com.samos.SamOS.plist",
+            NSHomeDirectory() + "/Library/Preferences/com.samos.SamOS.plist"
+        ]
+
+        for plistPath in plistPaths {
+            guard FileManager.default.fileExists(atPath: plistPath),
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: plistPath)),
+                  let root = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+                  let key = normalizedKey(root["dev.openai.apiKey"] as? String) else {
+                continue
+            }
+            return key
+        }
+
+        return nil
+    }
 }
 
 final class SkillForgeRejectPhase4Tests: XCTestCase {
@@ -898,6 +1103,27 @@ final class SkillForgeRejectPhase4Tests: XCTestCase {
         XCTAssertEqual(outcome.requiredChanges, ["add constraint text"])
         XCTAssertTrue((outcome.lastCritique ?? "").contains("Needs stricter safety wording"))
         XCTAssertNil(store.getPackage(id: package.manifest.skillID), "Rejected package must not be installed")
+    }
+}
+
+final class SkillForgeOpenAIAuthorityTests: XCTestCase {
+    private var savedModel = ""
+
+    override func setUp() {
+        super.setUp()
+        savedModel = OpenAISettings.generalModel
+    }
+
+    override func tearDown() {
+        OpenAISettings.generalModel = savedModel
+        super.tearDown()
+    }
+
+    func testOpenAISkillArchitectClientFallsBackToDefaultGPTModel() {
+        OpenAISettings.generalModel = "qwen2.5:7b"
+        let client = OpenAISkillArchitectClient()
+        XCTAssertEqual(client.authorityProvider, .openAI)
+        XCTAssertEqual(client.modelName, OpenAISettings.defaultPreferredModel)
     }
 }
 

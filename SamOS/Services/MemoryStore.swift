@@ -626,6 +626,117 @@ final class MemoryStore {
         return signals.contains { lower.contains($0) }
     }
 
+    // MARK: - Temporal Query Support
+
+    /// Parse temporal references like "5 days ago", "last week", "yesterday" into a date range.
+    static func parseTemporalRange(from query: String, now: Date = Date()) -> (start: Date, end: Date)? {
+        let lower = query.lowercased()
+        let calendar = Calendar.current
+
+        // "yesterday"
+        if lower.contains("yesterday") {
+            let startOfToday = calendar.startOfDay(for: now)
+            let startOfYesterday = calendar.date(byAdding: .day, value: -1, to: startOfToday)!
+            return (startOfYesterday, startOfToday)
+        }
+
+        // "today" / "earlier today"
+        if lower.contains("earlier today") || (lower.contains("today") && lower.contains("said")) {
+            let startOfToday = calendar.startOfDay(for: now)
+            return (startOfToday, now)
+        }
+
+        // "last week"
+        if lower.contains("last week") {
+            let start = calendar.date(byAdding: .day, value: -14, to: now)!
+            let end = calendar.date(byAdding: .day, value: -7, to: now)!
+            return (start, end)
+        }
+
+        // "this week"
+        if lower.contains("this week") {
+            let start = calendar.date(byAdding: .day, value: -7, to: now)!
+            return (start, now)
+        }
+
+        // "last month"
+        if lower.contains("last month") {
+            let start = calendar.date(byAdding: .month, value: -2, to: now)!
+            let end = calendar.date(byAdding: .month, value: -1, to: now)!
+            return (start, end)
+        }
+
+        // "N days ago" / "N day ago"
+        let daysPattern = #"(\d+)\s+days?\s+ago"#
+        if let regex = try? NSRegularExpression(pattern: daysPattern, options: .caseInsensitive),
+           let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..<lower.endIndex, in: lower)),
+           let numRange = Range(match.range(at: 1), in: lower),
+           let days = Int(lower[numRange]) {
+            let targetDate = calendar.date(byAdding: .day, value: -days, to: now)!
+            let startOfTarget = calendar.startOfDay(for: targetDate)
+            let endOfTarget = calendar.date(byAdding: .day, value: 1, to: startOfTarget)!
+            return (startOfTarget, endOfTarget)
+        }
+
+        // "N weeks ago"
+        let weeksPattern = #"(\d+)\s+weeks?\s+ago"#
+        if let regex = try? NSRegularExpression(pattern: weeksPattern, options: .caseInsensitive),
+           let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..<lower.endIndex, in: lower)),
+           let numRange = Range(match.range(at: 1), in: lower),
+           let weeks = Int(lower[numRange]) {
+            let start = calendar.date(byAdding: .weekOfYear, value: -(weeks + 1), to: now)!
+            let end = calendar.date(byAdding: .weekOfYear, value: -weeks + 1, to: now)!
+            return (start, end)
+        }
+
+        return nil
+    }
+
+    /// Query memories within a specific date range. For temporal queries like "what did I say 5 days ago".
+    func memoriesInDateRange(start: Date, end: Date, maxItems: Int = 20) -> [MemoryRow] {
+        guard let db = db else { return [] }
+
+        let sql = """
+        SELECT \(selectColumns) FROM memories
+        WHERE is_active = 1 AND created_at >= ? AND created_at <= ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_double(stmt, 1, start.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 2, end.timeIntervalSince1970)
+        sqlite3_bind_int(stmt, 3, Int32(maxItems))
+
+        var rows: [MemoryRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let row = parseRow(stmt) {
+                rows.append(row)
+            }
+        }
+        return rows
+    }
+
+    /// Enhanced memory context that handles temporal queries automatically.
+    /// If the query contains temporal references ("5 days ago", "yesterday", "last week"),
+    /// this will query by date range first, then fall back to keyword search.
+    func temporalMemoryContext(query: String, maxItems: Int = 10, maxChars: Int = 1500, now: Date = Date()) -> [MemoryRow] {
+        // Check for temporal query first
+        if let range = MemoryStore.parseTemporalRange(from: query, now: now) {
+            let temporalResults = memoriesInDateRange(start: range.start, end: range.end, maxItems: maxItems)
+            if !temporalResults.isEmpty {
+                return temporalResults
+            }
+            // Fall through to keyword search if no temporal results
+        }
+
+        // Default to keyword search
+        return memoryContext(query: query, maxItems: maxItems, maxChars: maxChars)
+    }
+
     /// Compact top-k recall context with strict size limits.
     func memoryContext(query: String, maxItems: Int = 10, maxChars: Int = 1500) -> [MemoryRow] {
         let candidates = searchMemories(query: query, limit: 10)

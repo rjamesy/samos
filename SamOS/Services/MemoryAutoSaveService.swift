@@ -79,15 +79,16 @@ final class OpenAIMemoryExtractor: MemoryExtracting {
             prompt += "\nAssistant response: \(assistantMessage)"
         }
 
-        let body: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: Constants.model)
+        var body: [String: Any] = [
             "model": Constants.model,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.0,
-            "max_tokens": 220
+            "temperature": 0.0
         ]
+        body[tokenKey] = 220
 
         guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
             throw NSError(domain: "MemoryExtractor", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
@@ -1847,15 +1848,16 @@ final class AutonomousLearningService: AutonomousLearningControlling {
         Current lessons: \(lessonContext.isEmpty ? "none yet" : lessonContext)
         Return diverse next search queries.
         """
-        let requestBody: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: OpenAISettings.model)
+        var requestBody: [String: Any] = [
             "model": OpenAISettings.model,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user]
             ],
-            "temperature": 0.4,
-            "max_tokens": 320
+            "temperature": 0.4
         ]
+        requestBody[tokenKey] = 320
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

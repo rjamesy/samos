@@ -308,8 +308,8 @@ struct LearnSkillPermissionCardView: View {
             if !parseTests().isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Validation tests")
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.secondary)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
                     ForEach(parseTests(), id: \.self) { test in
                         Text("• \(test)")
                             .font(.caption)
@@ -317,13 +317,40 @@ struct LearnSkillPermissionCardView: View {
                 }
             }
 
+            if !parseSources().isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Sources")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(parseSources(), id: \.self) { source in
+                        Text("• \(source)")
+                            .font(.caption)
+                    }
+                }
+            }
+
+            if let example = parseExampleInvocation(), !example.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Example invocation")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    Text(example)
+                        .font(.caption)
+                }
+            }
+
             HStack(spacing: 8) {
-                Button("Reject") {
-                    appState.approveLearnSkillPermissions(false)
+                Button("Cancel") {
+                    appState.cancelLearnSkill()
                 }
                 .buttonStyle(.bordered)
 
-                Button("Approve & Install") {
+                Button("Change") {
+                    appState.requestLearnSkillChanges()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Save & Install") {
                     appState.approveLearnSkillPermissions(true)
                 }
                 .buttonStyle(.borderedProminent)
@@ -360,6 +387,14 @@ struct LearnSkillPermissionCardView: View {
 
     private func parseTests() -> [String] {
         parseObject()["tests"] as? [String] ?? []
+    }
+
+    private func parseSources() -> [String] {
+        parseObject()["sources"] as? [String] ?? []
+    }
+
+    private func parseExampleInvocation() -> String? {
+        parseObject()["example_invocation"] as? String
     }
 }
 

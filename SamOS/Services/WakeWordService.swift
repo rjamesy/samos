@@ -9,6 +9,7 @@ final class WakeWordService {
     // MARK: - Callbacks
 
     var onWakeWordDetected: (() -> Void)?
+    var onAudioBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     // MARK: - Errors
 
@@ -162,6 +163,7 @@ final class WakeWordService {
     }
 
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, targetFormat: AVAudioFormat, frameLength: Int32) {
+        onAudioBuffer?(buffer)
         // Convert to 16kHz Int16
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let outputFrameCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)

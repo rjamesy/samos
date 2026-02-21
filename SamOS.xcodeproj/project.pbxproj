@@ -149,6 +149,34 @@
 		AAF100000000000000000203 /* RoutingServiceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000103 /* RoutingServiceContractTests.swift */; };
 		AAF100000000000000000204 /* SettingsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000104 /* SettingsStoreTests.swift */; };
 		AAF100000000000000000205 /* DomainLayerDependencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAF100000000000000000105 /* DomainLayerDependencyTests.swift */; };
+		CC4400000000000000002001 /* ConversationTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4400000000000000001001 /* ConversationTypes.swift */; };
+		CC4400000000000000002002 /* TonePreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4400000000000000001002 /* TonePreference.swift */; };
+		CC4400000000000000002003 /* ConversationAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4400000000000000001003 /* ConversationAnalysis.swift */; };
+		CC4400000000000000002004 /* IntentClassification.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4400000000000000001004 /* IntentClassification.swift */; };
+		CC4400000000000000002005 /* ResponsePolishHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4400000000000000001005 /* ResponsePolishHelpers.swift */; };
+		CC5500000000000000002001 /* TurnOrchestrator+Routing.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001001 /* TurnOrchestrator+Routing.swift */; };
+		CC5500000000000000002002 /* TurnOrchestrator+Vision.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001002 /* TurnOrchestrator+Vision.swift */; };
+		CC5500000000000000002003 /* TurnOrchestrator+Capabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001003 /* TurnOrchestrator+Capabilities.swift */; };
+		CC5500000000000000002004 /* TurnOrchestrator+PromptContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001004 /* TurnOrchestrator+PromptContext.swift */; };
+		CC5500000000000000002005 /* TurnOrchestrator+ConversationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001005 /* TurnOrchestrator+ConversationState.swift */; };
+		CC5500000000000000002006 /* TurnOrchestrator+Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001006 /* TurnOrchestrator+Helpers.swift */; };
+		CC5500000000000000002007 /* TurnOrchestrator+ToolFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001007 /* TurnOrchestrator+ToolFeedback.swift */; };
+		CC5500000000000000002008 /* TurnOrchestrator+ResponsePolish.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001008 /* TurnOrchestrator+ResponsePolish.swift */; };
+		CC5500000000000000002009 /* TurnOrchestrator+Knowledge.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001009 /* TurnOrchestrator+Knowledge.swift */; };
+		CC5500000000000000002010 /* TurnOrchestrator+Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC5500000000000000001010 /* TurnOrchestrator+Diagnostics.swift */; };
+		CC6600000000000000002001 /* IntelligenceLLMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001001 /* IntelligenceLLMClient.swift */; };
+		CC6600000000000000002002 /* CognitiveTraceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001002 /* CognitiveTraceEngine.swift */; };
+		CC6600000000000000002003 /* LivingWorldModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001003 /* LivingWorldModel.swift */; };
+		CC6600000000000000002004 /* ActiveCuriosityEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001004 /* ActiveCuriosityEngine.swift */; };
+		CC6600000000000000002005 /* SkillEvolutionLoop.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001005 /* SkillEvolutionLoop.swift */; };
+		CC6600000000000000002006 /* LongitudinalPatternEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001006 /* LongitudinalPatternEngine.swift */; };
+		CC6600000000000000002007 /* PersonalityEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001007 /* PersonalityEngine.swift */; };
+		CC6600000000000000002008 /* CounterfactualSimulationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001008 /* CounterfactualSimulationEngine.swift */; };
+		CC6600000000000000002009 /* TheoryOfMindEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6600000000000000001009 /* TheoryOfMindEngine.swift */; };
+		CC660000000000000000200A /* MetaCognitionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC660000000000000000100A /* MetaCognitionEngine.swift */; };
+		CC660000000000000000200B /* NarrativeCoherenceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC660000000000000000100B /* NarrativeCoherenceEngine.swift */; };
+		CC660000000000000000200C /* CausalLearningEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC660000000000000000100C /* CausalLearningEngine.swift */; };
+		CC660000000000000000200D /* AmbientListeningService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC660000000000000000100D /* AmbientListeningService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -307,6 +335,34 @@
 		AAF100000000000000000103 /* RoutingServiceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/RoutingServiceContractTests.swift; sourceTree = "<group>"; };
 		AAF100000000000000000104 /* SettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/SettingsStoreTests.swift; sourceTree = "<group>"; };
 		AAF100000000000000000105 /* DomainLayerDependencyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Architecture/DomainLayerDependencyTests.swift; sourceTree = "<group>"; };
+		CC4400000000000000001001 /* ConversationTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTypes.swift; sourceTree = "<group>"; };
+		CC4400000000000000001002 /* TonePreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TonePreference.swift; sourceTree = "<group>"; };
+		CC4400000000000000001003 /* ConversationAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAnalysis.swift; sourceTree = "<group>"; };
+		CC4400000000000000001004 /* IntentClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentClassification.swift; sourceTree = "<group>"; };
+		CC4400000000000000001005 /* ResponsePolishHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResponsePolishHelpers.swift; sourceTree = "<group>"; };
+		CC5500000000000000001001 /* TurnOrchestrator+Routing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Routing.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001002 /* TurnOrchestrator+Vision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Vision.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001003 /* TurnOrchestrator+Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Capabilities.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001004 /* TurnOrchestrator+PromptContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+PromptContext.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001005 /* TurnOrchestrator+ConversationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+ConversationState.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001006 /* TurnOrchestrator+Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Helpers.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001007 /* TurnOrchestrator+ToolFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+ToolFeedback.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001008 /* TurnOrchestrator+ResponsePolish.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+ResponsePolish.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001009 /* TurnOrchestrator+Knowledge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Knowledge.swift"; sourceTree = "<group>"; };
+		CC5500000000000000001010 /* TurnOrchestrator+Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnOrchestrator+Diagnostics.swift"; sourceTree = "<group>"; };
+		CC6600000000000000001001 /* IntelligenceLLMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntelligenceLLMClient.swift; sourceTree = "<group>"; };
+		CC6600000000000000001002 /* CognitiveTraceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CognitiveTraceEngine.swift; sourceTree = "<group>"; };
+		CC6600000000000000001003 /* LivingWorldModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivingWorldModel.swift; sourceTree = "<group>"; };
+		CC6600000000000000001004 /* ActiveCuriosityEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveCuriosityEngine.swift; sourceTree = "<group>"; };
+		CC6600000000000000001005 /* SkillEvolutionLoop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillEvolutionLoop.swift; sourceTree = "<group>"; };
+		CC6600000000000000001006 /* LongitudinalPatternEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongitudinalPatternEngine.swift; sourceTree = "<group>"; };
+		CC6600000000000000001007 /* PersonalityEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalityEngine.swift; sourceTree = "<group>"; };
+		CC6600000000000000001008 /* CounterfactualSimulationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CounterfactualSimulationEngine.swift; sourceTree = "<group>"; };
+		CC6600000000000000001009 /* TheoryOfMindEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TheoryOfMindEngine.swift; sourceTree = "<group>"; };
+		CC660000000000000000100A /* MetaCognitionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetaCognitionEngine.swift; sourceTree = "<group>"; };
+		CC660000000000000000100B /* NarrativeCoherenceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrativeCoherenceEngine.swift; sourceTree = "<group>"; };
+		CC660000000000000000100C /* CausalLearningEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalLearningEngine.swift; sourceTree = "<group>"; };
+		CC660000000000000000100D /* AmbientListeningService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientListeningService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -452,6 +508,21 @@
 				F3A4B5C6D7E80001AA000001 /* AlarmSession.swift */,
 				F3A4B5C6D7E80001AA000040 /* PlanExecutor.swift */,
 				F3A4B5C6D7E80001AA000020 /* TurnOrchestrator.swift */,
+				CC5500000000000000001001 /* TurnOrchestrator+Routing.swift */,
+				CC5500000000000000001002 /* TurnOrchestrator+Vision.swift */,
+				CC5500000000000000001003 /* TurnOrchestrator+Capabilities.swift */,
+				CC5500000000000000001004 /* TurnOrchestrator+PromptContext.swift */,
+				CC5500000000000000001005 /* TurnOrchestrator+ConversationState.swift */,
+				CC5500000000000000001006 /* TurnOrchestrator+Helpers.swift */,
+				CC5500000000000000001007 /* TurnOrchestrator+ToolFeedback.swift */,
+				CC5500000000000000001008 /* TurnOrchestrator+ResponsePolish.swift */,
+				CC5500000000000000001009 /* TurnOrchestrator+Knowledge.swift */,
+				CC5500000000000000001010 /* TurnOrchestrator+Diagnostics.swift */,
+				CC4400000000000000001001 /* ConversationTypes.swift */,
+				CC4400000000000000001002 /* TonePreference.swift */,
+				CC4400000000000000001003 /* ConversationAnalysis.swift */,
+				CC4400000000000000001004 /* IntentClassification.swift */,
+				CC4400000000000000001005 /* ResponsePolishHelpers.swift */,
 				AA1111111111111111111101 /* TurnPipelineCore.swift */,
 				AA1111111111111111111102 /* TurnRouter.swift */,
 				AA1111111111111111111103 /* TurnToolRunner.swift */,
@@ -465,6 +536,19 @@
 				F3A4B5C6D7E80001AA0000A7 /* SamAPIClient.swift */,
 				F3A4B5C6D7E80001AA0000A9 /* SamResponseParser.swift */,
 				F3A4B5C6D7E80001AA0000B1 /* DebugLogStore.swift */,
+				CC6600000000000000001001 /* IntelligenceLLMClient.swift */,
+				CC6600000000000000001002 /* CognitiveTraceEngine.swift */,
+				CC6600000000000000001003 /* LivingWorldModel.swift */,
+				CC6600000000000000001004 /* ActiveCuriosityEngine.swift */,
+				CC6600000000000000001005 /* SkillEvolutionLoop.swift */,
+				CC6600000000000000001006 /* LongitudinalPatternEngine.swift */,
+				CC6600000000000000001007 /* PersonalityEngine.swift */,
+				CC6600000000000000001008 /* CounterfactualSimulationEngine.swift */,
+				CC6600000000000000001009 /* TheoryOfMindEngine.swift */,
+				CC660000000000000000100A /* MetaCognitionEngine.swift */,
+				CC660000000000000000100B /* NarrativeCoherenceEngine.swift */,
+				CC660000000000000000100C /* CausalLearningEngine.swift */,
+				CC660000000000000000100D /* AmbientListeningService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -702,6 +786,34 @@
 				F3A4B5C6D7E80001AA000011 /* Plan.swift in Sources */,
 				F3A4B5C6D7E80001AA000013 /* PendingSlot.swift in Sources */,
 				F3A4B5C6D7E80001AA000021 /* TurnOrchestrator.swift in Sources */,
+				CC5500000000000000002001 /* TurnOrchestrator+Routing.swift in Sources */,
+				CC5500000000000000002002 /* TurnOrchestrator+Vision.swift in Sources */,
+				CC5500000000000000002003 /* TurnOrchestrator+Capabilities.swift in Sources */,
+				CC5500000000000000002004 /* TurnOrchestrator+PromptContext.swift in Sources */,
+				CC5500000000000000002005 /* TurnOrchestrator+ConversationState.swift in Sources */,
+				CC5500000000000000002006 /* TurnOrchestrator+Helpers.swift in Sources */,
+				CC5500000000000000002007 /* TurnOrchestrator+ToolFeedback.swift in Sources */,
+				CC5500000000000000002008 /* TurnOrchestrator+ResponsePolish.swift in Sources */,
+				CC5500000000000000002009 /* TurnOrchestrator+Knowledge.swift in Sources */,
+				CC5500000000000000002010 /* TurnOrchestrator+Diagnostics.swift in Sources */,
+				CC6600000000000000002001 /* IntelligenceLLMClient.swift in Sources */,
+				CC6600000000000000002002 /* CognitiveTraceEngine.swift in Sources */,
+				CC6600000000000000002003 /* LivingWorldModel.swift in Sources */,
+				CC6600000000000000002004 /* ActiveCuriosityEngine.swift in Sources */,
+				CC6600000000000000002005 /* SkillEvolutionLoop.swift in Sources */,
+				CC6600000000000000002006 /* LongitudinalPatternEngine.swift in Sources */,
+				CC6600000000000000002007 /* PersonalityEngine.swift in Sources */,
+				CC6600000000000000002008 /* CounterfactualSimulationEngine.swift in Sources */,
+				CC6600000000000000002009 /* TheoryOfMindEngine.swift in Sources */,
+				CC660000000000000000200A /* MetaCognitionEngine.swift in Sources */,
+				CC660000000000000000200B /* NarrativeCoherenceEngine.swift in Sources */,
+				CC660000000000000000200C /* CausalLearningEngine.swift in Sources */,
+				CC660000000000000000200D /* AmbientListeningService.swift in Sources */,
+				CC4400000000000000002001 /* ConversationTypes.swift in Sources */,
+				CC4400000000000000002002 /* TonePreference.swift in Sources */,
+				CC4400000000000000002003 /* ConversationAnalysis.swift in Sources */,
+				CC4400000000000000002004 /* IntentClassification.swift in Sources */,
+				CC4400000000000000002005 /* ResponsePolishHelpers.swift in Sources */,
 				AA1111111111111111112101 /* TurnPipelineCore.swift in Sources */,
 				AA1111111111111111112102 /* TurnRouter.swift in Sources */,
 				AA1111111111111111112103 /* TurnToolRunner.swift in Sources */,

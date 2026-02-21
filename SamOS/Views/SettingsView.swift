@@ -21,6 +21,9 @@ struct SettingsView: View {
     // Sound Cues
     @State private var captureBeepEnabled: Bool = M2Settings.captureBeepEnabled
 
+    // Always Listening
+    @State private var alwaysListeningEnabled: Bool = M2Settings.alwaysListeningEnabled
+
     // Router
     @State private var useEmotionalTone: Bool = M2Settings.useEmotionalTone
     @State private var developerModeEnabled: Bool = M2Settings.developerModeEnabled
@@ -382,6 +385,14 @@ struct SettingsView: View {
                 .onChange(of: captureBeepEnabled) { _, newValue in
                     M2Settings.captureBeepEnabled = newValue
                 }
+
+            Toggle("Always Listening (Ambient Learning)", isOn: $alwaysListeningEnabled)
+                .onChange(of: alwaysListeningEnabled) { _, newValue in
+                    M2Settings.alwaysListeningEnabled = newValue
+                }
+            Text("When enabled, Sam passively listens to ambient conversation and stores noteworthy information as memories. All audio is processed locally.")
+                .font(.caption)
+                .foregroundColor(.red)
 
             LabeledContent("Microphone") {
                 switch MicrophonePermission.currentStatus {

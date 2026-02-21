@@ -383,6 +383,23 @@ struct SkillsLearnApprovePermissionsTool: Tool {
     }
 }
 
+struct SkillsLearnRequestChangesTool: Tool {
+    let name = "skills.learn.request_changes"
+    let description = "Request revisions to the pending skill review before install. Optional arg: notes."
+
+    func execute(args: [String: String]) -> OutputItem {
+        let notes = args["notes"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let semaphore = DispatchSemaphore(value: 0)
+        var text = "No active learning session."
+        Task { @MainActor in
+            text = LearnSkillController.shared.requestChanges(notes)
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 10)
+        return OutputItem(kind: .markdown, payload: text)
+    }
+}
+
 struct SkillsLearnInstallTool: Tool {
     let name = "skills.learn.install"
     let description = "Install the GPT-approved skill after permission approval."

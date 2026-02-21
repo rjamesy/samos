@@ -21,6 +21,14 @@ final class CameraRecoveryTests: XCTestCase {
         func stop() { stopCallCount += 1 }
         func latestPreviewImage() -> NSImage? { nil }
         func describeCurrentScene() -> CameraSceneDescription? { nil }
+
+        var health: CameraHealth { CameraHealth(lastGoodFrameAt: nil, lastFrameErrorAt: nil, consecutiveErrors: 0, isHealthy: true) }
+        func enrollFace(name: String) -> CameraFaceEnrollmentResult { .init(status: .unsupported, enrolledName: nil, samplesForName: 0, totalKnownNames: 0, capturedAt: nil) }
+        func recognizeKnownFaces() -> CameraFaceRecognitionResult? { nil }
+        func knownFaceNames() -> [String] { [] }
+        func clearKnownFaces() -> Bool { false }
+        func detectFacialEmotions() -> CameraEmotionSnapshot? { nil }
+        func captureFrameAsJPEG(quality: CGFloat) -> Data? { nil }
     }
 
     func testMonitorDetectsStalenessAndAttemptsRecovery() async {

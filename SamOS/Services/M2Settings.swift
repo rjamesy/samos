@@ -32,8 +32,10 @@ enum M2Settings {
         static let ollamaEndpoint = "m3_ollamaEndpoint"
         static let ollamaModel = "m3_ollamaModel"
         static let ollamaCombinedTimeoutMs = "m3_ollamaCombinedTimeoutMs"
+        static let cognitiveTraceEnabled = "m3_cognitiveTraceEnabled"
         static let samGatewayURL = "sam_gatewayURL"
         static let samSessionId = "sam_sessionId"
+        static let alwaysListeningEnabled = "m3_alwaysListeningEnabled"
     }
 
     private static let defaults = UserDefaults.standard
@@ -250,9 +252,12 @@ enum M2Settings {
     }
 
     /// Dev override: when true and OpenAI is configured, plan routing uses OpenAI-first order.
-    /// Default is false so plans stay Ollama-first unless explicitly overridden.
+    /// Defaults to true for fastest routing — bypass Ollama timeout overhead.
     static var preferOpenAIPlans: Bool {
-        get { defaults.bool(forKey: Key.preferOpenAIPlans) }
+        get {
+            if defaults.object(forKey: Key.preferOpenAIPlans) == nil { return true }
+            return defaults.bool(forKey: Key.preferOpenAIPlans)
+        }
         set { defaults.set(newValue, forKey: Key.preferOpenAIPlans) }
     }
 
@@ -313,6 +318,18 @@ enum M2Settings {
         defaults.object(forKey: Key.ollamaCombinedTimeoutMs) != nil
     }
 
+    // MARK: - Intelligence Engines
+
+    /// Enables the Cognitive Trace Engine — multi-stage reasoning before Sam speaks.
+    /// Ollama generates hypotheses, GPT-5.2 does deep reasoning. Defaults to true.
+    static var cognitiveTraceEnabled: Bool {
+        get {
+            if defaults.object(forKey: Key.cognitiveTraceEnabled) == nil { return true }
+            return defaults.bool(forKey: Key.cognitiveTraceEnabled)
+        }
+        set { defaults.set(newValue, forKey: Key.cognitiveTraceEnabled) }
+    }
+
     // MARK: - Sam Gateway
 
     /// Base URL for the Sam gateway (e.g. "http://localhost:8002").
@@ -332,6 +349,14 @@ enum M2Settings {
     /// True when the Sam gateway is configured and should be used.
     static var useSamGateway: Bool {
         !samGatewayURL.isEmpty
+    }
+
+    // MARK: - Always Listening
+
+    /// When enabled, Sam passively transcribes ambient speech and stores noteworthy info as memories.
+    static var alwaysListeningEnabled: Bool {
+        get { defaults.bool(forKey: Key.alwaysListeningEnabled) }
+        set { defaults.set(newValue, forKey: Key.alwaysListeningEnabled) }
     }
 
     // MARK: - Validation

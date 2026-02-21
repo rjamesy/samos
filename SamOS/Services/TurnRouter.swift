@@ -19,7 +19,7 @@ final class TurnRouter: TurnRouting {
     private let needsWebClarifyingPrompt =
         "What location or source should I check for that live update?"
     private let needsWebSourcePrompt =
-        "I still need the exact URL or site for that request. Share it and I'll use it."
+        "I can learn this via GPT and discover trusted sources automatically."
 
     init(classifyIntent: @escaping IntentClassificationHandler,
          routePlan: @escaping PlanRouteHandler,
@@ -173,6 +173,7 @@ final class TurnRouter: TurnRouting {
         guard input.pendingSlot == nil else { return false }
         let text = input.text
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard !isCapabilityLearningRequest(text) else { return false }
         guard extractFirstURL(from: text) == nil else { return false }
         guard input.classification.intent == .webRequest else { return false }
         guard input.provider == .rule else { return false }
@@ -212,30 +213,8 @@ final class TurnRouter: TurnRouting {
             )
         }
 
-        if pending.reminderCount == 0 {
-            let prompt = pending.prefersWebsiteURL
-                ? "I still need the exact URL for the listings page (for example, the Event Cinemas page). Paste that link and I'll learn it."
-                : "I still need a source URL/app/site for that request. Share one and I'll learn it."
-
-            var updatedRequest = pending
-            updatedRequest.lastAskedAt = input.now
-            updatedRequest.reminderCount = 1
-
-            let slot = PendingSlot(
-                slotName: "source_url_or_site",
-                prompt: prompt,
-                originalUserText: pending.originalUserGoal
-            )
-            return .askForSource(
-                prompt: prompt,
-                pendingSlot: slot,
-                updatedRequest: updatedRequest
-            )
-        }
-
-        let message = pending.prefersWebsiteURL
-            ? "No worries. When you have the exact URL, paste it and I'll learn it."
-            : "No worries. When you have a source URL/app/site, share it and I'll learn it."
+        _ = input.now
+        let message = "I can continue without a URL. I'll use GPT to discover trusted sources and ask you to approve before install."
         return .drop(message: message)
     }
 
@@ -369,6 +348,25 @@ final class TurnRouter: TurnRouting {
         guard let classification, classification.needsWeb else {
             return route
         }
+        if isCapabilityLearningRequest(requestText), !hasAllowedToolPlan(route.plan) {
+            let goal = capabilityGoalFromLearningRequest(requestText)
+            return RouteDecision(
+                plan: Plan(steps: [
+                    .delegate(
+                        task: "capability_gap: \(goal)",
+                        context: "missing: auto_source_discovery_via_gpt=true",
+                        say: "I can learn that. I'll use GPT to discover trusted sources and then ask for approval before install."
+                    )
+                ]),
+                provider: route.provider,
+                routerMs: route.routerMs,
+                aiModelUsed: route.aiModelUsed,
+                routeReason: "needs_web_capability_learning_gpt_discovery",
+                planLocalWireMs: route.planLocalWireMs,
+                planLocalTotalMs: route.planLocalTotalMs,
+                planOpenAIMs: route.planOpenAIMs
+            )
+        }
         let category = categoryForCapabilityRequest(text: requestText, classification: classification)
 
         if category == .news {
@@ -425,15 +423,56 @@ final class TurnRouter: TurnRouting {
             )
         }
 
+        let goal = requestText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let missing = "auto_source_discovery_via_gpt=true"
         return RouteDecision(
-            plan: Plan(steps: [.ask(slot: "source_url_or_site", prompt: needsWebSourcePrompt)]),
+            plan: Plan(steps: [
+                .delegate(
+                    task: "capability_gap: \(goal.isEmpty ? "web capability request" : goal)",
+                    context: "missing: \(missing)",
+                    say: needsWebSourcePrompt
+                )
+            ]),
             provider: route.provider,
             routerMs: route.routerMs,
             aiModelUsed: route.aiModelUsed,
-            routeReason: "needs_web_missing_tool_requires_source",
+            routeReason: "needs_web_capability_gap_gpt_discovery",
             planLocalWireMs: route.planLocalWireMs,
             planLocalTotalMs: route.planLocalTotalMs,
             planOpenAIMs: route.planOpenAIMs
         )
+    }
+
+    private func isCapabilityLearningRequest(_ input: String) -> Bool {
+        let lower = input.lowercased()
+        let explicitPatterns = [
+            #"\blearn\s+(a\s+)?(new\s+)?capabilit(y|ies)\b"#,
+            #"\b(build|create|develop|implement|forge)\s+(a\s+)?(new\s+)?capabilit(y|ies)\b"#,
+            #"\blearn\s+(a\s+)?(new\s+)?skill(s)?\b"#,
+            #"\b(build|create|develop|implement|forge|install)\s+(a\s+)?(new\s+)?skill(s)?\b"#,
+            #"\bcapability\s+gap\b"#
+        ]
+        for pattern in explicitPatterns where lower.range(of: pattern, options: .regularExpression) != nil {
+            return true
+        }
+        let hasNoun = ["capability", "capabilities", "skill", "skills", "feature", "features"]
+            .contains { lower.contains($0) }
+        let hasVerb = ["learn", "build", "create", "develop", "implement", "forge"]
+            .contains { lower.contains($0) }
+        return hasNoun && hasVerb
+    }
+
+    private func capabilityGoalFromLearningRequest(_ input: String) -> String {
+        var goal = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            #"(?i)^\s*(learn|build|create|develop|implement|forge)\s+(a\s+)?(new\s+)?(skill|capability)\s*(to|for)?\s*"#,
+            #"(?i)^\s*(learn)\s+new\s+skill\s*"#,
+            #"(?i)^\s*(build)\s+new\s+skill\s*"#,
+        ]
+        for pattern in prefixes {
+            goal = goal.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        goal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        return goal.isEmpty ? input.trimmingCharacters(in: .whitespacesAndNewlines) : goal
     }
 }

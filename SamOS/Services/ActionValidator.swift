@@ -63,8 +63,10 @@ enum ActionValidator {
         case "schedule_task":
             let runAt = toolAction.args["run_at"] ?? toolAction.args["datetime_iso"] ?? ""
             let inSeconds = toolAction.args["in_seconds"] ?? ""
-            if runAt.isEmpty && inSeconds.isEmpty {
-                reasons.append("schedule_task requires 'run_at' or 'in_seconds' argument.")
+            let durationSeconds = toolAction.args["duration_seconds"] ?? ""
+            let seconds = toolAction.args["seconds"] ?? ""
+            if runAt.isEmpty && inSeconds.isEmpty && durationSeconds.isEmpty && seconds.isEmpty {
+                reasons.append("schedule_task requires 'run_at' or timer duration ('in_seconds'/'duration_seconds').")
             }
 
         case "cancel_task":
@@ -118,6 +120,13 @@ enum ActionValidator {
             let accepted = ["true", "false", "1", "0", "yes", "no", "y", "n"]
             if !accepted.contains(approvedRaw) {
                 reasons.append("skills.learn.approve_permissions requires 'approved' true/false.")
+            }
+
+        case "skills.learn.request_changes":
+            // Optional notes. If provided, it must not be only whitespace.
+            if let notes = toolAction.args["notes"],
+               notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reasons.append("skills.learn.request_changes optional 'notes' cannot be blank when provided.")
             }
 
         default:

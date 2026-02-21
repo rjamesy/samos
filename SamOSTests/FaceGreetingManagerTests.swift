@@ -47,6 +47,10 @@ private final class FakeFaceCamera: CameraVisionProviding {
         enrollCalls.removeAll()
         return true
     }
+
+    var health: CameraHealth { CameraHealth(lastGoodFrameAt: nil, lastFrameErrorAt: nil, consecutiveErrors: 0, isHealthy: true) }
+    func detectFacialEmotions() -> CameraEmotionSnapshot? { nil }
+    func captureFrameAsJPEG(quality: CGFloat) -> Data? { nil }
 }
 
 @MainActor

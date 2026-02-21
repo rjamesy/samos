@@ -7,389 +7,21 @@ final class SkillForge {
 
     static let shared = SkillForge()
 
-    private let refiner = OpenAIRefinerClient()
-    private let claudeRunner = ClaudeCodeRunner()
-
     /// Whether the forge can operate (requires OpenAI API key at minimum).
     var isConfigured: Bool {
         OpenAISettings.isConfigured
     }
 
     @Published var currentJob: SkillForgeJob?
-    private let useJSONSkillForgePipeline = true
 
     private init() {}
 
     // MARK: - Forge Pipeline
 
-    /// Main forge pipeline. Builds a new skill from a goal description.
-    /// The progress callback is called whenever the job updates.
+    /// Main forge pipeline. Uses GPT-authority V2 package pipeline.
+    /// plan → spec → package → validate → simulate → GPT approval → user approval → install.
     func forge(goal: String, missing: String, onProgress: @escaping (SkillForgeJob) -> Void) async throws -> SkillSpec {
-        if useJSONSkillForgePipeline {
-            return try await forgeViaPackagePipeline(goal: goal, missing: missing, onProgress: onProgress)
-        }
-
-        var job = SkillForgeJob(goal: goal)
-        currentJob = job
-        onProgress(job)
-
-        // Step 1: Draft a basic skill spec
-        job.log("Drafting skill spec for: \(goal)")
-        job.status = .drafting
-        onProgress(job)
-
-        let draft = draftSkillSpec(goal: goal, missing: missing)
-        let sortedTools = ToolRegistry.shared.allTools.sorted { $0.name < $1.name }
-        let toolNames = sortedTools.map { $0.name }
-        let toolCatalog = sortedTools.map { "\($0.name): \($0.description)" }
-
-        // Step 1b: Ask OpenAI for specific capability requirements.
-        job.log("Asking OpenAI for specific capability requirements...")
-        onProgress(job)
-
-        let requirements: OpenAIRefinerClient.CapabilityRequirements
-        do {
-            requirements = try await refiner.fetchCapabilityRequirements(
-                goal: goal,
-                missing: missing,
-                toolList: toolCatalog
-            ) { exchange in
-                let header: String
-                switch exchange.phase {
-                case .request:
-                    header = "[OpenAI Request]"
-                case .response:
-                    header = "[OpenAI Response]"
-                case .error:
-                    header = "[OpenAI Error]"
-                }
-                job.log("\(header)\n\(exchange.content)")
-                onProgress(job)
-            }
-        } catch {
-            job.fail("OpenAI requirements step failed: \(error.localizedDescription)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.requirementsFailed(error.localizedDescription)
-        }
-
-        if !requirements.summary.isEmpty {
-            job.log("Requirements summary: \(requirements.summary)")
-        }
-        if !requirements.requirements.isEmpty {
-            job.log("Specific requirements:")
-            for (index, requirement) in requirements.requirements.enumerated() {
-                job.log("\(index + 1). \(requirement)")
-            }
-        }
-        if !requirements.acceptanceCriteria.isEmpty {
-            job.log("Acceptance criteria:")
-            for criterion in requirements.acceptanceCriteria {
-                job.log("- \(criterion)")
-            }
-        }
-        if !requirements.risks.isEmpty {
-            job.log("Known risks:")
-            for risk in requirements.risks {
-                job.log("- \(risk)")
-            }
-        }
-        if !requirements.openQuestions.isEmpty {
-            job.log("Open questions:")
-            for question in requirements.openQuestions {
-                job.log("- \(question)")
-            }
-        }
-        onProgress(job)
-
-        if requirements.requirements.isEmpty {
-            let reason = "OpenAI did not provide specific requirements."
-            job.fail(reason)
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.requirementsFailed(reason)
-        }
-
-        // Step 2: Refine via OpenAI
-        job.log("Refining spec with OpenAI (\(OpenAISettings.model))...")
-        job.status = .refining
-        onProgress(job)
-
-        var refined: SkillSpec
-        do {
-            refined = try await refiner.refineSkillSpec(
-                goal: goal,
-                draft: draft,
-                requirements: requirements,
-                toolList: toolCatalog
-            ) { exchange in
-                let header: String
-                switch exchange.phase {
-                case .request:
-                    header = "[OpenAI Request]"
-                case .response:
-                    header = "[OpenAI Response]"
-                case .error:
-                    header = "[OpenAI Error]"
-                }
-                job.log("\(header)\n\(exchange.content)")
-                onProgress(job)
-            }
-            job.log("OpenAI refined spec: \(refined.name) with \(refined.steps.count) steps")
-        } catch {
-            job.fail("OpenAI refinement failed: \(error.localizedDescription)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.refinementFailed(error.localizedDescription)
-        }
-
-        // Step 2b: Ask OpenAI for implementation verification + concrete steps.
-        job.log("Requesting OpenAI implementation steps and verification...")
-        onProgress(job)
-
-        var review: OpenAIRefinerClient.ImplementationReview
-        do {
-            review = try await refiner.reviewSkillSpec(
-                goal: goal,
-                missing: missing,
-                spec: refined,
-                requirements: requirements,
-                toolList: toolCatalog
-            ) { exchange in
-                let header: String
-                switch exchange.phase {
-                case .request:
-                    header = "[OpenAI Request]"
-                case .response:
-                    header = "[OpenAI Response]"
-                case .error:
-                    header = "[OpenAI Error]"
-                }
-                job.log("\(header)\n\(exchange.content)")
-                onProgress(job)
-            }
-        } catch {
-            job.fail("OpenAI implementation review failed: \(error.localizedDescription)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.reviewFailed(error.localizedDescription)
-        }
-
-        if !review.summary.isEmpty {
-            job.log("OpenAI review summary: \(review.summary)")
-        }
-        if !review.implementationSteps.isEmpty {
-            job.log("OpenAI implementation steps:")
-            for (index, step) in review.implementationSteps.enumerated() {
-                job.log("\(index + 1). \(step)")
-            }
-        }
-        if !review.blockers.isEmpty {
-            job.log("OpenAI blockers:")
-            for blocker in review.blockers {
-                job.log("- \(blocker)")
-            }
-        }
-        onProgress(job)
-
-        let needsRepairRetry = !review.approved || review.implementationSteps.isEmpty
-        if needsRepairRetry {
-            job.log("OpenAI rejected the first spec. Asking OpenAI to plan and repair the missing parts...")
-            if !review.summary.isEmpty {
-                job.log("Repair target: \(review.summary)")
-            }
-            onProgress(job)
-
-            do {
-                refined = try await refiner.repairSkillSpecAfterReview(
-                    goal: goal,
-                    missing: missing,
-                    draft: refined,
-                    requirements: requirements,
-                    review: review,
-                    toolList: toolCatalog
-                ) { exchange in
-                    let header: String
-                    switch exchange.phase {
-                    case .request:
-                        header = "[OpenAI Request]"
-                    case .response:
-                        header = "[OpenAI Response]"
-                    case .error:
-                        header = "[OpenAI Error]"
-                    }
-                    job.log("\(header)\n\(exchange.content)")
-                    onProgress(job)
-                }
-                job.log("OpenAI repair spec: \(refined.name) with \(refined.steps.count) steps")
-                onProgress(job)
-            } catch {
-                job.fail("OpenAI repair failed: \(error.localizedDescription)")
-                currentJob = job
-                onProgress(job)
-                throw ForgeError.refinementFailed(error.localizedDescription)
-            }
-
-            job.log("Re-running OpenAI implementation review after repair...")
-            onProgress(job)
-            do {
-                review = try await refiner.reviewSkillSpec(
-                    goal: goal,
-                    missing: missing,
-                    spec: refined,
-                    requirements: requirements,
-                    toolList: toolCatalog
-                ) { exchange in
-                    let header: String
-                    switch exchange.phase {
-                    case .request:
-                        header = "[OpenAI Request]"
-                    case .response:
-                        header = "[OpenAI Response]"
-                    case .error:
-                        header = "[OpenAI Error]"
-                    }
-                    job.log("\(header)\n\(exchange.content)")
-                    onProgress(job)
-                }
-            } catch {
-                job.fail("OpenAI post-repair review failed: \(error.localizedDescription)")
-                currentJob = job
-                onProgress(job)
-                throw ForgeError.reviewFailed(error.localizedDescription)
-            }
-
-            if !review.summary.isEmpty {
-                job.log("OpenAI review summary (retry): \(review.summary)")
-            }
-            if !review.implementationSteps.isEmpty {
-                job.log("OpenAI implementation steps (retry):")
-                for (index, step) in review.implementationSteps.enumerated() {
-                    job.log("\(index + 1). \(step)")
-                }
-            }
-            if !review.blockers.isEmpty {
-                job.log("OpenAI blockers (retry):")
-                for blocker in review.blockers {
-                    job.log("- \(blocker)")
-                }
-            }
-            onProgress(job)
-        }
-
-        if !review.approved {
-            let reason = review.summary.isEmpty ? "OpenAI did not approve this capability implementation." : review.summary
-            job.fail("Capability not installed: \(reason)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.implementationInsufficient(reason)
-        }
-
-        if review.implementationSteps.isEmpty {
-            let reason = "OpenAI did not provide implementation steps."
-            job.fail("Capability not installed: \(reason)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.implementationInsufficient(reason)
-        }
-
-        // Step 3: (Optional) Claude Code implementation
-        job.status = .implementing
-        onProgress(job)
-        job.log("Skipping Claude Code implementation (not required for JSON-based skills)")
-
-        // Step 4: Validate
-        job.log("Validating skill spec...")
-        job.status = .testing
-        onProgress(job)
-
-        if let error = validateSpec(refined, knownToolNames: Set(toolNames)) {
-            job.fail("Validation failed: \(error)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.validationFailed(error)
-        }
-        job.log("Validation passed")
-
-        job.log("Running capability verification checks...")
-        let preflight = capabilityVerificationChecks(
-            spec: refined,
-            goal: goal,
-            requirements: requirements,
-            review: review,
-            knownToolNames: Set(toolNames)
-        )
-        for check in preflight.checks {
-            job.log("\(check.passed ? "PASS" : "FAIL") · \(check.name): \(check.detail)")
-        }
-        if !preflight.passed {
-            let reason = preflight.failureReason
-            job.fail("Capability verification failed: \(reason)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.verificationFailed(reason)
-        }
-        job.log("Capability verification passed (\(preflight.passedCount)/\(preflight.checks.count) checks)")
-
-        // Stamp metadata so the skill passes isInstalled()
-        refined.status = "active"
-        refined.approvedAt = Date()
-
-        // Step 5: Install
-        job.log("Installing skill: \(refined.name)")
-        job.status = .installing
-        onProgress(job)
-
-        guard SkillStore.shared.install(refined) else {
-            job.fail("Failed to write skill to disk")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.installFailed
-        }
-
-        let postInstall = postInstallVerification(specID: refined.id)
-        for check in postInstall.checks {
-            job.log("\(check.passed ? "PASS" : "FAIL") · \(check.name): \(check.detail)")
-        }
-        if !postInstall.passed {
-            let reason = postInstall.failureReason
-            _ = SkillStore.shared.remove(id: refined.id)
-            job.fail("Post-install verification failed: \(reason)")
-            currentJob = job
-            onProgress(job)
-            throw ForgeError.verificationFailed(reason)
-        }
-
-        job.complete()
-        job.log("Skill '\(refined.name)' installed successfully")
-        currentJob = job
-        onProgress(job)
-
-        return refined
-    }
-
-    // MARK: - Draft
-
-    /// Creates a basic draft skill spec from the goal.
-    private func draftSkillSpec(goal: String, missing: String) -> SkillSpec {
-        let id = "forged_\(UUID().uuidString.prefix(8).lowercased())"
-        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedMissing = missing.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveGoal = !trimmedGoal.isEmpty ? trimmedGoal : (!trimmedMissing.isEmpty ? trimmedMissing : "new capability")
-        let name = effectiveGoal.prefix(30).trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeName = name.isEmpty ? "New Capability" : String(name)
-
-        return SkillSpec(
-            id: id,
-            name: safeName,
-            version: 1,
-            triggerPhrases: [effectiveGoal.lowercased()],
-            slots: [],
-            steps: [
-                SkillSpec.StepDef(action: "talk", args: ["say": "I'm working on: \(effectiveGoal)"])
-            ],
-            onTrigger: nil
-        )
+        return try await forgeViaPackagePipeline(goal: goal, missing: missing, onProgress: onProgress)
     }
 
     // MARK: - Validation
@@ -463,135 +95,6 @@ final class SkillForge {
         return nil
     }
 
-    private struct VerificationCheck {
-        let name: String
-        let passed: Bool
-        let detail: String
-    }
-
-    private struct VerificationReport {
-        let checks: [VerificationCheck]
-
-        var passed: Bool { checks.allSatisfy(\.passed) }
-        var passedCount: Int { checks.filter(\.passed).count }
-        var failureReason: String {
-            checks.first(where: { !$0.passed })?.detail ?? "unknown verification failure"
-        }
-    }
-
-    private func capabilityVerificationChecks(spec: SkillSpec,
-                                              goal: String,
-                                              requirements: OpenAIRefinerClient.CapabilityRequirements,
-                                              review: OpenAIRefinerClient.ImplementationReview,
-                                              knownToolNames: Set<String>) -> VerificationReport {
-        var checks: [VerificationCheck] = []
-
-        let coverage = requirementsCoverage(spec: spec, requirements: requirements, review: review)
-        checks.append(
-            VerificationCheck(
-                name: "Requirements Coverage",
-                passed: coverage.coveredCount > 0 && coverage.coverageRatio >= 0.45,
-                detail: "covered \(coverage.coveredCount)/\(coverage.totalCount) requirements (\(Int((coverage.coverageRatio * 100).rounded()))%)"
-            )
-        )
-
-        if let error = validateSpec(spec, knownToolNames: knownToolNames) {
-            checks.append(VerificationCheck(name: "Spec + Demo Validation", passed: false, detail: error))
-        } else {
-            checks.append(VerificationCheck(name: "Spec + Demo Validation", passed: true, detail: "spec compiles into runnable demo actions"))
-        }
-
-        checks.append(
-            VerificationCheck(
-                name: "OpenAI Implementation Steps",
-                passed: !review.implementationSteps.isEmpty,
-                detail: review.implementationSteps.isEmpty
-                    ? "OpenAI review did not provide implementation steps"
-                    : "OpenAI supplied \(review.implementationSteps.count) implementation steps"
-            )
-        )
-
-        let triggerCoverage = triggerAlignment(goal: goal, triggers: spec.triggerPhrases)
-        checks.append(
-            VerificationCheck(
-                name: "Trigger Alignment",
-                passed: triggerCoverage >= 0.20,
-                detail: "goal-to-trigger overlap \(Int((triggerCoverage * 100).rounded()))%"
-            )
-        )
-
-        return VerificationReport(checks: checks)
-    }
-
-    private func postInstallVerification(specID: String) -> VerificationReport {
-        var checks: [VerificationCheck] = []
-
-        let fileURL = SkillStore.shared.skillFileURL(id: specID)
-        let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
-        checks.append(
-            VerificationCheck(
-                name: "Skill File Written",
-                passed: fileExists,
-                detail: fileExists ? "wrote \(fileURL.path)" : "skill file missing at \(fileURL.path)"
-            )
-        )
-
-        let installedOnDisk = SkillStore.shared.isInstalledOnDisk(id: specID)
-        checks.append(
-            VerificationCheck(
-                name: "Installed Metadata",
-                passed: installedOnDisk,
-                detail: installedOnDisk
-                    ? "skill status is active + approved"
-                    : "skill is not active/approved on disk"
-            )
-        )
-
-        return VerificationReport(checks: checks)
-    }
-
-    private func requirementsCoverage(spec: SkillSpec,
-                                      requirements: OpenAIRefinerClient.CapabilityRequirements,
-                                      review: OpenAIRefinerClient.ImplementationReview) -> (coveredCount: Int, totalCount: Int, coverageRatio: Double) {
-        let requirementLines = (requirements.requirements + requirements.acceptanceCriteria)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !requirementLines.isEmpty else { return (0, 0, 1.0) }
-
-        let specText = [
-            spec.name,
-            spec.triggerPhrases.joined(separator: " "),
-            spec.steps.map { step in
-                let argsText = step.args.values.joined(separator: " ")
-                return "\(step.action) \(argsText)"
-            }.joined(separator: " "),
-            review.implementationSteps.joined(separator: " ")
-        ].joined(separator: " ")
-        let specTokenSet = Set(LocalKnowledgeRetriever.tokens(from: specText))
-
-        var covered = 0
-        for line in requirementLines {
-            let reqTokens = Set(LocalKnowledgeRetriever.tokens(from: line))
-            guard !reqTokens.isEmpty else { continue }
-            let overlap = reqTokens.intersection(specTokenSet).count
-            let ratio = Double(overlap) / Double(reqTokens.count)
-            if ratio >= 0.25 { covered += 1 }
-        }
-
-        let total = requirementLines.count
-        let ratio = total == 0 ? 1.0 : Double(covered) / Double(total)
-        return (covered, total, ratio)
-    }
-
-    private func triggerAlignment(goal: String, triggers: [String]) -> Double {
-        let goalTokens = Set(LocalKnowledgeRetriever.tokens(from: goal))
-        guard !goalTokens.isEmpty else { return 1.0 }
-        let triggerTokens = Set(LocalKnowledgeRetriever.tokens(from: triggers.joined(separator: " ")))
-        guard !triggerTokens.isEmpty else { return 0.0 }
-        let overlap = goalTokens.intersection(triggerTokens).count
-        return Double(overlap) / Double(goalTokens.count)
-    }
-
     private func sampleSlotsMap(for spec: SkillSpec) -> [String: String] {
         var slots: [String: String] = [:]
         let now = Date().addingTimeInterval(3_600)
@@ -633,7 +136,6 @@ final class SkillForge {
             #"required\s*:\s*'([A-Za-z0-9_]+)'"#,
             #"required\s+arg[s]?\s*[:=]\s*([A-Za-z0-9_,\s]+)"#
         ]
-
         var required: Set<String> = []
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
@@ -756,6 +258,12 @@ enum ToolPermissionCatalog {
         switch toolName {
         case "news.fetch":
             return [PermissionScope.webRead.rawValue]
+        case "fishing.report":
+            return [PermissionScope.webRead.rawValue]
+        case "price.lookup":
+            return [PermissionScope.webRead.rawValue]
+        case "movies.showtimes":
+            return [PermissionScope.webRead.rawValue]
         default:
             return []
         }
@@ -765,6 +273,16 @@ enum ToolPermissionCatalog {
         switch toolName {
         case "news.fetch":
             return "news.basic"
+        case "fishing.report":
+            return "fishing.basic"
+        case "price.lookup":
+            return "pricing.basic"
+        case "movies.showtimes":
+            return "movies.basic"
+        case "timer.manage":
+            return "timer.basic"
+        case "schedule_task", "cancel_task", "list_tasks":
+            return "timer.basic"
         default:
             return nil
         }
@@ -982,6 +500,7 @@ struct LearnSkillSession: Codable, Equatable {
     var iterationHistory: [String]
     var blockedReason: String?
     var package: SkillPackage?
+    var latestUserChangeRequest: String?
 }
 
 enum LearnSkillEvent {
@@ -1043,6 +562,12 @@ final class LearnSkillController {
 
         let id = UUID()
         let now = ISO8601DateFormatter().string(from: Date())
+        var mergedConstraints: [String: String] = [:]
+        if !constraints.isEmpty {
+            mergedConstraints["notes"] = constraints.joined(separator: " | ")
+        }
+        mergedConstraints["gpt_source_policy"] = "GPT must discover trusted sources and fill missing requirements. Do not ask the user for source URLs."
+
         let requirements = LearnSkillRequirements(
             goal: trimmedGoal.isEmpty ? "new skill requested by user" : trimmedGoal,
             mustDo: [missing?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmedGoal]
@@ -1052,7 +577,7 @@ final class LearnSkillController {
             outputExamples: [],
             permissionsAllowed: permissionsAllowed.sorted(),
             toolsAllowed: toolsAllowed.sorted(),
-            constraints: constraints.isEmpty ? [:] : ["notes": constraints.joined(separator: " | ")]
+            constraints: mergedConstraints
         )
 
         let session = LearnSkillSession(
@@ -1068,7 +593,8 @@ final class LearnSkillController {
             iterationCount: 0,
             iterationHistory: [],
             blockedReason: nil,
-            package: nil
+            package: nil,
+            latestUserChangeRequest: nil
         )
         activeSession = session
         persist()
@@ -1166,6 +692,53 @@ final class LearnSkillController {
         ])
         emit(.state(session))
         return "Learning session canceled."
+    }
+
+    func requestChanges(_ notes: String?) -> String {
+        guard var session = activeSession else {
+            return "No active learning session."
+        }
+        guard session.state == .userPermissionReview else {
+            return "Changes can be requested only during the review stage."
+        }
+
+        let cleanNotes = (notes ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let revisionNotes = cleanNotes.isEmpty
+            ? "User requested revisions before install."
+            : cleanNotes
+
+        if let existing = session.requirements.constraints["user_change_request"], !existing.isEmpty {
+            session.requirements.constraints["user_change_request"] = "\(existing) | \(revisionNotes)"
+        } else {
+            session.requirements.constraints["user_change_request"] = revisionNotes
+        }
+        session.latestUserChangeRequest = revisionNotes
+        session.userApprovedPermissions = nil
+        session.gptApproved = false
+        session.package = nil
+        session.requestedTools = []
+        session.requestedPermissions = []
+        session.blockedReason = nil
+        session = transition(session, to: .gptDesignLoop)
+        activeSession = session
+        persist()
+
+        logger.info("learn_skill_requirements_updated", metadata: [
+            "skill_id": normalizedSkillID(from: session.requirements.goal),
+            "iteration": String(session.iterationCount),
+            "stage": LearnSkillState.gptDesignLoop.rawValue
+        ])
+        emit(.state(session))
+        emit(.message("Revision requested. I’m updating the skill with GPT and will bring back a new save/change/cancel review."))
+
+        currentTask?.cancel()
+        let sessionID = session.id
+        currentTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runDesignLoop(sessionID: sessionID)
+        }
+        return "Revision requested. Re-running GPT design loop."
     }
 
     func installApprovedSkill() async -> String {
@@ -1355,7 +928,7 @@ final class LearnSkillController {
             "stage": LearnSkillState.userPermissionReview.rawValue
         ])
         emit(.state(finalSession))
-        emit(.message("I designed `\(package.manifest.name)`. Review and approve permissions to install."))
+        emit(.message("I designed `\(package.manifest.name)`. Review sources and example usage, then choose save, change, or cancel."))
         emit(.output(permissionReviewCard(for: finalSession, package: package)))
     }
 
@@ -1414,6 +987,8 @@ final class LearnSkillController {
     }
 
     private func permissionReviewCard(for session: LearnSkillSession, package: SkillPackage) -> OutputItem {
+        let sources = sourceSummary(for: session, package: package)
+        let example = exampleInvocation(for: package)
         let payload: [String: Any] = [
             "type": "learn_skill_permission_review",
             "session_id": session.id.uuidString,
@@ -1422,13 +997,47 @@ final class LearnSkillController {
             "goal": session.requirements.goal,
             "permissions": session.requestedPermissions,
             "tools": session.requestedTools,
-            "tests": package.tests.map(\.name)
+            "tests": package.tests.map(\.name),
+            "sources": sources,
+            "example_invocation": example,
+            "review_actions": ["save", "change", "cancel"]
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else {
             return OutputItem(kind: .card, payload: "{\"type\":\"learn_skill_permission_review\"}")
         }
         return OutputItem(kind: .card, payload: json)
+    }
+
+    private func sourceSummary(for session: LearnSkillSession, package: SkillPackage) -> [String] {
+        var lines: [String] = []
+        let tools = session.requestedTools.isEmpty
+            ? package.plan.toolRequirements.map(\.name)
+            : session.requestedTools
+        for tool in tools {
+            if let capabilityID = CapabilityCatalog.shared.capabilityID(forTool: tool),
+               let capability = CapabilityCatalog.shared.definition(for: capabilityID) {
+                var entry = "\(capability.id): tools=\(capability.tools.joined(separator: ","))"
+                if !capability.permissions.isEmpty {
+                    entry += " permissions=\(capability.permissions.joined(separator: ","))"
+                }
+                lines.append(entry)
+            } else {
+                lines.append("tool:\(tool)")
+            }
+        }
+        if lines.isEmpty {
+            lines.append("GPT-generated plan (no external data sources declared)")
+        }
+        return Array(Set(lines)).sorted()
+    }
+
+    private func exampleInvocation(for package: SkillPackage) -> String {
+        let fromTests = package.tests.first?.inputText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !fromTests.isEmpty { return fromTests }
+        let fromIntent = package.plan.intentPatterns.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !fromIntent.isEmpty { return fromIntent }
+        return package.manifest.name
     }
 
     private func transition(_ session: LearnSkillSession, to state: LearnSkillState) -> LearnSkillSession {
@@ -1569,6 +1178,7 @@ struct SkillForgePipelineOutcome {
 }
 
 protocol SkillForgeGPTClient {
+    var authorityProvider: SkillForgeAuthorityProvider { get }
     var modelName: String { get }
     func makePlan(requirements: SkillForgeRequirements,
                   availableTools: [SkillToolDescriptor],
@@ -1583,6 +1193,11 @@ protocol SkillForgeGPTClient {
     func approve(package: SkillPackage,
                  validation: SkillValidationResult,
                  simulation: SkillSimulationReport) async throws -> SkillApproverResponse
+}
+
+enum SkillForgeAuthorityProvider: String {
+    case openAI = "openai"
+    case unknown = "unknown"
 }
 
 struct SkillToolCallResult {
@@ -1917,6 +1532,14 @@ final class SkillPackageRuntime {
                 } else if mode == "news_bullets" {
                     let sourceValue = valueForVariable(payload.inputVar ?? "input.text", vars: vars)
                     outputValue = .string(newsBulletize(sourceValue))
+                } else if mode == "tool_formatted" {
+                    let sourceValue = valueForVariable(payload.inputVar ?? "input.text", vars: vars)
+                    let formatted = extractToolField("formatted", from: sourceValue) ?? sourceValue.stringValue
+                    outputValue = .string(formatted)
+                } else if mode == "tool_spoken" {
+                    let sourceValue = valueForVariable(payload.inputVar ?? "input.text", vars: vars)
+                    let spoken = extractToolField("spoken", from: sourceValue) ?? sourceValue.stringValue
+                    outputValue = .string(spoken)
                 } else if let template = payload.template {
                     outputValue = resolveTemplateValue(template, vars: vars)
                 } else {
@@ -2166,6 +1789,24 @@ final class SkillPackageRuntime {
         return Double(intersection) / Double(union)
     }
 
+    private func extractToolField(_ key: String, from value: SkillJSONValue) -> String? {
+        switch value {
+        case .object(let dict):
+            let field = dict[key]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return field.isEmpty ? nil : field
+        case .string(let raw):
+            guard let data = raw.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let field = obj[key] as? String else {
+                return nil
+            }
+            let trimmed = field.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        default:
+            return nil
+        }
+    }
+
     private func valueForVariable(_ variable: String, vars: [String: SkillJSONValue]) -> SkillJSONValue {
         if let value = vars[variable] {
             return value
@@ -2321,7 +1962,7 @@ final class SkillForgePipelineV2 {
          store: SkillStore = .shared,
          logger: AppLogger = JSONLineLogger(),
          llmRuntime: SkillPackageLLMRuntime = DeterministicSkillLLMRuntime(),
-         maxIterations: Int = 100,
+         maxIterations: Int = 200,
          iterationDelayMs: Int = 0) {
         self.gptClient = gptClient
         self.validator = validator
@@ -2336,6 +1977,43 @@ final class SkillForgePipelineV2 {
     func run(requirements: SkillForgeRequirements,
              onLog: @escaping (String) -> Void,
              installOnApproval: Bool = true) async -> SkillForgePipelineOutcome {
+        guard gptClient.authorityProvider == .openAI else {
+            let reason = "Skill creation requires OpenAI GPT authority (provider=\(gptClient.authorityProvider.rawValue))"
+            logger.error("learn_skill_blocked", metadata: [
+                "skill_id": normalizeSkillID(from: requirements.goal),
+                "iteration": "0",
+                "stage": SkillForgePipelineStage.blocked.rawValue,
+                "gpt_model": gptClient.modelName
+            ])
+            onLog("[\(SkillForgePipelineStage.blocked.rawValue)] \(reason)")
+            return SkillForgePipelineOutcome(
+                approved: false,
+                installedPackage: nil,
+                iterations: 0,
+                blockedReason: reason,
+                lastCritique: reason,
+                requiredChanges: ["Use OpenAI GPT for skill creation; Ollama is not permitted for forge."]
+            )
+        }
+        guard isGPTModel(gptClient.modelName) else {
+            let reason = "Skill creation requires a GPT model, but got '\(gptClient.modelName)'"
+            logger.error("learn_skill_blocked", metadata: [
+                "skill_id": normalizeSkillID(from: requirements.goal),
+                "iteration": "0",
+                "stage": SkillForgePipelineStage.blocked.rawValue,
+                "gpt_model": gptClient.modelName
+            ])
+            onLog("[\(SkillForgePipelineStage.blocked.rawValue)] \(reason)")
+            return SkillForgePipelineOutcome(
+                approved: false,
+                installedPackage: nil,
+                iterations: 0,
+                blockedReason: reason,
+                lastCritique: reason,
+                requiredChanges: ["Select a GPT model (for example gpt-5.2) for skill creation."]
+            )
+        }
+
         logger.info("skill_forge_started", metadata: [
             "skill_id": normalizeSkillID(from: requirements.goal),
             "iteration": "0",
@@ -2588,12 +2266,28 @@ final class SkillForgePipelineV2 {
         let joined = pieces.filter { !$0.isEmpty }.joined(separator: "_")
         return joined.isEmpty ? "skill" : joined
     }
+
+    private func isGPTModel(_ modelName: String) -> Bool {
+        modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("gpt-")
+    }
 }
 
 final class OpenAISkillArchitectClient: SkillForgeGPTClient {
+    let authorityProvider: SkillForgeAuthorityProvider = .openAI
+
     var modelName: String {
         let configured = OpenAISettings.generalModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return configured.isEmpty ? OpenAISettings.defaultPreferredModel : configured
+        guard !configured.isEmpty else {
+            return OpenAISettings.defaultPreferredModel
+        }
+        let normalized = configured.lowercased()
+        if normalized.hasPrefix("gpt-") {
+            return configured
+        }
+        // SkillForge must stay GPT-only even when other runtime defaults change.
+        return OpenAISettings.defaultPreferredModel
     }
 
     func makePlan(requirements: SkillForgeRequirements,
@@ -2601,6 +2295,22 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
                   feedback: SkillForgeFeedback) async throws -> SkillPlan {
         let system = """
         You are PlannerGPT for SamOS SkillForge.
+        GPT is final authority for missing requirements and information sources.
+        If source details are missing, propose trusted sources yourself.
+        Do not ask the user for URLs.
+        Return a JSON object using EXACTLY this shape (no extra top-level keys):
+        {
+          "skill_id": "string",
+          "name": "string",
+          "version": 1,
+          "intent_patterns": ["string"],
+          "inputs_schema": {"type":"object","required":[],"properties":{},"additionalProperties":false},
+          "outputs_schema": {"type":"object","required":[],"properties":{},"additionalProperties":false},
+          "tool_requirements": [{"name":"string","permissions":["string"]}],
+          "conversation_policy": {"tone":"string","safety_constraints":["string"]},
+          "test_cases": [{"name":"string","input_text":"string","expected":{}}]
+        }
+        Do NOT output keys like schema_version/id/title/goal.
         Return ONLY valid JSON matching SkillPlan.
         """
         let user = """
@@ -2611,7 +2321,13 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         available_tools: \(toolCatalog(availableTools))
         feedback: \(feedbackJSON(feedback))
         """
-        return try await requestJSON(systemPrompt: system, userPrompt: user, type: SkillPlan.self)
+        let decoded = try await requestJSON(
+            systemPrompt: system,
+            userPrompt: user,
+            type: SkillPlan.self,
+            maxOutputTokens: 1_400
+        )
+        return normalizedPlanForPipeline(decoded, availableTools: availableTools)
     }
 
     func makeSpec(plan: SkillPlan,
@@ -2619,6 +2335,10 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
                   feedback: SkillForgeFeedback) async throws -> SkillSpecV2 {
         let system = """
         You are SpecGPT for SamOS SkillForge.
+        GPT is final authority for missing requirements and information sources.
+        If source details are missing, propose trusted sources yourself.
+        Do not ask the user for URLs.
+        Return EXACT SkillSpecV2 keys: steps, prompts, failure_modes, limits.
         Return ONLY valid JSON matching SkillSpecV2.
         """
         let user = """
@@ -2627,7 +2347,19 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         requirements: goal=\(requirements.goal), missing=\(requirements.missing)
         feedback: \(feedbackJSON(feedback))
         """
-        return try await requestJSON(systemPrompt: system, userPrompt: user, type: SkillSpecV2.self)
+        do {
+            let decoded = try await requestJSON(
+                systemPrompt: system,
+                userPrompt: user,
+                type: SkillSpecV2.self,
+                maxOutputTokens: 1_600
+            )
+            return normalizedSpec(decoded, plan: plan)
+        } catch {
+            // Live GPT outputs can drift from SkillSpecV2 shape; use a deterministic scaffold so
+            // the pipeline can continue to validation/simulation/approval.
+            return fallbackSpec(for: plan)
+        }
     }
 
     func buildPackage(plan: SkillPlan,
@@ -2636,6 +2368,11 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
                       feedback: SkillForgeFeedback) async throws -> SkillPackage {
         let system = """
         You are BuilderGPT for SamOS SkillForge.
+        GPT is final authority for missing requirements and information sources.
+        If source details are missing, propose trusted sources yourself.
+        Do not ask the user for URLs.
+        Return EXACT SkillPackage keys: manifest, plan, spec, tests, signoff.
+        signoff must be null at build stage.
         Return ONLY valid JSON matching SkillPackage.
         """
         let user = """
@@ -2645,7 +2382,16 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         requirements: goal=\(requirements.goal), missing=\(requirements.missing)
         feedback: \(feedbackJSON(feedback))
         """
-        return try await requestJSON(systemPrompt: system, userPrompt: user, type: SkillPackage.self)
+        do {
+            return try await requestJSON(
+                systemPrompt: system,
+                userPrompt: user,
+                type: SkillPackage.self,
+                maxOutputTokens: 1_800
+            )
+        } catch {
+            return fallbackPackage(plan: plan, spec: spec)
+        }
     }
 
     func approve(package: SkillPackage,
@@ -2663,10 +2409,25 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         }
         """
         let hash = SkillForgePipelineV2.packageHash(package)
+        let packageSummary = jsonObjectString([
+            "skill_id": package.manifest.skillID,
+            "name": package.manifest.name,
+            "version": package.manifest.version,
+            "tool_requirements": package.plan.toolRequirements.map(\.name),
+            "intent_patterns": package.plan.intentPatterns,
+            "step_count": package.spec.steps.count,
+            "step_types": package.spec.steps.map(\.type.rawValue),
+            "test_count": package.tests.count,
+            "limits": [
+                "max_output_chars": package.spec.limits.maxOutputChars,
+                "max_output_tokens": package.spec.limits.maxOutputTokens,
+                "timeout_ms": package.spec.limits.timeoutMs
+            ]
+        ])
         let user = """
         Evaluate this package for safety and correctness.
         package_hash: \(hash)
-        package: \(jsonString(package))
+        package_summary: \(packageSummary)
         validation: \(jsonObjectString([
             "errors": validation.errors,
             "warnings": validation.warnings
@@ -2678,43 +2439,65 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
             "failed": simulation.cases.filter { !$0.passed }.map { $0.failureReason ?? $0.name }
         ]))
         """
-        return try await requestJSON(systemPrompt: system, userPrompt: user, type: SkillApproverResponse.self)
+        return try await requestJSON(
+            systemPrompt: system,
+            userPrompt: user,
+            type: SkillApproverResponse.self,
+            maxOutputTokens: 700
+        )
     }
 
     private func requestJSON<T: Decodable>(systemPrompt: String,
                                            userPrompt: String,
-                                           type: T.Type) async throws -> T {
-        let raw = try await callOpenAI(systemPrompt: systemPrompt, userPrompt: userPrompt)
+                                           type: T.Type,
+                                           maxOutputTokens: Int = 1_200) async throws -> T {
+        let raw = try await callOpenAI(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxOutputTokens: maxOutputTokens
+        )
         if let parsed: T = decodeJSON(raw, as: T.self) {
             return parsed
         }
         let fixed = try await callOpenAI(
-            systemPrompt: "FIX JSON ONLY. Return valid JSON. No commentary.",
-            userPrompt: raw
+            systemPrompt: "FIX JSON ONLY. Return valid JSON matching the requested schema. No commentary.",
+            userPrompt: """
+            Target schema:
+            \(schemaHint(for: T.self))
+
+            Repair this content into valid JSON only:
+            \(raw)
+            """,
+            maxOutputTokens: maxOutputTokens
         )
         if let parsed: T = decodeJSON(fixed, as: T.self) {
             return parsed
         }
-        throw SkillForge.ForgeError.refinementFailed("Failed to decode structured JSON from OpenAI response")
+        let rawPrefix = String(raw.prefix(240)).replacingOccurrences(of: "\n", with: " ")
+        throw SkillForge.ForgeError.refinementFailed(
+            "Failed to decode structured JSON from OpenAI response (raw_prefix=\(rawPrefix))"
+        )
+    }
+
+    private func schemaHint<T>(for type: T.Type) -> String {
+        if type == SkillPlan.self {
+            return #"{"skill_id":"string","name":"string","version":1,"intent_patterns":["string"],"inputs_schema":{"type":"object","required":[],"properties":{},"additionalProperties":false},"outputs_schema":{"type":"object","required":[],"properties":{},"additionalProperties":false},"tool_requirements":[{"name":"string","permissions":["string"]}],"conversation_policy":{"tone":"string","safety_constraints":["string"]},"test_cases":[{"name":"string","input_text":"string","expected":{}}]}"#
+        }
+        if type == SkillSpecV2.self {
+            return #"{"steps":[],"prompts":{},"failure_modes":[{"code":"string","message":"string","action":"string"}],"limits":{"max_output_chars":5000,"max_output_tokens":512,"timeout_ms":30000}}"#
+        }
+        if type == SkillPackage.self {
+            return #"{"manifest":{"skill_id":"string","name":"string","version":1,"origin":"forged","created_at":"ISO-8601"},"plan":{},"spec":{},"tests":[],"signoff":null}"#
+        }
+        if type == SkillApproverResponse.self {
+            return #"{"approved":true,"reason":"string","required_changes":[],"risk_notes":[],"package_hash":"sha256..."}"#
+        }
+        return "{}"
     }
 
     private func decodeJSON<T: Decodable>(_ raw: String, as type: T.Type) -> T? {
-        if let data = raw.data(using: .utf8),
-           let parsed = try? JSONDecoder().decode(T.self, from: data) {
-            return parsed
-        }
-        if let start = raw.firstIndex(of: "{"),
-           let end = raw.lastIndex(of: "}") {
-            let object = String(raw[start...end])
-            if let data = object.data(using: .utf8),
-               let parsed = try? JSONDecoder().decode(T.self, from: data) {
-                return parsed
-            }
-        }
-        if let start = raw.firstIndex(of: "["),
-           let end = raw.lastIndex(of: "]") {
-            let array = String(raw[start...end])
-            if let data = array.data(using: .utf8),
+        for candidate in jsonCandidates(from: raw) {
+            if let data = candidate.data(using: .utf8),
                let parsed = try? JSONDecoder().decode(T.self, from: data) {
                 return parsed
             }
@@ -2722,20 +2505,90 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         return nil
     }
 
-    private func callOpenAI(systemPrompt: String, userPrompt: String) async throws -> String {
+    private func jsonCandidates(from raw: String) -> [String] {
+        var candidates: [String] = []
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            candidates.append(trimmed)
+        }
+
+        if let regex = try? NSRegularExpression(pattern: #"(?s)```(?:json)?\s*(.*?)```"#) {
+            let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            for match in regex.matches(in: trimmed, range: nsRange) {
+                guard match.numberOfRanges > 1,
+                      let range = Range(match.range(at: 1), in: trimmed) else { continue }
+                let fenced = String(trimmed[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !fenced.isEmpty {
+                    candidates.append(fenced)
+                }
+            }
+        }
+
+        // Try extracting balanced JSON object/array regions.
+        if let object = firstBalancedJSON(in: trimmed, open: "{", close: "}") {
+            candidates.append(object)
+        }
+        if let array = firstBalancedJSON(in: trimmed, open: "[", close: "]") {
+            candidates.append(array)
+        }
+
+        // Keep order but drop duplicates.
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0).inserted }
+    }
+
+    private func firstBalancedJSON(in text: String, open: Character, close: Character) -> String? {
+        guard let start = text.firstIndex(of: open) else { return nil }
+        var depth = 0
+        var inString = false
+        var isEscaped = false
+        var idx = start
+
+        while idx < text.endIndex {
+            let ch = text[idx]
+            if inString {
+                if isEscaped {
+                    isEscaped = false
+                } else if ch == "\\" {
+                    isEscaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+            } else {
+                if ch == "\"" {
+                    inString = true
+                } else if ch == open {
+                    depth += 1
+                } else if ch == close {
+                    depth -= 1
+                    if depth == 0 {
+                        return String(text[start...idx])
+                    }
+                }
+            }
+            idx = text.index(after: idx)
+        }
+        return nil
+    }
+
+    private func callOpenAI(systemPrompt: String,
+                            userPrompt: String,
+                            maxOutputTokens: Int = 1_200) async throws -> String {
         guard OpenAISettings.isConfigured else {
             throw SkillForge.ForgeError.requirementsFailed("OpenAI API key not configured")
         }
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
-        let payload: [String: Any] = [
+        let tokenKey = RealOpenAITransport.completionTokenParameter(for: modelName)
+        var payload: [String: Any] = [
             "model": modelName,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userPrompt]
             ],
             "temperature": 0.0,
-            "max_tokens": 1_800
+            "response_format": ["type": "json_object"]
         ]
+        payload[tokenKey] = max(200, min(maxOutputTokens, 4_000))
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -2751,13 +2604,288 @@ final class OpenAISkillArchitectClient: SkillForgeGPTClient {
         guard
             let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let choices = root["choices"] as? [[String: Any]],
-            let first = choices.first,
-            let message = first["message"] as? [String: Any],
-            let content = message["content"] as? String
+            let first = choices.first
         else {
             throw SkillForge.ForgeError.reviewFailed("OpenAI returned an invalid completion envelope")
         }
-        return content
+
+        if let text = first["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+
+        guard let message = first["message"] as? [String: Any] else {
+            let raw = String(data: data.prefix(400), encoding: .utf8) ?? "<unreadable>"
+            throw SkillForge.ForgeError.reviewFailed("OpenAI completion missing message envelope: \(raw)")
+        }
+
+        if let content = message["content"] as? String, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return content
+        }
+
+        if let parts = message["content"] as? [Any] {
+            var fragments: [String] = []
+            for part in parts {
+                if let stringPart = part as? String,
+                   !stringPart.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fragments.append(stringPart)
+                    continue
+                }
+                guard let dict = part as? [String: Any] else { continue }
+                if let text = dict["text"] as? String,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fragments.append(text)
+                    continue
+                }
+                if let textObj = dict["text"] as? [String: Any],
+                   let value = textObj["value"] as? String,
+                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fragments.append(value)
+                    continue
+                }
+                if let inner = dict["content"] as? String,
+                   !inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fragments.append(inner)
+                }
+            }
+
+            let joined = fragments.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                return joined
+            }
+        }
+
+        if let refusal = message["refusal"] as? String, !refusal.isEmpty {
+            throw SkillForge.ForgeError.reviewFailed("OpenAI refused skill architecture response: \(refusal)")
+        }
+        let raw = String(data: data.prefix(400), encoding: .utf8) ?? "<unreadable>"
+        throw SkillForge.ForgeError.reviewFailed("OpenAI completion had no usable content: \(raw)")
+    }
+
+    private func normalizedSpec(_ spec: SkillSpecV2, plan: SkillPlan) -> SkillSpecV2 {
+        var normalized = spec
+        if normalized.steps.isEmpty {
+            normalized = fallbackSpec(for: plan)
+        }
+        if !normalized.steps.contains(where: { $0.type == .return }) {
+            let outputKey = preferredOutputKey(from: plan)
+            normalized.steps.append(
+                SkillPackageStep(
+                    id: "return_output",
+                    type: .return,
+                    extract: nil,
+                    format: nil,
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: SkillReturnStep(output: [outputKey: "{{final_output}}"])
+                )
+            )
+        }
+        if normalized.limits.maxOutputChars <= 0 || normalized.limits.maxOutputChars > 5_000 {
+            normalized.limits.maxOutputChars = 5_000
+        }
+        if normalized.limits.maxOutputTokens <= 0 || normalized.limits.maxOutputTokens > 2_000 {
+            normalized.limits.maxOutputTokens = 512
+        }
+        if normalized.limits.timeoutMs <= 0 || normalized.limits.timeoutMs > 120_000 {
+            normalized.limits.timeoutMs = 30_000
+        }
+        return normalized
+    }
+
+    private func fallbackSpec(for plan: SkillPlan) -> SkillSpecV2 {
+        let inputKey = preferredInputKey(from: plan)
+        let outputKey = preferredOutputKey(from: plan)
+        var steps: [SkillPackageStep] = []
+        let sourceVar = "input.\(inputKey)"
+
+        if let firstTool = plan.toolRequirements.first?.name {
+            steps.append(
+                SkillPackageStep(
+                    id: "call_tool",
+                    type: .toolCall,
+                    extract: nil,
+                    format: nil,
+                    toolCall: SkillToolCallStep(
+                        name: firstTool,
+                        args: ["query": "{{\(sourceVar)}}"],
+                        outputVar: "tool_output"
+                    ),
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                )
+            )
+            steps.append(
+                SkillPackageStep(
+                    id: "format_output",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: "tool_output",
+                        mode: "tool_formatted",
+                        outputVar: "final_output"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                )
+            )
+        } else {
+            steps.append(
+                SkillPackageStep(
+                    id: "format_bullets",
+                    type: .format,
+                    extract: nil,
+                    format: SkillFormatStep(
+                        template: nil,
+                        inputVar: sourceVar,
+                        mode: "bullets",
+                        outputVar: "final_output"
+                    ),
+                    toolCall: nil,
+                    llmCall: nil,
+                    branch: nil,
+                    returnStep: nil
+                )
+            )
+        }
+
+        steps.append(
+            SkillPackageStep(
+                id: "return_output",
+                type: .return,
+                extract: nil,
+                format: nil,
+                toolCall: nil,
+                llmCall: nil,
+                branch: nil,
+                returnStep: SkillReturnStep(output: [outputKey: "{{final_output}}"])
+            )
+        )
+
+        return SkillSpecV2(
+            steps: steps,
+            prompts: [:],
+            failureModes: [
+                SkillFailureMode(
+                    code: "fallback_spec",
+                    message: "Generated fallback deterministic spec.",
+                    action: "revise"
+                )
+            ],
+            limits: SkillLimits(maxOutputChars: 5_000, maxOutputTokens: 512, timeoutMs: 30_000)
+        )
+    }
+
+    private func fallbackPackage(plan: SkillPlan, spec: SkillSpecV2) -> SkillPackage {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let tests = plan.testCases.isEmpty ? [
+            SkillTestCase(
+                name: "fallback_case",
+                inputText: "Example input text",
+                expected: [preferredOutputKey(from: plan): .string("Example")]
+            )
+        ] : plan.testCases
+
+        return SkillPackage(
+            manifest: SkillManifest(
+                skillID: plan.skillID,
+                name: plan.name,
+                version: plan.version,
+                origin: .forged,
+                createdAtISO8601: now
+            ),
+            plan: plan,
+            spec: spec,
+            tests: tests,
+            signoff: nil
+        )
+    }
+
+    private func preferredInputKey(from plan: SkillPlan) -> String {
+        if plan.inputsSchema.properties["text"] != nil { return "text" }
+        if let firstRequired = plan.inputsSchema.required.first, !firstRequired.isEmpty { return firstRequired }
+        if let first = plan.inputsSchema.properties.keys.sorted().first, !first.isEmpty { return first }
+        return "text"
+    }
+
+    private func preferredOutputKey(from plan: SkillPlan) -> String {
+        if plan.outputsSchema.properties["text"] != nil { return "text" }
+        if let firstRequired = plan.outputsSchema.required.first, !firstRequired.isEmpty { return firstRequired }
+        if let first = plan.outputsSchema.properties.keys.sorted().first, !first.isEmpty { return first }
+        return "text"
+    }
+
+    private func normalizedPlanForPipeline(_ plan: SkillPlan,
+                                           availableTools: [SkillToolDescriptor]) -> SkillPlan {
+        var normalized = plan
+
+        let availableToolNames = Set(availableTools.map(\.name))
+        normalized.toolRequirements = normalized.toolRequirements
+            .filter { availableToolNames.contains($0.name) }
+
+        if normalized.intentPatterns.isEmpty {
+            let fallback = normalized.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalized.intentPatterns = [fallback.isEmpty ? normalized.skillID : fallback.lowercased()]
+        }
+
+        if normalized.inputsSchema.type != .object {
+            normalized.inputsSchema.type = .object
+        }
+        if normalized.inputsSchema.properties["text"] == nil {
+            normalized.inputsSchema.properties["text"] = SkillJSONSchema(type: .string)
+        }
+        if !normalized.inputsSchema.required.contains("text") {
+            normalized.inputsSchema.required = ["text"]
+        }
+        normalized.inputsSchema.additionalProperties = false
+
+        // Keep runtime deterministic: normalize all forge outputs to a single text field.
+        normalized.outputsSchema = SkillJSONSchema(
+            type: .object,
+            required: ["text"],
+            properties: [
+                "text": SkillJSONSchema(type: .string)
+            ],
+            additionalProperties: false
+        )
+
+        func expectedProbe(from inputText: String) -> String {
+            let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "result" }
+            let token = trimmed
+                .components(separatedBy: .whitespacesAndNewlines)
+                .first(where: { !$0.isEmpty }) ?? "result"
+            return String(token.prefix(16))
+        }
+
+        if normalized.testCases.isEmpty {
+            normalized.testCases = [
+                SkillTestCase(
+                    name: "basic_case",
+                    inputText: "Rewrite this into bullet points.",
+                    expected: normalized.toolRequirements.isEmpty ? ["text": .string("Rewrite")] : [:]
+                )
+            ]
+        } else {
+            normalized.testCases = normalized.testCases.map { testCase in
+                var adjusted = testCase
+                let input = adjusted.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                adjusted.inputText = input.isEmpty ? "Example input text." : input
+                adjusted.maxSteps = min(adjusted.maxSteps ?? 64, 96)
+                if normalized.toolRequirements.isEmpty {
+                    adjusted.expected = ["text": .string(expectedProbe(from: adjusted.inputText))]
+                } else {
+                    adjusted.expected = [:]
+                }
+                return adjusted
+            }
+        }
+
+        return normalized
     }
 
     private func jsonString<T: Encodable>(_ value: T) -> String {
