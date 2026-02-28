@@ -72,100 +72,69 @@ final class AppState {
         isThinkingIndicatorVisible = true
         addDebug("[Turn] Processing: \"\(trimmed.prefix(80))\"")
 
-        let useStreaming = container.settings.bool(forKey: SettingsKey.elevenlabsStreaming)
-
         Task {
             do {
-                let result: TurnResult
+                // Get LLM response + execute plan
+                let result = try await container.orchestrator.processTurn(
+                    text: trimmed,
+                    history: chatMessages,
+                    sessionId: sessionId,
+                    attachments: attachments
+                )
 
-                if useStreaming {
-                    // Streaming path: tokens piped to TTS as sentences complete
-                    let (tokenStream, tokenContinuation) = AsyncThrowingStream<String, Error>.makeStream()
+                // Show chat bubble IMMEDIATELY — before TTS starts
+                self.isThinkingIndicatorVisible = false
 
-                    // Start TTS streaming consumer in parallel
-                    let ttsTask = Task {
-                        await container.ttsService.speakStreaming(llmStream: tokenStream)
-                    }
-
-                    result = try await container.orchestrator.processTurnStreaming(
-                        text: trimmed,
-                        history: chatMessages,
-                        sessionId: sessionId,
-                        attachments: attachments,
-                        onToken: { token in
-                            tokenContinuation.yield(token)
-                        }
-                    )
-                    tokenContinuation.finish()
-                    await ttsTask.value
-                } else {
-                    // Non-streaming path: wait for full response, then TTS
-                    result = try await container.orchestrator.processTurn(
-                        text: trimmed,
-                        history: chatMessages,
-                        sessionId: sessionId,
-                        attachments: attachments
-                    )
+                if !result.sayText.isEmpty {
+                    self.appendAssistant(result.sayText, latencyMs: result.latencyMs, usedMemory: result.usedMemory)
                 }
 
-                await MainActor.run {
-                    self.isThinkingIndicatorVisible = false
+                self.outputItems.append(contentsOf: result.outputItems)
+                self.lastLatencyMs = result.latencyMs
+                self.addDebug("[Turn] Complete: \(result.latencyMs)ms, tools: \(result.toolCalls)")
 
-                    if !result.sayText.isEmpty {
-                        self.appendAssistant(result.sayText, latencyMs: result.latencyMs, usedMemory: result.usedMemory)
+                for tool in result.toolCalls {
+                    self.toolLog.append("[\(self.timestamp)] \(tool)")
+                }
+
+                if !result.engineSummary.isEmpty {
+                    self.engineLog.append("[\(self.timestamp)] \(result.engineSummary)")
+                    self.addDebug("[Engines] \(result.engineSummary)")
+                    if self.engineLog.count > 50 {
+                        self.engineLog.removeFirst(self.engineLog.count - 50)
                     }
+                }
 
-                    self.outputItems.append(contentsOf: result.outputItems)
-                    self.lastLatencyMs = result.latencyMs
-                    self.addDebug("[Turn] Complete: \(result.latencyMs)ms, tools: \(result.toolCalls)")
-
-                    // Log tool calls
-                    for tool in result.toolCalls {
-                        self.toolLog.append("[\(self.timestamp)] \(tool)")
-                    }
-
-                    // Log engine activity
-                    if !result.engineSummary.isEmpty {
-                        self.engineLog.append("[\(self.timestamp)] \(result.engineSummary)")
-                        self.addDebug("[Engines] \(result.engineSummary)")
-                        if self.engineLog.count > 50 {
-                            self.engineLog.removeFirst(self.engineLog.count - 50)
-                        }
-                    }
-
-                    // Speak the response via TTS (if not muted and not already streamed)
-                    let askedQuestion = result.sayText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
-                    if !useStreaming && !result.sayText.isEmpty && !self.isMuted {
-                        self.status = .speaking
-                        container.speechRecognition.stopListening()
-                        Task {
-                            await container.ttsService.speak(text: result.sayText, mode: .normal)
-                            await MainActor.run {
-                                if self.status == .speaking {
-                                    if askedQuestion && self.isListeningEnabled {
-                                        self.startFollowUpCapture()
-                                    } else {
-                                        self.restartListeningAfterTurn()
-                                    }
+                // THEN speak via TTS (non-blocking — runs in background)
+                let askedQuestion = result.sayText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
+                if !result.sayText.isEmpty && !self.isMuted {
+                    self.status = .speaking
+                    container.speechRecognition.stopListening()
+                    Task {
+                        await container.ttsService.speak(text: result.sayText, mode: .normal)
+                        await MainActor.run {
+                            if self.status == .speaking {
+                                if askedQuestion && self.isListeningEnabled {
+                                    self.startFollowUpCapture()
+                                } else {
+                                    self.restartListeningAfterTurn()
                                 }
                             }
                         }
+                    }
+                } else {
+                    if askedQuestion && self.isListeningEnabled {
+                        self.startFollowUpCapture()
                     } else {
-                        if askedQuestion && self.isListeningEnabled {
-                            self.startFollowUpCapture()
-                        } else {
-                            self.restartListeningAfterTurn()
-                        }
+                        self.restartListeningAfterTurn()
                     }
                 }
             } catch {
-                await MainActor.run {
-                    self.isThinkingIndicatorVisible = false
-                    self.lastError = error.localizedDescription
-                    self.addDebug("[Error] \(error.localizedDescription)")
-                    self.appendAssistant("Sorry, something went wrong. Please try again.")
-                    self.restartListeningAfterTurn()
-                }
+                self.isThinkingIndicatorVisible = false
+                self.lastError = error.localizedDescription
+                self.addDebug("[Error] \(error.localizedDescription)")
+                self.appendAssistant("Sorry, something went wrong. Please try again.")
+                self.restartListeningAfterTurn()
             }
         }
     }
