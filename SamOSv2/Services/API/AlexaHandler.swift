@@ -251,7 +251,7 @@ final class AlexaHandler: @unchecked Sendable {
         escaped = escaped.replacingOccurrences(of: ". ", with: ". <break time=\"300ms\"/> ")
         escaped = escaped.replacingOccurrences(of: "! ", with: "! <break time=\"200ms\"/> ")
 
-        return "<speak>\(escaped)</speak>"
+        return "<speak><lang xml:lang=\"en-US\">\(escaped)</lang></speak>"
     }
 }
 
