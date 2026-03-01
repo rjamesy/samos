@@ -29,9 +29,9 @@ enum AppConfig {
     /// Maximum number of identity facts always injected.
     static let maxIdentityFacts = 8
     /// Maximum query-relevant memories.
-    static let maxQueryMemories = 12
+    static let maxQueryMemories = 16
     /// Maximum chars for query-relevant memory block.
-    static let maxQueryMemoryChars = 2_000
+    static let maxQueryMemoryChars = 3_000
     /// Maximum chars for temporal context.
     static let maxTemporalChars = 3_000
 
@@ -78,10 +78,10 @@ enum AppConfig {
     // MARK: - Memory Expiry (days)
 
     enum MemoryTTL {
-        static let fact = 365
-        static let preference = 365
-        static let note = 90
-        static let checkin = 7
+        static let fact = 0        // permanent
+        static let preference = 0  // permanent
+        static let note = 0        // permanent
+        static let checkin = 0     // permanent
     }
 
     // MARK: - Chat

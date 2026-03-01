@@ -126,11 +126,21 @@ actor DatabaseManager {
             migrateV2()
             run("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", bindings: [2])
         }
+
+        if currentVersion < 3 {
+            migrateV3()
+            run("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", bindings: [3])
+        }
     }
 
     private func migrateV2() {
         // Add embedding column for vector search
         execute("ALTER TABLE memories ADD COLUMN embedding BLOB")
+    }
+
+    private func migrateV3() {
+        // Make all existing memories permanent — nullify expiry dates
+        execute("UPDATE memories SET expires_at = NULL WHERE is_active = 1")
     }
 
     private func migrateV1() {

@@ -23,6 +23,10 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
     private let ambientListening: AmbientListeningService?
     private let semanticMemoryEngine: SemanticMemoryEngine?
 
+    // Persistence
+    private let database: DatabaseManager?
+    private let crossSessionHistory: CrossSessionHistory?
+
     init(
         llmClient: any LLMClient,
         promptBuilder: PromptBuilder,
@@ -37,7 +41,9 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
         skillEngine: SkillEngine? = nil,
         proactiveAwareness: ProactiveAwareness? = nil,
         ambientListening: AmbientListeningService? = nil,
-        semanticMemoryEngine: SemanticMemoryEngine? = nil
+        semanticMemoryEngine: SemanticMemoryEngine? = nil,
+        database: DatabaseManager? = nil,
+        crossSessionHistory: CrossSessionHistory? = nil
     ) {
         self.llmClient = llmClient
         self.promptBuilder = promptBuilder
@@ -53,6 +59,8 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
         self.proactiveAwareness = proactiveAwareness
         self.ambientListening = ambientListening
         self.semanticMemoryEngine = semanticMemoryEngine
+        self.database = database
+        self.crossSessionHistory = crossSessionHistory
     }
 
     func processTurn(text: String, history: [ChatMessage], sessionId: String, attachments: [ChatAttachment] = []) async throws -> TurnResult {
@@ -116,12 +124,21 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
             .suffix(5)
             .map(\.text)
 
+        // 6b. Build cross-session context
+        var conversationHistory = buildHistoryString(history)
+        if let crossSession = crossSessionHistory {
+            let crossBlock = await crossSession.buildCrossSessionBlock(currentSessionId: sessionId, maxChars: 2000)
+            if !crossBlock.isEmpty {
+                conversationHistory = crossBlock + "\n\n" + conversationHistory
+            }
+        }
+
         // 7. Build system prompt
         let systemPrompt = promptBuilder.buildSystemPrompt(
             memoryBlock: memoryBlock,
             engineContext: engineContext,
             toolManifest: toolManifest,
-            conversationHistory: buildHistoryString(history),
+            conversationHistory: conversationHistory,
             currentState: currentState,
             temporalContext: temporalContext,
             recentResponses: recentResponses
@@ -280,6 +297,24 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
     // MARK: - Post-Turn Hooks
 
     private func triggerPostTurnHooks(userText: String, assistantText: String, history: [ChatMessage], sessionId: String) async {
+        // Persist user and assistant messages to SQLite for cross-session recall
+        if let db = database {
+            let now = Date().timeIntervalSince1970
+            let localDate = Self.localDateString(Date())
+            let userMsgId = UUID().uuidString
+            let assistantMsgId = UUID().uuidString
+            await db.run(
+                "INSERT OR IGNORE INTO messages (id, role, text, ts, session_id, local_date) VALUES (?, ?, ?, ?, ?, ?)",
+                bindings: [userMsgId, "user", userText, now, sessionId, localDate]
+            )
+            if !assistantText.isEmpty {
+                await db.run(
+                    "INSERT OR IGNORE INTO messages (id, role, text, ts, session_id, local_date) VALUES (?, ?, ?, ?, ?, ?)",
+                    bindings: [assistantMsgId, "assistant", assistantText, now + 0.001, sessionId, localDate]
+                )
+            }
+        }
+
         // Auto-save memories from user message
         if let autoSave = memoryAutoSave {
             await autoSave.processMessage(userText, role: .user)
@@ -292,6 +327,12 @@ final class TurnOrchestrator: TurnOrchestrating, @unchecked Sendable {
                 await semantic.extractProfileFacts(messages: history)
             }
         }
+    }
+
+    private static func localDateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     // MARK: - Helpers

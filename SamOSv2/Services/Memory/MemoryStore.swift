@@ -130,6 +130,7 @@ actor MemoryStore: MemoryStoreProtocol {
         case .note: days = AppConfig.MemoryTTL.note
         case .checkin: days = AppConfig.MemoryTTL.checkin
         }
+        guard days > 0 else { return nil }  // 0 = permanent, no expiry
         return Date().addingTimeInterval(TimeInterval(days * 86400)).timeIntervalSince1970
     }
 

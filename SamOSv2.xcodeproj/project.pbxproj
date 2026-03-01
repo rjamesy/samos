@@ -84,6 +84,7 @@
 		91322ED165EA38184C3A0523 /* VoicePipelineE2ETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DADC39F569A0728FC181DF6 /* VoicePipelineE2ETests.swift */; };
 		91C28B58282CCACF4A9413B2 /* LLMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4C609D55A74097F0BE2CFF1 /* LLMClient.swift */; };
 		98D60B61D50288F008A0C089 /* ActiveCuriosityEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1478C380D779B8BF93E3A9 /* ActiveCuriosityEngine.swift */; };
+		A03712449F7AD9DB70F27820 /* AlexaHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8814A55F998B104BB36D6B2 /* AlexaHandler.swift */; };
 		A37DDF4047598A9F7AE7CA7D /* SpeechCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E006E6805CEDF2C2A3BF498B /* SpeechCoordinator.swift */; };
 		A51BBA4CA54243F0B0CE7CFB /* ChatHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F524B19A0650BD51955D5BF /* ChatHistoryStore.swift */; };
 		A54106E8603B67FCAD8B5A11 /* GmailClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1165DCB94CAA2CB719814FE1 /* GmailClient.swift */; };
@@ -235,6 +236,7 @@
 		ADF28C0E652A72D2ABEC15DA /* OutputCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputCanvasView.swift; sourceTree = "<group>"; };
 		B0B8032D06C16783C4F00424 /* VoicePipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePipelineTests.swift; sourceTree = "<group>"; };
 		B0BEA1976E154568243E8810 /* MemoryTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryTools.swift; sourceTree = "<group>"; };
+		B8814A55F998B104BB36D6B2 /* AlexaHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlexaHandler.swift; sourceTree = "<group>"; };
 		BA2CC150BFB409A8413171DD /* MemorySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySearch.swift; sourceTree = "<group>"; };
 		BEF99F96589D178D40F6BF5A /* AutonomousResearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutonomousResearchService.swift; sourceTree = "<group>"; };
 		BF419114A40196E83A5CD23D /* Configuration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Configuration.swift; sourceTree = "<group>"; };
@@ -341,6 +343,7 @@
 		2428B47905692ADAABA70C1D /* Speech */ = {
 			isa = PBXGroup;
 			children = (
+				B8814A55F998B104BB36D6B2 /* AlexaHandler.swift */,
 				2C3E3612DA88967B4A069291 /* AudioCaptureService.swift */,
 				069A65E622D574229781CAFE /* ElevenLabsClient.swift */,
 				E4F5A6B7C809102BE2F3A4B5 /* OpenAITTSClient.swift */,
@@ -831,6 +834,7 @@
 				2881A24DD3CACD9E4CEF3949 /* ActionConfirmationView.swift in Sources */,
 				98D60B61D50288F008A0C089 /* ActiveCuriosityEngine.swift in Sources */,
 				E2390442CCD2C9D44574CB97 /* AffectClassifier.swift in Sources */,
+				A03712449F7AD9DB70F27820 /* AlexaHandler.swift in Sources */,
 				CE3A5F2CC36AA3F91961A493 /* AlarmSession.swift in Sources */,
 				65C697473E2F3682408A0734 /* AmbientListeningService.swift in Sources */,
 				F8AF99C14EFD4F28F6000A5D /* AppContainer.swift in Sources */,

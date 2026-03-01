@@ -55,6 +55,7 @@ final class MemoryInjector: @unchecked Sendable {
             }
         }
 
-        return parts.joined(separator: "\n\n")
+        if parts.isEmpty { return "" }
+        return parts.joined(separator: "\n\n") + "\n[MEMORY USAGE] You know these things about the user. Reference them naturally — don't just answer, show you remember. If you spot gaps, ask."
     }
 }

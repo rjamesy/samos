@@ -264,7 +264,9 @@ final class AppContainer {
             skillEngine: skillEngine,
             proactiveAwareness: proactiveAwareness,
             ambientListening: ambientListening,
-            semanticMemoryEngine: semanticMemoryEngine
+            semanticMemoryEngine: semanticMemoryEngine,
+            database: database,
+            crossSessionHistory: crossSessionHistory
         )
 
         // Speech
