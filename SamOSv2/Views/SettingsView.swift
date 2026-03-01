@@ -23,6 +23,10 @@ struct SettingsView: View {
     @State private var youtubeKey = ""
     @State private var gmailToken = ""
     @State private var elevenlabsMuted = false
+    // API Server
+    @State private var apiEnabled = false
+    @State private var apiPort = "8443"
+    @State private var apiAuthToken = ""
     // Engine toggles
     @State private var engCognitiveTrace = true
     @State private var engWorldModel = true
@@ -47,6 +51,8 @@ struct SettingsView: View {
                 .tabItem { Label("Voice", systemImage: "waveform") }
             intelligenceTab
                 .tabItem { Label("Intelligence", systemImage: "brain") }
+            apiTab
+                .tabItem { Label("API", systemImage: "network") }
             debugTab
                 .tabItem { Label("Debug", systemImage: "ladybug") }
         }
@@ -133,6 +139,35 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
+    private var apiTab: some View {
+        Form {
+            Section("API Server") {
+                Toggle("Enable API Server", isOn: $apiEnabled)
+                TextField("Port", text: $apiPort)
+                    .frame(width: 100)
+                SecureField("Auth Token (optional)", text: $apiAuthToken)
+            }
+            Section("Status") {
+                HStack {
+                    Circle()
+                        .fill(appState.container?.apiServer?.isRunning == true ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                    Text(appState.container?.apiServer?.isRunning == true ? "Running on port \(apiPort)" : "Stopped")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section("Endpoints") {
+                Text("POST /api/chat — generic chat")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("POST /alexa — Alexa skill")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("GET /health — health check")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
     private var debugTab: some View {
         Form {
             Toggle("Memory Debug", isOn: $debugMemory)
@@ -164,6 +199,10 @@ struct SettingsView: View {
         youtubeKey = s.string(forKey: SettingsKey.youtubeAPIKey) ?? ""
         gmailToken = s.string(forKey: SettingsKey.gmailOAuthToken) ?? ""
         elevenlabsMuted = s.bool(forKey: SettingsKey.elevenlabsMuted)
+        apiEnabled = s.bool(forKey: SettingsKey.apiEnabled)
+        let port = s.double(forKey: SettingsKey.apiPort)
+        apiPort = port > 0 ? "\(Int(port))" : "8443"
+        apiAuthToken = s.string(forKey: SettingsKey.apiAuthToken) ?? ""
         engCognitiveTrace = s.bool(forKey: SettingsKey.engineCognitiveTrace)
         engWorldModel = s.bool(forKey: SettingsKey.engineWorldModel)
         engCuriosity = s.bool(forKey: SettingsKey.engineCuriosity)
@@ -198,6 +237,9 @@ struct SettingsView: View {
         s.setString(youtubeKey, forKey: SettingsKey.youtubeAPIKey)
         s.setString(gmailToken, forKey: SettingsKey.gmailOAuthToken)
         s.setBool(elevenlabsMuted, forKey: SettingsKey.elevenlabsMuted)
+        s.setBool(apiEnabled, forKey: SettingsKey.apiEnabled)
+        s.setDouble(Double(apiPort) ?? 8443, forKey: SettingsKey.apiPort)
+        s.setString(apiAuthToken, forKey: SettingsKey.apiAuthToken)
         s.setBool(engCognitiveTrace, forKey: SettingsKey.engineCognitiveTrace)
         s.setBool(engWorldModel, forKey: SettingsKey.engineWorldModel)
         s.setBool(engCuriosity, forKey: SettingsKey.engineCuriosity)

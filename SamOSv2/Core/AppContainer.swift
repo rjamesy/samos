@@ -90,6 +90,11 @@ final class AppContainer {
     // MARK: - Embeddings
     let embeddingClient: OpenAIEmbeddingClient
 
+    // MARK: - API Server
+    let apiHandler: APIHandler
+    let alexaHandler: AlexaHandler
+    let apiServer: SamAPIServer?
+
     init(
         settings: any SettingsStoreProtocol,
         database: DatabaseManager,
@@ -128,7 +133,10 @@ final class AppContainer {
         faceEnrollment: FaceEnrollment,
         googleAuthService: GoogleAuthService,
         gmailClient: GmailClient,
-        embeddingClient: OpenAIEmbeddingClient
+        embeddingClient: OpenAIEmbeddingClient,
+        apiHandler: APIHandler,
+        alexaHandler: AlexaHandler,
+        apiServer: SamAPIServer?
     ) {
         self.settings = settings
         self.database = database
@@ -168,6 +176,9 @@ final class AppContainer {
         self.googleAuthService = googleAuthService
         self.gmailClient = gmailClient
         self.embeddingClient = embeddingClient
+        self.apiHandler = apiHandler
+        self.alexaHandler = alexaHandler
+        self.apiServer = apiServer
     }
 
     /// Factory that creates a fully-wired production container.
@@ -278,6 +289,18 @@ final class AppContainer {
         let speechRecognition = SpeechRecognitionService(settings: settings)
         let wakeWordService = WakeWordService(settings: settings)
 
+        // API Server
+        let apiHandler = APIHandler(orchestrator: orchestrator, settings: settings)
+        let alexaHandler = AlexaHandler(apiHandler: apiHandler)
+        apiHandler.setAlexaHandler(alexaHandler)
+
+        let apiPort = UInt16(settings.double(forKey: SettingsKey.apiPort))
+        let effectivePort: UInt16 = apiPort > 0 ? apiPort : 8443
+        let apiServer = SamAPIServer(port: effectivePort, handler: apiHandler.route)
+        if settings.bool(forKey: SettingsKey.apiEnabled) {
+            try? apiServer.start()
+        }
+
         // Prune expired memories on launch
         await memoryStore.pruneExpired()
 
@@ -319,7 +342,10 @@ final class AppContainer {
             faceEnrollment: faceEnrollment,
             googleAuthService: googleAuthService,
             gmailClient: gmailClient,
-            embeddingClient: embeddingClient
+            embeddingClient: embeddingClient,
+            apiHandler: apiHandler,
+            alexaHandler: alexaHandler,
+            apiServer: apiServer
         )
     }
 

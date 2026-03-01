@@ -133,6 +133,11 @@
 		FA9353C8716510589D51DD42 /* Hey-Sam_en_mac_v4_0_0.ppn in Resources */ = {isa = PBXBuildFile; fileRef = 567083A2007FD46D8AAE7BA7 /* Hey-Sam_en_mac_v4_0_0.ppn */; };
 		FAEE9DEFDFB721679DBDDEFE /* MetaCognitionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0E5055E38E966C08E950BD /* MetaCognitionEngine.swift */; };
 		FE9949D1D783FAF7F0CB5AC5 /* ProactiveAwareness.swift in Sources */ = {isa = PBXBuildFile; fileRef = F87E2F8B6D4B8D7C2B9E57E3 /* ProactiveAwareness.swift */; };
+		BB11223344556677889900B1 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900A1 /* APITypes.swift */; };
+		BB11223344556677889900B2 /* APIHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900A2 /* APIHandler.swift */; };
+		BB11223344556677889900B3 /* AlexaTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900A3 /* AlexaTypes.swift */; };
+		BB11223344556677889900B4 /* AlexaHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900A4 /* AlexaHandler.swift */; };
+		BB11223344556677889900B5 /* SamAPIServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11223344556677889900A5 /* SamAPIServer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -275,6 +280,11 @@
 		FC9D14844B41E2775E0E8C8D /* WakeWordService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeWordService.swift; sourceTree = "<group>"; };
 		FEE3DC1A1059E6F316E768EB /* CausalLearningEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalLearningEngine.swift; sourceTree = "<group>"; };
 		FF3F659E15F086512868332C /* MemoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryStore.swift; sourceTree = "<group>"; };
+		AA11223344556677889900A1 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
+		AA11223344556677889900A2 /* APIHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIHandler.swift; sourceTree = "<group>"; };
+		AA11223344556677889900A3 /* AlexaTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlexaTypes.swift; sourceTree = "<group>"; };
+		AA11223344556677889900A4 /* AlexaHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlexaHandler.swift; sourceTree = "<group>"; };
+		AA11223344556677889900A5 /* SamAPIServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamAPIServer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -560,9 +570,22 @@
 			path = Web;
 			sourceTree = "<group>";
 		};
+		DD11223344556677889900C1 /* API */ = {
+			isa = PBXGroup;
+			children = (
+				AA11223344556677889900A4 /* AlexaHandler.swift */,
+				AA11223344556677889900A3 /* AlexaTypes.swift */,
+				AA11223344556677889900A2 /* APIHandler.swift */,
+				AA11223344556677889900A1 /* APITypes.swift */,
+				AA11223344556677889900A5 /* SamAPIServer.swift */,
+			);
+			path = API;
+			sourceTree = "<group>";
+		};
 		BB489DF01998198C711473F2 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				DD11223344556677889900C1 /* API */,
 				47BA8198A3A59B4A38E57AB5 /* Ambient */,
 				1ABF8E3FBCF72BD59CD8F988 /* Email */,
 				2B1501BEB2F5B23747C8FF5D /* Engines */,
@@ -831,6 +854,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				03462916BCE27BA5D699815C /* Action.swift in Sources */,
+				BB11223344556677889900B2 /* APIHandler.swift in Sources */,
+				BB11223344556677889900B1 /* APITypes.swift in Sources */,
+				BB11223344556677889900B4 /* AlexaHandler.swift in Sources */,
+				BB11223344556677889900B3 /* AlexaTypes.swift in Sources */,
 				2881A24DD3CACD9E4CEF3949 /* ActionConfirmationView.swift in Sources */,
 				98D60B61D50288F008A0C089 /* ActiveCuriosityEngine.swift in Sources */,
 				E2390442CCD2C9D44574CB97 /* AffectClassifier.swift in Sources */,
@@ -898,6 +925,7 @@
 				910FC7BC34BFE12FAC1FAA0F /* STTService.swift in Sources */,
 				70417BB8D06889F9D52791A3 /* SamErrors.swift in Sources */,
 				819967C5E0BD0E8019CB5B2F /* SamOSv2App.swift in Sources */,
+				BB11223344556677889900B5 /* SamAPIServer.swift in Sources */,
 				6D2B4F7F78A3F36A74AFFCEB /* SchedulerTools.swift in Sources */,
 				076CBAB63A9A753ED561F378 /* SearchTools.swift in Sources */,
 				A75B58BE96A784E618C55EF9 /* SemanticMemoryEngine.swift in Sources */,

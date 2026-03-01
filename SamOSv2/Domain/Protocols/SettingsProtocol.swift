@@ -43,4 +43,7 @@ enum SettingsKey {
     static let engineSkillEvolution = "engine_skill_evolution"
     static let youtubeAPIKey = "youtube_api_key"
     static let gmailOAuthToken = "gmail_oauth_token"
+    static let apiEnabled = "api_enabled"
+    static let apiPort = "api_port"
+    static let apiAuthToken = "api_auth_token"
 }

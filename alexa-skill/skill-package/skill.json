@@ -1,0 +1,57 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-US": {
+          "summary": "Talk to Sam, your AI assistant",
+          "examplePhrases": [
+            "Alexa, open hey sam",
+            "Alexa, ask hey sam what time is it",
+            "Alexa, ask hey sam to tell me a joke"
+          ],
+          "name": "Sam",
+          "description": "Sam is a voice-first AI assistant that can answer questions, have conversations, check the weather, set timers, and much more."
+        },
+        "en-AU": {
+          "summary": "Talk to Sam, your AI assistant",
+          "examplePhrases": [
+            "Alexa, open hey sam",
+            "Alexa, ask hey sam what time is it",
+            "Alexa, ask hey sam to tell me a joke"
+          ],
+          "name": "Sam",
+          "description": "Sam is a voice-first AI assistant that can answer questions, have conversations, check the weather, set timers, and much more."
+        },
+        "en-GB": {
+          "summary": "Talk to Sam, your AI assistant",
+          "examplePhrases": [
+            "Alexa, open hey sam",
+            "Alexa, ask hey sam what time is it",
+            "Alexa, ask hey sam to tell me a joke"
+          ],
+          "name": "Sam",
+          "description": "Sam is a voice-first AI assistant that can answer questions, have conversations, check the weather, set timers, and much more."
+        },
+        "en-IN": {
+          "summary": "Talk to Sam, your AI assistant",
+          "examplePhrases": [
+            "Alexa, open hey sam",
+            "Alexa, ask hey sam what time is it",
+            "Alexa, ask hey sam to tell me a joke"
+          ],
+          "name": "Sam",
+          "description": "Sam is a voice-first AI assistant that can answer questions, have conversations, check the weather, set timers, and much more."
+        }
+      }
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "https://preliminary-sword-soul-thin.trycloudflare.com/alexa",
+          "sslCertificateType": "Wildcard"
+        }
+      }
+    },
+    "manifestVersion": "1.0"
+  }
+}
