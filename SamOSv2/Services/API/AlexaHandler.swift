@@ -43,17 +43,40 @@ final class AlexaHandler: @unchecked Sendable {
 
     init(apiHandler: APIHandler) {
         self.apiHandler = apiHandler
+        log("AlexaHandler initialized")
     }
+
+    // MARK: - Debug Logging
+
+    private func log(_ message: String) {
+        let ts = Self.timestamp()
+        print("[Alexa \(ts)] \(message)")
+    }
+
+    private static func timestamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f.string(from: Date())
+    }
+
+    // MARK: - Main entry point
 
     func handle(_ alexaRequest: AlexaRequest) async -> AlexaResponse {
         let sessionId = alexaRequest.session.sessionId
-        print("[Alexa] Request type: \(alexaRequest.request.type), session: \(sessionId.prefix(12))")
+        let shortSession = String(sessionId.suffix(12))
+        log(">>> REQUEST type=\(alexaRequest.request.type) session=\(shortSession) new=\(alexaRequest.session.new)")
+        if let intent = alexaRequest.request.intent {
+            log("    intent=\(intent.name) slots=\(intent.slots?.mapValues { $0.value ?? "(nil)" } ?? [:])")
+        }
+
+        let response: AlexaResponse
 
         switch alexaRequest.request.type {
         case "LaunchRequest":
             let greeting = Self.launchGreetings.randomElement() ?? Self.launchGreetings[0]
             let reprompt = Self.reprompts.randomElement() ?? Self.reprompts[0]
-            return alexaResponse(
+            log("    LaunchRequest -> greeting: \(greeting)")
+            response = alexaResponse(
                 text: greeting,
                 shouldEndSession: false,
                 sessionId: sessionId,
@@ -61,20 +84,25 @@ final class AlexaHandler: @unchecked Sendable {
             )
 
         case "IntentRequest":
-            return await handleIntent(alexaRequest)
+            response = await handleIntent(alexaRequest)
 
         case "SessionEndedRequest":
-            print("[Alexa] Session ended")
-            return alexaResponse(text: nil, shouldEndSession: true, sessionId: sessionId)
+            let reason = alexaRequest.request.reason ?? "(unknown)"
+            log("    SessionEndedRequest reason=\(reason)")
+            response = alexaResponse(text: nil, shouldEndSession: true, sessionId: sessionId)
 
         default:
-            return alexaResponse(
-                text: "I'm not sure how to help with that.",
+            log("    Unknown request type: \(alexaRequest.request.type)")
+            response = alexaResponse(
+                text: "I'm not sure how to help with that. Try asking me something.",
                 shouldEndSession: false,
                 sessionId: sessionId,
                 reprompt: Self.reprompts.randomElement() ?? Self.reprompts[0]
             )
         }
+
+        log("<<< RESPONSE shouldEndSession=\(response.response.shouldEndSession) hasReprompt=\(response.response.reprompt != nil) speech=\(response.response.outputSpeech?.ssml?.prefix(100) ?? response.response.outputSpeech?.text?.prefix(100) ?? "(none)")")
+        return response
     }
 
     // MARK: - Intent handling
@@ -83,17 +111,21 @@ final class AlexaHandler: @unchecked Sendable {
         let sessionId = alexaRequest.session.sessionId
 
         guard let intent = alexaRequest.request.intent else {
+            log("    No intent object in IntentRequest — reprompting")
             return repromptResponse("I didn't catch that. What would you like to know?", sessionId: sessionId)
         }
 
-        print("[Alexa] Intent: \(intent.name), query: \(alexaRequest.extractedQuery ?? "(none)")")
+        let query = alexaRequest.extractedQuery
+        log("    handleIntent: \(intent.name) query=\(query ?? "(none)")")
 
         switch intent.name {
         case "AMAZON.StopIntent", "AMAZON.CancelIntent":
             let goodbye = Self.goodbyes.randomElement() ?? Self.goodbyes[0]
+            log("    Stop/Cancel -> goodbye: \(goodbye)")
             return alexaResponse(text: goodbye, shouldEndSession: true, sessionId: sessionId)
 
         case "AMAZON.HelpIntent":
+            log("    Help intent")
             return alexaResponse(
                 text: "Just ask me anything. I can answer questions, have a chat, check the weather, and more. Go on.",
                 shouldEndSession: false,
@@ -102,30 +134,41 @@ final class AlexaHandler: @unchecked Sendable {
             )
 
         case "AMAZON.FallbackIntent":
-            if let query = alexaRequest.extractedQuery {
+            // FallbackIntent often has no slots — try to forward whatever we have
+            if let query {
+                log("    FallbackIntent WITH query -> forwarding: \(query)")
                 return await forwardToSam(query: query, sessionId: sessionId)
             }
+            // No slot data — Alexa couldn't parse anything. Ask user to rephrase but KEEP SESSION OPEN.
+            log("    FallbackIntent NO query -> reprompting (session stays open)")
             return repromptResponse("I didn't quite catch that. Try saying it a different way.", sessionId: sessionId)
 
         case "AskSamIntent":
-            guard let query = alexaRequest.extractedQuery else {
+            guard let query else {
+                log("    AskSamIntent but NO query slot -> reprompting")
                 return repromptResponse("I didn't catch that. What would you like to know?", sessionId: sessionId)
             }
+            log("    AskSamIntent -> forwarding: \(query)")
             return await forwardToSam(query: query, sessionId: sessionId)
 
         default:
-            if let query = alexaRequest.extractedQuery {
+            // Unknown intent — always try to forward to Sam
+            if let query {
+                log("    Unknown intent \(intent.name) WITH query -> forwarding: \(query)")
                 return await forwardToSam(query: query, sessionId: sessionId)
             }
+            log("    Unknown intent \(intent.name) NO query -> reprompting")
             return repromptResponse("I didn't understand. Try asking me directly.", sessionId: sessionId)
         }
     }
 
     private func forwardToSam(query: String, sessionId: String) async -> AlexaResponse {
         let reprompt = Self.reprompts.randomElement() ?? Self.reprompts[0]
+        let start = Date()
 
         do {
             let chatRequest = ChatAPIRequest(text: query, sessionId: sessionId)
+            log("    forwardToSam: sending to orchestrator...")
 
             // Race the LLM call against Alexa's ~8s timeout deadline
             let chatResponse = try await withThrowingTaskGroup(of: ChatAPIResponse.self) { group in
@@ -141,8 +184,10 @@ final class AlexaHandler: @unchecked Sendable {
                 return result
             }
 
+            let elapsed = Int(Date().timeIntervalSince(start) * 1000)
             let truncated = Self.truncateForAlexa(chatResponse.text)
-            print("[Alexa] Response (\(truncated.count) chars): \(truncated.prefix(80))...")
+            log("    forwardToSam: got response in \(elapsed)ms (\(chatResponse.text.count) chars -> \(truncated.count) truncated)")
+            log("    forwardToSam: text=\"\(truncated.prefix(200))\"")
 
             return alexaResponse(
                 text: truncated,
@@ -151,7 +196,8 @@ final class AlexaHandler: @unchecked Sendable {
                 reprompt: reprompt
             )
         } catch is AlexaTimeoutError {
-            print("[Alexa] Timeout — Sam took too long")
+            let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+            log("    forwardToSam: TIMEOUT after \(elapsed)ms")
             return alexaResponse(
                 text: "Hmm, give me a sec on that one. Ask me again?",
                 shouldEndSession: false,
@@ -159,7 +205,8 @@ final class AlexaHandler: @unchecked Sendable {
                 reprompt: reprompt
             )
         } catch {
-            print("[Alexa] Error: \(error)")
+            let elapsed = Int(Date().timeIntervalSince(start) * 1000)
+            log("    forwardToSam: ERROR after \(elapsed)ms: \(error)")
             return alexaResponse(
                 text: Self.errorMessage,
                 shouldEndSession: false,
@@ -200,9 +247,10 @@ final class AlexaHandler: @unchecked Sendable {
     ) -> AlexaResponse {
         let outputSpeech: AlexaOutputSpeech?
         if let text, !text.isEmpty {
+            let ssml = toSSML(text)
             outputSpeech = AlexaOutputSpeech(
                 type: "SSML",
-                ssml: toSSML(text),
+                ssml: ssml,
                 text: nil
             )
         } else {
@@ -251,7 +299,7 @@ final class AlexaHandler: @unchecked Sendable {
         escaped = escaped.replacingOccurrences(of: ". ", with: ". <break time=\"300ms\"/> ")
         escaped = escaped.replacingOccurrences(of: "! ", with: "! <break time=\"200ms\"/> ")
 
-        return "<speak><lang xml:lang=\"en-US\">\(escaped)</lang></speak>"
+        return "<speak><voice name=\"Joanna\">\(escaped)</voice></speak>"
     }
 }
 
